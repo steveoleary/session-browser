@@ -1,0 +1,5 @@
+{
+  "name": "conversation-first-overlooked-session",
+  "accepted_state": "baseline",
+  "verifier": "verify_case.py"
+}

@@ -1,0 +1,7 @@
+{"type":"user","message":{"role":"user","content":"Find the recent review-pattern session."},"cwd":"/fixture/retrieval-project","gitBranch":"main","timestamp":"2026-07-24T15:22:50.460Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I am searching for the source session."}]},"timestamp":"2026-07-24T15:23:00.000Z"}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-07-24T15:24:30.732Z","sessionId":"queued-command-fidelity-snapshot","content":"this session - claude:ed1ba1f0-72a3-497b-80cb-62fd1c1f22be"}
+{"type":"queue-operation","operation":"remove","timestamp":"2026-07-24T15:24:54.291Z","sessionId":"queued-command-fidelity-snapshot","content":"this session - claude:ed1ba1f0-72a3-497b-80cb-62fd1c1f22be"}
+{"type":"attachment","attachment":{"type":"queued_command","prompt":"this session - claude:ed1ba1f0-72a3-497b-80cb-62fd1c1f22be","commandMode":"prompt","origin":{"kind":"human"},"timestamp":"2026-07-24T15:24:30.732Z"},"timestamp":"2026-07-24T15:24:30.732Z"}
+{"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>fixture-task</task-id>\n<status>completed</status>\n</task-notification>","commandMode":"task-notification","timestamp":"2026-07-24T15:24:54.900Z"},"timestamp":"2026-07-24T15:24:54.900Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The user pointed me to the exact session; I will read it directly."}]},"timestamp":"2026-07-24T15:24:55.000Z"}

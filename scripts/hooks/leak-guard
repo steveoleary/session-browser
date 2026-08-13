@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+#
+# Refuse a commit that stages text this clone has been told not to publish.
+#
+# THE PATTERNS ARE NOT IN THIS REPOSITORY, AND THAT IS THE WHOLE DESIGN. A guard
+# that shipped its own blocklist would publish the very strings it exists to keep
+# out — the list is the leak. So the patterns live in .git/config, which is never
+# pushed, one per clone:
+#
+#     git config --add hooks.leakpattern 'some-internal-name'
+#
+# Read them back with `git config --get-all hooks.leakpattern`. scripts/
+# install-hooks.sh seeds them interactively. A clone with none configured is a
+# clone with nothing to hide, which is the correct default for a public repo and
+# for anyone else who clones it.
+#
+# What is checked, and only within the files this commit actually touches:
+#   * file CONTENTS, via git grep against the index, scoped to the staged paths.
+#     The whole staged file is read rather than just the added lines, so a file
+#     that still carries the string cannot be committed even when this diff did
+#     not introduce it — but an untouched file elsewhere is not this hook's
+#     business. Scoping matters: an unscoped grep over the index means one
+#     offending tracked file blocks every unrelated commit in the repo, which
+#     teaches you to reach for --no-verify by reflex and buys nothing.
+#     Whole-repo assurance belongs in the preflight script, not here.
+#   * file PATHS, since a filename can carry a name just as well as a line can
+#
+# Optionally also checks the author identity, when this clone sets:
+#
+#     git config hooks.expectedemail 'you@example.com'
+#
+# which catches the fresh-clone-on-the-wrong-machine case that no directory
+# convention covers. Unset by default, so it is inert for everyone else.
+#
+# Escape hatch is git's own: `git commit --no-verify`.
+
+set -uo pipefail
+
+# Matches listed per pattern before the rest are summarised as a count.
+max_report="${LEAK_GUARD_MAX_REPORT:-6}"
+
+fail=0
+report=""
+
+# --- identity -----------------------------------------------------------------
+expected="$(git config hooks.expectedemail || true)"
+if [ -n "$expected" ]; then
+  actual="$(git config user.email || true)"
+  if [ "$actual" != "$expected" ]; then
+    report="${report}
+  author is '${actual:-<unset>}', expected '${expected}'"
+    fail=1
+  fi
+fi
+
+# --- patterns -----------------------------------------------------------------
+# Read into a plain loop rather than mapfile: bash 3.2 is what /usr/bin/env bash
+# resolves to on macOS and mapfile does not exist there.
+patterns=()
+while IFS= read -r line; do
+  [ -n "$line" ] && patterns+=("$line")
+done < <(git config --get-all hooks.leakpattern 2>/dev/null || true)
+
+if [ ${#patterns[@]} -eq 0 ]; then
+  [ "$fail" -eq 0 ] && exit 0
+else
+  # Nothing staged means nothing to check; --cached against HEAD covers the
+  # first commit too, where HEAD does not yet exist.
+  staged="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)"
+
+  if [ -n "$staged" ]; then
+    # Pathspec-scope the grep to exactly the staged files. Built as an array so
+    # paths with spaces survive.
+    paths=()
+    while IFS= read -r p; do
+      [ -n "$p" ] && paths+=("$p")
+    done <<< "$staged"
+
+    for pat in "${patterns[@]}"; do
+      # -I skips binary, -i case-insensitive, -n gives the line, --cached reads
+      # the index so it sees exactly what is about to be committed.
+      hits="$(git grep -I -i -n --cached -e "$pat" -- "${paths[@]}" 2>/dev/null || true)"
+      if [ -n "$hits" ]; then
+        # A captured log can match on hundreds of lines. Listing them all buries
+        # the message that matters, so show a few and count the rest.
+        n_hits="$(printf '%s\n' "$hits" | grep -c . || true)"
+        shown=0
+        while IFS= read -r hit; do
+          [ -n "$hit" ] || continue
+          shown=$((shown + 1))
+          if [ "$shown" -le "$max_report" ]; then
+            report="${report}
+  ${hit%%:*}:$(printf '%s' "$hit" | cut -d: -f2)  contains '${pat}'"
+          fi
+          fail=1
+        done <<< "$hits"
+        if [ "${n_hits:-0}" -gt "$max_report" ]; then
+          report="${report}
+  … and $((n_hits - max_report)) more match(es) for '${pat}'"
+        fi
+      fi
+
+      # A path can carry the name just as easily as a line can.
+      while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        case "$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')" in
+          *"$(printf '%s' "$pat" | tr '[:upper:]' '[:lower:]')"*)
+            report="${report}
+  ${path}  (filename) contains '${pat}'"
+            fail=1
+            ;;
+        esac
+      done <<< "$staged"
+    done
+  fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+  printf 'leak-guard: refusing this commit\n%s\n\n' "$report" >&2
+  printf 'Patterns are per-clone in .git/config (hooks.leakpattern) and are not\n' >&2
+  printf 'tracked. To commit anyway: git commit --no-verify\n' >&2
+  exit 1
+fi
+
+exit 0
