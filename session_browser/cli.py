@@ -5,6 +5,10 @@ Output contracts (stable shapes the consuming agent can rely on):
   updated_at span; null when a timestamp is missing) — with an entry
   count, the triage signal that catches real sessions whose summary
   looks like noise (summaries are often just the first user message).
+- "updated_at" is the one name for last activity, on session rows and on
+  stats' provider rows alike. Two names for it meant reading the wrong
+  one returned null rather than raising, which is unfalsifiable at the
+  call site: "no timestamp recorded" and "wrong key" look identical.
 - list:       {"sessions": [session_dict + "total_entries", ...],
                "warnings?": [...]}
               (total_entries is null for an unreadable transcript; with
@@ -50,13 +54,16 @@ Output contracts (stable shapes the consuming agent can rely on):
 - search --output-dir (json): {"output_dir": "<dir>", "manifest": "<path>",
                                 "files_written": N, "results": N}
 - search --output-dir (text): "wrote N file(s) to <dir> (manifest: <path>)"
-- stats (json):  {"total": N, "filters": {...},
-                  "providers": [{"provider", "count", "percent",
-                                 "last_activity"}, ...],
+- stats (json):  {"total": N, "warnings?": [...],
                   "activity": {"days", "start", "end", "counts": [N, ...]},
+                  "providers": [{"provider", "count", "percent",
+                                 "updated_at"}, ...],
                   "top_cwds": [{"cwd", "count"}, ...],
-                  "oldest", "newest", "warnings?": [...]}
-                 (counts is one bucket per local calendar day, oldest→newest)
+                  "oldest", "newest", "filters": {...}}
+                 (counts is one bucket per local calendar day, oldest→newest:
+                  bucket i is activity.start + i days. It renders on a single
+                  line, and the request echo in "filters" comes last, so the
+                  blocks that answer a question survive a `| head -N`)
 - stats (text):  human dashboard (provider bars, activity sparkline,
                   top working directories)
 - output confirmation (json): {"written": "<path>", "id": "prov:id",
@@ -1522,6 +1529,23 @@ def _shorten_home(path: str) -> str:
     return path
 
 
+_INT_ARRAY_RE = re.compile(r"\[\n\s+-?\d+(?:,\n\s+-?\d+)*\n\s*\]")
+
+
+def _compact_int_arrays(text: str) -> str:
+    """Collapse pretty-printed integer arrays onto one line.
+
+    json.dumps has no per-value formatting, so `activity.counts` printed one
+    integer per line: a 45-day window was 45 lines, and `| head -N` — which
+    is close to universal agent behaviour on a JSON tool — landed inside the
+    array, where the fragment is silently misleading rather than obviously
+    cut. Rewriting the rendered text is safe: json escapes newlines inside
+    strings, so a literal newline is always indentation and this pattern
+    cannot match data.
+    """
+    return _INT_ARRAY_RE.sub(lambda m: re.sub(r"\s+", "", m.group(0)), text)
+
+
 def cmd_stats(args) -> int:
     if args.days <= 0:
         raise CliError("--days must be > 0", code="invalid_filter")
@@ -1562,31 +1586,36 @@ def cmd_stats(args) -> int:
             "provider": p,
             "count": n,
             "percent": round(100 * n / total) if total else 0,
-            "last_activity": (
+            # Deliberately updated_at, the name session rows use, and not a
+            # second spelling of it: one concept had two names across this
+            # CLI, and reading the wrong one returned None instead of
+            # raising, so a sweep looked like it had worked.
+            "updated_at": (
                 provider_last[p].isoformat() if p in provider_last else None
             ),
         }
         for p, n in sorted(provider_counts.items(), key=lambda kv: (-kv[1], kv[0]))
     ]
     top_cwds = sorted(cwd_counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    payload: dict = {
-        "total": total,
-        "filters": _filters_dict(args),
-        "providers": providers,
-        "activity": {
-            "days": args.days,
-            "start": start.isoformat(),
-            "end": today.isoformat(),
-            "counts": counts,
-        },
-        "top_cwds": [{"cwd": c, "count": n} for c, n in top_cwds[: args.top]],
-        "oldest": min(times).isoformat() if times else None,
-        "newest": max(times).isoformat() if times else None,
-    }
+    # Key order is part of the contract: agents pipe JSON through `head`, so
+    # the blocks that answer a question come first and the request echo goes
+    # last. See _compact_int_arrays for the other half of that.
+    payload: dict = {"total": total}
     if warnings:
         payload["warnings"] = warnings
+    payload["activity"] = {
+        "days": args.days,
+        "start": start.isoformat(),
+        "end": today.isoformat(),
+        "counts": counts,
+    }
+    payload["providers"] = providers
+    payload["top_cwds"] = [{"cwd": c, "count": n} for c, n in top_cwds[: args.top]]
+    payload["oldest"] = min(times).isoformat() if times else None
+    payload["newest"] = max(times).isoformat() if times else None
+    payload["filters"] = _filters_dict(args)
     if args.format == "json":
-        print(json.dumps(payload, indent=2))
+        print(_compact_int_arrays(json.dumps(payload, indent=2)))
     else:
         _print_stats_text(payload, distinct_cwds=len(cwd_counts))
         _report_warnings_stderr(warnings)
@@ -1610,7 +1639,7 @@ def _print_stats_text(payload: dict, *, distinct_cwds: int) -> None:
     name_w = max(len(p["provider"]) for p in payload["providers"])
     for p in payload["providers"]:
         bar = "█" * max(1, round(_BAR_WIDTH * p["count"] / peak))
-        last = (p["last_activity"] or "")[:10] or "-"
+        last = (p["updated_at"] or "")[:10] or "-"
         pct = "<1" if p["percent"] == 0 else str(p["percent"])
         print(
             f"  {p['provider']:<{name_w}}  {bar:<{_BAR_WIDTH}}  "
