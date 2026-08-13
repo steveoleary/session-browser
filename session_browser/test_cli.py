@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -2046,13 +2047,13 @@ class TestRelativeDates:
         assert _relative_delta("junk") is None
 
     def test_parse_date_relative_resolves_to_now_minus_delta(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from session_browser.cli import _parse_date
 
-        before = datetime.now(timezone.utc) - timedelta(hours=1)
+        before = datetime.now(UTC) - timedelta(hours=1)
         got = _parse_date("-1h", "--until")
-        after = datetime.now(timezone.utc) - timedelta(hours=1)
+        after = datetime.now(UTC) - timedelta(hours=1)
         assert before <= got <= after
 
     def test_relative_until_includes_older_sessions(self, cli, monkeypatch):
@@ -2089,9 +2090,9 @@ class TestStats:
     def recent_sessions(self):
         """Sessions with activity relative to *now* so the --days window is
         deterministic regardless of when the tests run."""
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         def iso(days_ago):
             return (now - timedelta(days=days_ago)).isoformat()

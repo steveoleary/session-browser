@@ -29,6 +29,8 @@ except ImportError:
     print("textual is required: pip install 'textual>=0.80.0'")
     sys.exit(1)
 
+from datetime import UTC
+
 from . import multiplexer
 from .discovery import Session, discover_all
 from .resume import (
@@ -431,7 +433,7 @@ def _relative_time(iso_str: str) -> str:
     """Human-friendly relative time like '2h ago' or '3d ago'."""
     if not iso_str:
         return "—"
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     try:
         # Handle multiple ISO formats
@@ -440,8 +442,8 @@ def _relative_time(iso_str: str) -> str:
             return iso_str[:10]
         dt = datetime.fromisoformat(ts)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
+        now = datetime.now(UTC)
         delta = now - dt
         seconds = int(delta.total_seconds())
         if seconds < 60:

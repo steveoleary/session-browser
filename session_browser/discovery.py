@@ -8,7 +8,7 @@ import sqlite3
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -227,21 +227,19 @@ def _epoch_ms_to_iso(ts) -> str:
     """Convert epoch-millisecond integer to UTC ISO string."""
     if not ts:
         return ""
-    from datetime import timezone
 
     try:
-        return datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(int(ts) / 1000, tz=UTC).isoformat()
     except (ValueError, OSError, OverflowError):
         return ""
 
 
 def _file_mtime_iso(path: Path) -> str:
     """Return file modification time as UTC ISO string."""
-    from datetime import timezone
 
     try:
         ts = path.stat().st_mtime
-        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(ts, tz=UTC).isoformat()
     except OSError:
         return ""
 

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "session-browser"
 version = "0.1.0"
 description = "Lightweight agent session browser TUI"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
   "rich>=15.0.0",
   "textual>=0.80.0",
@@ -34,7 +34,7 @@ python_files = ["tests.py", "test_*.py"]
 pythonpath = ["."]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 extend-exclude = ["build", "prototypes"]
 # Ruff's default. Measured against this codebase's own ~79-column habit: 79
 # produced *more* churn, not less, because more lines breached it and got

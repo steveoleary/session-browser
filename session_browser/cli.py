@@ -78,7 +78,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .discovery import ALL_SCANNERS, Session, discover_all
@@ -391,16 +391,16 @@ def _relative_delta(value: str) -> timedelta | None:
 def _parse_date(value: str, flag: str) -> datetime:
     delta = _relative_delta(value)
     if delta is not None:
-        return datetime.now(timezone.utc) - delta
+        return datetime.now(UTC) - delta
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value)
     except ValueError:
         raise CliError(
             f"invalid {flag} date: {value!r} "
             f"(expected ISO 8601 or relative like -30m/-2h/-1d)",
             code="invalid_date",
         ) from None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 def _session_time(s: Session) -> datetime | None:
@@ -408,10 +408,10 @@ def _session_time(s: Session) -> datetime | None:
     if not raw:
         return None
     try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 _DEFAULT_WINDOW = "1d"
@@ -1219,7 +1219,7 @@ def cmd_search(args) -> int:
         # Stable: equal match counts keep their recency order.
         matched.sort(key=lambda r: r.match_count, reverse=True)
     elif args.sort == "oldest":
-        _floor = datetime.min.replace(tzinfo=timezone.utc)
+        _floor = datetime.min.replace(tzinfo=UTC)
         matched.sort(key=lambda r: _session_time(r.session) or _floor)
     if args.limit is not None and len(matched) > args.limit >= 0:
         warnings.append(_truncation_warning(args, matched[args.limit :]))
@@ -1282,7 +1282,7 @@ def _write_search_artifacts(
         "query": _query_value(args),
         "mode": args.mode,
         "filters": _filters_dict(args),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "results": items,
     }
     if skipped:
