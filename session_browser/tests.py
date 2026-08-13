@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,8 +16,10 @@ import pytest
 from session_browser import herdr, multiplexer, tmux
 from session_browser.discovery import (
     Session,
+    _epoch_ms_to_iso,
     _file_mtime_iso,
     _last_activity_iso,
+    _scan_codex_files,
     discover_all,
     scan_claude,
     scan_codex,
@@ -244,6 +247,438 @@ class TestScanCodex:
             sessions = scan_codex()
 
         assert sessions[0].updated_at == "2026-06-29T15:28:00Z"
+
+
+class TestScanCodexDb:
+    """The SQLite fast path: same sessions, one query instead of file opens."""
+
+    def _write_db(self, home: Path, rows: list[dict]) -> None:
+        db = home / ".codex" / "state_5.sqlite"
+        conn = sqlite3.connect(str(db))
+        conn.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, "
+            "cwd TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', "
+            "git_branch TEXT, first_user_message TEXT NOT NULL DEFAULT '', "
+            "created_at_ms INTEGER, updated_at_ms INTEGER, "
+            "archived INTEGER NOT NULL DEFAULT 0)"
+        )
+        for row in rows:
+            conn.execute(
+                "INSERT INTO threads (id, rollout_path, cwd, git_branch, "
+                "first_user_message, created_at_ms, updated_at_ms, archived) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    row["id"],
+                    row["rollout_path"],
+                    row.get("cwd", ""),
+                    row.get("branch"),
+                    row.get("summary", ""),
+                    row.get("created_ms"),
+                    row.get("updated_ms"),
+                    row.get("archived", 0),
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+    def _write_rollout(
+        self, sessions_dir: Path, sid: str, *, summary: str, day: str
+    ) -> Path:
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        f = sessions_dir / f"rollout-2026-04-{day}T13-00-00-{sid}.jsonl"
+        f.write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "timestamp": "2026-04-10T13:00:00Z",
+                    "payload": {"id": sid, "cwd": "/p", "git": {"branch": "main"}},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-04-10T13:00:05Z",
+                    "payload": {"type": "user_message", "message": summary},
+                }
+            )
+            + "\n"
+        )
+        return f
+
+    def test_sessions_come_from_db(self, tmp_path):
+        """With an index present, discovery reads threads, not the rollouts."""
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        f = self._write_rollout(sessions_dir, "cx-1", summary="hello world", day="10")
+        self._write_db(
+            tmp_path,
+            [
+                {
+                    "id": "cx-1",
+                    "rollout_path": str(f),
+                    "cwd": "/p",
+                    "branch": "main",
+                    "summary": "hello world",
+                    "created_ms": 1775826000000,
+                    "updated_ms": 1775826005000,
+                }
+            ],
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert len(sessions) == 1
+        s = sessions[0]
+        assert s.id == "cx-1"
+        assert s.summary == "hello world"
+        assert s.cwd == "/p"
+        assert s.branch == "main"
+        assert s.created_at == "2026-04-10T13:00:00.000Z"
+        assert s.updated_at == "2026-04-10T13:00:05.000Z"
+        assert s.content_path == str(f)
+
+    def test_summary_matches_file_scan_transformation(self, tmp_path):
+        """The index stores the untrimmed message; the scan applies the same
+        truncate-and-collapse-newlines rule the file scan uses."""
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        f = self._write_rollout(sessions_dir, "cx-1", summary="irrelevant", day="10")
+        self._write_db(
+            tmp_path,
+            [
+                {
+                    "id": "cx-1",
+                    "rollout_path": str(f),
+                    "summary": "line one\nline two\n" + ("x" * 200),
+                    "created_ms": 1775826000000,
+                    "updated_ms": 1775826005000,
+                }
+            ],
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert sessions[0].summary == "line one line two " + "x" * 102
+
+    def test_falls_back_to_files_when_index_missing(self, tmp_path):
+        """No state_*.sqlite means the file scan runs unchanged."""
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        self._write_rollout(sessions_dir, "cx-1", summary="hello", day="10")
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert len(sessions) == 1
+        assert sessions[0].id == "cx-1"
+        assert sessions[0].summary == "hello"
+
+    def test_falls_back_when_index_lags_a_just_written_rollout(self, tmp_path):
+        """A rollout file with no matching row yet must not be invisible."""
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        self._write_rollout(sessions_dir, "cx-1", summary="hello", day="10")
+        self._write_rollout(sessions_dir, "cx-2", summary="newest", day="11")
+        self._write_db(
+            tmp_path,
+            [
+                {
+                    "id": "cx-1",
+                    "rollout_path": str(
+                        sessions_dir / "rollout-2026-04-10T13-00-00-cx-1.jsonl"
+                    ),
+                    "summary": "hello",
+                    "created_ms": 1775826000000,
+                    "updated_ms": 1775826005000,
+                }
+            ],
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert {s.id for s in sessions} == {"cx-1", "cx-2"}
+
+    def test_phantom_row_is_dropped_without_fallback(self, tmp_path):
+        """A row whose rollout file is gone must not invent a session -- and
+        must not cost the fast path: coverage is one-directional, so a
+        phantom cannot hide a real session nor turn discovery slow."""
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        f = self._write_rollout(sessions_dir, "cx-1", summary="hello", day="10")
+        self._write_db(
+            tmp_path,
+            [
+                {
+                    "id": "cx-1",
+                    "rollout_path": str(f),
+                    "summary": "from the index",
+                },
+                {
+                    "id": "cx-gone",
+                    "rollout_path": str(
+                        sessions_dir / "rollout-2026-04-10T13-00-00-cx-gone.jsonl"
+                    ),
+                    "summary": "deleted",
+                },
+            ],
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert [s.id for s in sessions] == ["cx-1"]
+        # The DB summary proves the fast path ran despite the phantom.
+        assert sessions[0].summary == "from the index"
+
+    def test_falls_back_when_db_unreadable(self, tmp_path):
+        """A locked/corrupt index degrades to the file scan, not to zero."""
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        self._write_rollout(sessions_dir, "cx-1", summary="hello", day="10")
+        (tmp_path / ".codex" / "state_5.sqlite").write_text("not a database")
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert {s.id for s in sessions} == {"cx-1"}
+
+    def test_picks_highest_state_version(self, tmp_path):
+        """state_10 beats state_9: the two-digit rollover is exactly the case
+        a naive lexical max would get wrong, so this test pins the version
+        parser, not string ordering."""
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        f = self._write_rollout(sessions_dir, "cx-1", summary="hello", day="10")
+        self._write_db(
+            tmp_path,
+            [
+                {
+                    "id": "cx-1",
+                    "rollout_path": str(f),
+                    "summary": "from state_9",
+                    "created_ms": 1775826000000,
+                    "updated_ms": 1775826005000,
+                }
+            ],
+        )
+        (tmp_path / ".codex" / "state_5.sqlite").rename(
+            tmp_path / ".codex" / "state_9.sqlite"
+        )
+        db10 = tmp_path / ".codex" / "state_10.sqlite"
+        conn = sqlite3.connect(str(db10))
+        conn.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, "
+            "cwd TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', "
+            "git_branch TEXT, first_user_message TEXT NOT NULL DEFAULT '', "
+            "created_at_ms INTEGER, updated_at_ms INTEGER, "
+            "archived INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, cwd, git_branch, "
+            "first_user_message, created_at_ms, updated_at_ms, archived) "
+            "VALUES (?, ?, '', NULL, ?, ?, ?, 0)",
+            ("cx-1", str(f), "from state_10", 1775826000000, 1775826005000),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert sessions[0].summary == "from state_10"
+
+    def test_db_truth_wins_for_new_schema_sessions(self, tmp_path):
+        """Codex's current schema emits no user_message events. The file scan
+        then reports a blank summary and creation-time activity, while the
+        index holds the human's message and true last activity -- the DB path
+        must surface the truthful values rather than reproduce the file
+        scan's.
+        """
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        f = sessions_dir / "rollout-2026-04-10T13-00-00-cx-1.jsonl"
+        f.parent.mkdir(parents=True)
+        f.write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "timestamp": "2026-04-10T13:00:00Z",
+                    "payload": {"id": "cx-1", "cwd": "/p", "git": {"branch": "main"}},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-04-10T14:00:00Z",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "done"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+        self._write_db(
+            tmp_path,
+            [
+                {
+                    "id": "cx-1",
+                    "rollout_path": str(f),
+                    "summary": "fix the login bug",
+                    "created_ms": 1775826000000,
+                    "updated_ms": 1775829600000,
+                }
+            ],
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        s = sessions[0]
+        assert s.summary == "fix the login bug"
+        assert s.updated_at == "2026-04-10T14:00:00.000Z"
+
+    def test_archived_rows_are_excluded(self, tmp_path):
+        """An archived thread whose rollout file is still in the tree must be
+        excluded -- and the exclusion must not cost the fast path (the file
+        scan cannot see `archived`, so it would have returned the session).
+        """
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        f_live = self._write_rollout(sessions_dir, "cx-1", summary="live", day="10")
+        f_arch = self._write_rollout(sessions_dir, "cx-arch", summary="old", day="11")
+        self._write_db(
+            tmp_path,
+            [
+                {
+                    "id": "cx-1",
+                    "rollout_path": str(f_live),
+                    "summary": "live from db",
+                    "created_ms": 1775826000000,
+                    "updated_ms": 1775826005000,
+                },
+                {
+                    "id": "cx-arch",
+                    "rollout_path": str(f_arch),
+                    "summary": "old",
+                    "created_ms": 1775826000000,
+                    "updated_ms": 1775826005000,
+                    "archived": 1,
+                },
+            ],
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        # Both facts at once: the archived session is gone AND the live
+        # summary came from the DB, proving the fast path was taken.
+        assert [s.id for s in sessions] == ["cx-1"]
+        assert sessions[0].summary == "live from db"
+
+    def test_fallback_warns_once(self, tmp_path, caplog):
+        """The one user-visible signal that the fast path turned off must
+        actually be emitted -- and only once per message per process."""
+        from session_browser import discovery
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(discovery, "_warned_codex_fallbacks", set())
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        self._write_rollout(sessions_dir, "cx-1", summary="hello", day="10")
+        self._write_db(tmp_path, [])
+
+        with (
+            caplog.at_level("WARNING"),
+            patch("session_browser.discovery.Path.home", return_value=tmp_path),
+        ):
+            assert {s.id for s in scan_codex()} == {"cx-1"}
+            assert {s.id for s in scan_codex()} == {"cx-1"}
+
+        misses = [r for r in caplog.records if "codex index is missing" in r.message]
+        assert len(misses) == 1
+        monkeypatch.undo()
+
+    def test_db_and_file_paths_agree_on_stable_fields(self, tmp_path):
+        """The two paths must converge on the fields where agreement is
+        claimed: id, cwd, branch, created_at, updated_at, summary, path. A
+        fixture carrying Codex's old schema (with a real user_message turn)
+        exercises both and asserts equality field by field.
+        """
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        sessions_dir.mkdir(parents=True)
+        f = sessions_dir / "rollout-2026-04-10T13-00-00-cx-1.jsonl"
+        f.write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "timestamp": "2026-04-10T13:00:00.000Z",
+                    "payload": {
+                        "id": "cx-1",
+                        "cwd": "/p",
+                        "git": {"branch": "main"},
+                        "timestamp": "2026-04-10T13:00:00.000Z",
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-04-10T13:00:05.000Z",
+                    "payload": {"type": "user_message", "message": "hello there"},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-04-10T13:05:00.000Z",
+                    "payload": {"type": "agent_message", "message": "done"},
+                }
+            )
+            + "\n"
+        )
+        self._write_db(
+            tmp_path,
+            [
+                {
+                    "id": "cx-1",
+                    "rollout_path": str(f),
+                    "cwd": "/p",
+                    "branch": "main",
+                    "summary": "hello there",
+                    "created_ms": 1775826000000,
+                    "updated_ms": 1775826300000,
+                }
+            ],
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            from_db = scan_codex()
+            from_files = _scan_codex_files()
+
+        assert len(from_db) == len(from_files) == 1
+        db_s, file_s = from_db[0], from_files[0]
+        assert db_s.id == file_s.id == "cx-1"
+        assert db_s.cwd == file_s.cwd == "/p"
+        assert db_s.branch == file_s.branch == "main"
+        assert db_s.created_at == file_s.created_at == "2026-04-10T13:00:00.000Z"
+        assert db_s.updated_at == file_s.updated_at == "2026-04-10T13:05:00.000Z"
+        assert db_s.summary == file_s.summary == "hello there"
+        assert db_s.content_path == file_s.content_path == str(f)
+
+
+class TestEpochMsToIso:
+    def test_zulu_shape_matches_rollout_timestamps(self):
+        assert _epoch_ms_to_iso(1775826000000, zulu=True) == "2026-04-10T13:00:00.000Z"
+        assert _epoch_ms_to_iso(1775826000500, zulu=True) == "2026-04-10T13:00:00.500Z"
+
+    def test_default_shape_is_isoformat(self):
+        assert _epoch_ms_to_iso(1775826000000) == "2026-04-10T13:00:00+00:00"
+
+    def test_invalid_inputs_degrade_to_empty(self):
+        assert _epoch_ms_to_iso(None) == ""
+        assert _epoch_ms_to_iso(0) == ""
+        assert _epoch_ms_to_iso("") == ""
+        assert _epoch_ms_to_iso("not-a-number") == ""
+        assert _epoch_ms_to_iso(10**20) == ""
 
 
 class TestLastActivity:
