@@ -46,6 +46,11 @@ medium terminals use a balanced two-pane layout; narrow terminals switch to a
 full-width sessions/transcript flow. Very short windows also collapse
 nonessential chrome. Press `z` to focus the active pane at any larger size.
 
+![Session Browser wide two-pane view](docs/screenshots/01-list-160x45.svg)
+
+*Wide two-pane browsing, with a selected transcript and provider-coloured
+session list.*
+
 ## CLI (for agents and scripts)
 
 Running with no arguments opens the TUI. Subcommands provide non-interactive
@@ -90,6 +95,49 @@ and reported in `warnings`); pass `--include-current` to keep it.
 `--overwrite`; `search --output-dir` writes a `manifest.json` describing the
 query, results, match counts, and any parse warnings. Errors exit nonzero
 with a JSON error object on stderr when `--format json` is active.
+
+## Demo corpus
+
+The TUI and CLI demos poorly against a real session history — real
+transcripts are messy, private, and sparse. For demos and screenshots, a
+generator writes a compact but rich fake history (Claude, Codex, and
+OpenCode sessions with varied dates, searchable content, one long
+transcript, and scratchpad noise):
+
+```bash
+python -m session_browser.demo              # writes ./demo-home (15 sessions)
+```
+
+Everything then runs against it unchanged by pointing HOME at it:
+
+```bash
+HOME=$PWD/demo-home session-browser                        # the TUI
+HOME=$PWD/demo-home session-browser list | head            # 15 sessions
+HOME=$PWD/demo-home session-browser search "sqlite"
+HOME=$PWD/demo-home session-browser list --exclude-cwd scratchpad
+```
+
+Timestamps are anchored to the generation time, so the corpus always looks
+recent. Regenerate with `--force`; choose another directory with `--home`.
+Content is invented: no real session text ever appears in the fake corpus.
+
+The README screenshots are generated from the same corpus with Textual's
+fixed-size headless driver:
+
+```bash
+python scripts/capture_demo.py
+python scripts/capture_demo.py --check   # verify states without writing files
+```
+
+![Global transcript search](docs/screenshots/02-search-sqlite-120x40.svg)
+
+*Global search filters the history and highlights the matching transcript
+entry.*
+
+![Focused transcript search](docs/screenshots/03-detail-focus-wal-120x40.svg)
+
+*`z` focus mode gives the transcript the full width for in-session match
+navigation.*
 
 ## Keybindings
 

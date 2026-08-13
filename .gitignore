@@ -11,7 +11,9 @@ build/
 dist/
 
 # Local tooling state
-#
+
+# Demo corpus generator output (python -m session_browser.demo)
+demo-home/
 # The whole tracker is deliberately untracked here. Its issues carry working
 # notes that are not part of the published project, and the tracker syncs across
 # machines through its own data remote rather than through this repository —
