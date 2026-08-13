@@ -2131,8 +2131,29 @@ class TestStats:
             ("opencode", 1),
         ]
         assert data["providers"][0]["percent"] == 50
-        assert data["providers"][0]["last_activity"] is not None
+        assert data["providers"][0]["updated_at"] is not None
         assert data["oldest"] < data["newest"]
+
+    def test_last_activity_is_named_updated_at_everywhere(self, stats_cli):
+        """stats provider rows once called this last_activity while list
+        session rows called it updated_at. Reading one name off the other's
+        rows returned None rather than raising, so a sweep printed '?' for
+        every date and looked like it had worked."""
+        _, out, _ = stats_cli("stats", "--format", "json")
+        assert "last_activity" not in out
+        assert all(p["updated_at"] for p in json.loads(out)["providers"])
+
+    def test_activity_survives_a_piped_head(self, stats_cli):
+        """`| head -N` on a JSON tool is near-universal agent behaviour. A
+        90-day window used to put activity below 12 lines of mostly-null
+        filters and then spend 90 lines on counts, so head -60 returned a
+        truncated fragment of the array instead of the answer."""
+        _, out, _ = stats_cli("stats", "--days", "90", "--format", "json")
+        lines = out.splitlines()
+        assert len(json.loads(out)["activity"]["counts"]) == 90
+        # All 90 buckets on one line, so the whole block clears a head -20.
+        assert [i for i, ln in enumerate(lines) if '"counts"' in ln] == [6]
+        assert lines.index('  "filters": {') > lines.index('  "activity": {')
 
     def test_activity_buckets_by_day(self, stats_cli):
         _, out, _ = stats_cli("stats", "--days", "7", "--format", "json")

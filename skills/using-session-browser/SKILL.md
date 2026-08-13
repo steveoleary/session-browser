@@ -24,8 +24,12 @@ sessions. Core rule: narrow before reading; large transcripts go to files.
    metadata can be empty. To orient in an unfamiliar history — which
    providers and directories hold the sessions, how recent they are — run
    `session-browser stats --format json` (shared filters apply, e.g.
-   `--here`); it returns provider counts with `last_activity`, per-day
+   `--here`); it returns provider counts with `updated_at` — the same name
+   last activity carries on every `list`/`search`/`get` session row — per-day
    activity buckets, and `top_cwds` values usable directly with `--cwd`.
+   `activity.counts` is one bucket per local calendar day on a single line,
+   bucket *i* being `activity.start` + *i* days, and the echo of your own
+   filters comes last, so `stats` output stays readable through a `| head`.
    Never dismiss a session as noise from its `summary` text alone — the
    summary is often just the first user message, so a bare `/model` or
    `/clear` label can hide hours of real work. Every `list` result carries
