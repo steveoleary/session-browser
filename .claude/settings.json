@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/test-transcript-on-edit.sh\"",
+            "statusMessage": "Checking transcript tests",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/ruff-on-edit.sh\"",
+            "statusMessage": "Linting",
+            "timeout": 20,
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "jq -r '.tool_input.file_path // empty' | grep -qE 'docs/perf_budgets\\.json$' && cat \"$CLAUDE_PROJECT_DIR/.claude/hooks/perf-budget-write-notice.json\" || true",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|NotebookEdit"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/check-editable-install.sh\"",
+            "timeout": 15,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

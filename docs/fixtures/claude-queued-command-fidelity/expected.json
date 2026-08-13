@@ -1,0 +1,12 @@
+{
+  "name": "claude-queued-command-fidelity",
+  "session": "claude:queued-command-fidelity-snapshot",
+  "queued_prompt": "this session - claude:ed1ba1f0-72a3-497b-80cb-62fd1c1f22be",
+  "machine_notification_marker": "<task-notification>",
+  "baseline": {
+    "expected_occurrences_in_user_entries": 0
+  },
+  "candidate": {
+    "expected_occurrences_in_user_entries": 1
+  }
+}

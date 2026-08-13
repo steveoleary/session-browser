@@ -1,0 +1,5 @@
+{
+  "name": "claude-queued-command-fidelity",
+  "accepted_state": "candidate",
+  "verifier": "verify_case.py"
+}

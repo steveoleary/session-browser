@@ -1,0 +1,44 @@
+{
+  "name": "conversation-first-overlooked-session",
+  "source_incident": {
+    "retrieval_session": "claude:8bd06846-5111-47b0-848b-7e28a52fee96",
+    "desired_session": "claude:ed1ba1f0-72a3-497b-80cb-62fd1c1f22be",
+    "false_lead_session": "claude:47337291-dbc4-4699-a771-8c521d361953"
+  },
+  "query": [
+    "codex",
+    "code review from codex",
+    "request a code review",
+    "codex-plugin-cc"
+  ],
+  "baseline": {
+    "ordered_ids": [
+      "claude:47337291-dbc4-4699-a771-8c521d361953",
+      "claude:ed1ba1f0-72a3-497b-80cb-62fd1c1f22be"
+    ],
+    "false_lead_roles": [
+      "tool"
+    ],
+    "desired_required_roles": [
+      "user",
+      "assistant"
+    ]
+  },
+  "candidate": {
+    "sort": "evidence",
+    "ordered_ids": [
+      "claude:ed1ba1f0-72a3-497b-80cb-62fd1c1f22be",
+      "claude:47337291-dbc4-4699-a771-8c521d361953"
+    ],
+    "evidence": {
+      "claude:ed1ba1f0-72a3-497b-80cb-62fd1c1f22be": {
+        "tier": "conversation",
+        "source": "user"
+      },
+      "claude:47337291-dbc4-4699-a771-8c521d361953": {
+        "tier": "tool/system-only",
+        "source": "tool"
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+# Local Python/runtime artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local JavaScript tooling installed under the OpenCode workspace
+.opencode/node_modules/
+
+# Generated or machine-local output
+build/
+dist/
+*.log
+session-browser-output*.md
+repomix.config.json
+.repomixignore

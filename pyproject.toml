@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "session-browser"
+version = "0.1.0"
+description = "Lightweight agent session browser TUI"
+requires-python = ">=3.10"
+dependencies = [
+  "rich>=15.0.0",
+  "textual>=0.80.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "httpx>=0.27.0",
+  "pytest>=8.2",
+  "pytest-asyncio>=1.3",
+]
+
+[project.scripts]
+session-browser = "session_browser.app:main"
+
+[tool.setuptools]
+packages = ["session_browser"]
+
+[tool.setuptools.data-files]
+"share/session-browser/skills/using-session-browser" = ["skills/using-session-browser/SKILL.md"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+python_files = ["tests.py", "test_*.py"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py310"
+extend-exclude = ["build", "prototypes"]
+# Ruff's default. Measured against this codebase's own ~79-column habit: 79
+# produced *more* churn, not less, because more lines breached it and got
+# exploded one-argument-per-line. The tool owns the width from here.
+line-length = 88
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "SIM", "RUF"]
+ignore = [
+  # A TUI renders "×", "›" and en dashes on purpose; the ASCII lookalikes
+  # would be a downgrade, not a fix.
+  "RUF001", "RUF002",
+  # `a + [b]` over `[*a, b]`. Pure style, and the concatenation form reads
+  # better for the argv lists this codebase builds.
+  "RUF005",
+  # Discovery walks session files written by three other tools. A broken
+  # file must skip one session, not kill the scan, so the blind excepts are
+  # the design; every one of them logs.
+  "BLE001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert; that is the job.
+"session_browser/tests.py" = ["S101"]
+"session_browser/test_*.py" = ["S101"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.16.1",
+]

@@ -1,0 +1,5 @@
+{"type":"user","message":{"role":"user","content":"Use session browser to find the notification INVITE artifact for Chris"},"cwd":"/fixture/notification-project","gitBranch":"main","timestamp":"2026-07-24T14:36:16.757Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will search recent notification sessions."}]},"timestamp":"2026-07-24T14:36:20.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"session-browser search \"notification INVITE\" --mode ids","description":"Find notification artifact"}}]},"timestamp":"2026-07-24T14:36:25.000Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"Search inventory contained these unrelated provider IDs: codex:fixture-one, codex:fixture-two, codex:fixture-three, codex:fixture-four.","is_error":false}]},"timestamp":"2026-07-24T14:36:30.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I found the unrelated notification artifact."}]},"timestamp":"2026-07-24T14:37:09.766Z"}
