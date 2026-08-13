@@ -420,6 +420,35 @@ def build_corpus(root: Path) -> Path:
             "\n".join(lines) + "\n"
         )
 
+    codex_db = home / ".codex" / "state_5.sqlite"
+    conn = sqlite3.connect(str(codex_db))
+    conn.execute(
+        "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, "
+        "cwd TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', "
+        "git_branch TEXT, first_user_message TEXT NOT NULL DEFAULT '', "
+        "created_at_ms INTEGER, updated_at_ms INTEGER, "
+        "archived INTEGER NOT NULL DEFAULT 0)"
+    )
+    for i in range(CODEX_SESSIONS):
+        sid = f"perf-codex-{i:04d}"
+        rollout = codex_root / f"rollout-2026-01-05T09-00-00-{sid}.jsonl"
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, cwd, git_branch, "
+            "first_user_message, created_at_ms, updated_at_ms, archived) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+            (
+                sid,
+                str(rollout),
+                f"/Users/perf/project{i % 3}",
+                "main",
+                f"start session {i} {_filler(i, 0)}",
+                1767603600000,
+                1767603600000,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
     db_path = home / ".local" / "share" / "opencode" / "opencode.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -541,6 +570,81 @@ def _cli(*argv: str) -> None:
         run_cli(list(argv))
 
 
+def _corpus_home_guard() -> Path:
+    """The corpus home, refusing anything that is not one.
+
+    The helpers below move files around inside it; a caller that runs them
+    against a real home would hide the user's actual Codex index. The corpus
+    home always sits inside a ``sb-perf-`` tempdir, which a real home never
+    does."""
+    home = Path(os.environ["HOME"])
+    parent = home.parent.name
+    if not parent.startswith(("perf", "sb-perf")):
+        raise AssertionError(f"refusing to touch non-corpus home {home}")
+    return home
+
+
+def _without_codex_db(run: Callable[[], None]) -> None:
+    """Run *run* with the corpus Codex index hidden, exercising the fallback.
+
+    The corpus home is the process HOME while workloads run, so the index is
+    found and hidden through the environment. Restored afterwards even on
+    failure: a rename touches no counters, so this changes nothing except
+    which discovery path the workload takes.
+    """
+    home = _corpus_home_guard()
+    db = home / ".codex" / "state_5.sqlite"
+    hidden = home / ".codex" / "state_5.sqlite.hidden"
+    db.rename(hidden)
+    try:
+        run()
+    finally:
+        hidden.rename(db)
+
+
+def _with_extra_codex_rollout(run: Callable[[], None]) -> None:
+    """Run *run* with one unindexed rollout added, exercising the stale path.
+
+    The index-present-but-disagreeing fallback is the one that fires in real
+    life (archive, backfill, a just-written session), and it pays the file
+    scan *plus* the failed DB query. Removed afterwards even on failure."""
+    home = _corpus_home_guard()
+    extra = (
+        home
+        / ".codex"
+        / "sessions"
+        / "2026"
+        / "01"
+        / "05"
+        / "rollout-2026-01-05T09-00-00-perf-extra.jsonl"
+    )
+    extra.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "perf-codex-extra",
+                    "cwd": "/Users/perf/project0",
+                    "git": {"branch": "main"},
+                    "timestamp": "2026-01-05T09:00:00.000Z",
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "extra session"},
+            }
+        )
+        + "\n"
+    )
+    try:
+        run()
+    finally:
+        extra.unlink()
+
+
 def _tui_search(ledger: WorkLedger, query: str) -> None:
     """The TUI's shape: full entries retained, progress reported throughout."""
     sessions = discovery.discover_all()
@@ -603,6 +707,20 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "its read volume must stay bounded by the discovery window rather "
             "than by session length.",
             lambda: _cli("list", "--limit", "50"),
+        ),
+        Workload(
+            "cli.list.no_codex_db",
+            "The file-scan fallback is the safety net for a missing or stale "
+            "Codex index. It must stay budgeted so a regression in it cannot "
+            "hide behind the DB fast path.",
+            lambda: _without_codex_db(lambda: _cli("list", "--limit", "50")),
+        ),
+        Workload(
+            "cli.list.codex_db_stale",
+            "The disagreement fallback pays the file scan *plus* the failed "
+            "DB query (extra sqlite_statement). Budgeted so a change cannot "
+            "make the slowest path silently pay more.",
+            lambda: _with_extra_codex_rollout(lambda: _cli("list", "--limit", "50")),
         ),
         Workload(
             "cli.stats",
@@ -793,6 +911,25 @@ def loop_probes(root: Path) -> list[LoopProbe]:
         for _ in range(20):
             transcript._raw_text_may_match(raw, ["kookaburra"])
 
+    def codex_db_rows() -> None:
+        rows = [
+            {
+                "id": f"perf-codex-{i:04d}",
+                "rollout_path": (
+                    "/Users/perf/.codex/sessions/2026/01/05/"
+                    f"rollout-2026-01-05T09-00-00-perf-codex-{i:04d}.jsonl"
+                ),
+                "cwd": f"/Users/perf/project{i % 3}",
+                "git_branch": "main",
+                "first_user_message": f"start session {i} {_filler(i, 0)}",
+                "created_at_ms": 1767603600000,
+                "updated_at_ms": 1767603600000 + i,
+            }
+            for i in range(40)
+        ]
+        for r in rows:
+            discovery._codex_session_from_row(r)
+
     return [
         LoopProbe(
             "loop.parse_jsonl",
@@ -828,6 +965,13 @@ def loop_probes(root: Path) -> list[LoopProbe]:
             "any parse. It decides whether a file is read at all, so work "
             "added here is paid on sessions that never match.",
             raw_may_match,
+        ),
+        LoopProbe(
+            "loop.codex_db_rows",
+            "Per-row Session construction in the Codex DB fast path. One "
+            "dataclass per index row per discovery; anything added inside "
+            "this loop is paid once per Codex session, per run.",
+            codex_db_rows,
         ),
     ]
 
