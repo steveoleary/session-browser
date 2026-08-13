@@ -29,7 +29,7 @@ from concurrent.futures import (
     wait,
 )
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import lru_cache
 from itertools import accumulate
 from itertools import count as _count
@@ -232,10 +232,10 @@ def _parse_ts(raw: str) -> datetime | None:
     if not raw:
         return None
     try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 def session_duration_seconds(s: Session) -> int | None:
