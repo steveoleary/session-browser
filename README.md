@@ -1,167 +1,193 @@
 # session-browser
 
-A terminal UI for browsing and searching agent session logs — Claude Code, Codex, and OpenCode.
+**Turn your agent transcripts into working memory.**
 
-## Compared with AgentsView
+Claude Code, Codex, and OpenCode all keep session histories. Session Browser
+brings them together so you — or your agent — can find lost context, build a
+handoff, spot recurring knowledge or repeating pain points, and easily resume
+the work instead of starting again.
 
-Session Browser searches provider-native histories directly; AgentsView imports
-them into a separate archive and can add semantic search. In a small,
-blind-assessed three-task comparison, Session Browser's reports were preferred
-in two trials and AgentsView's in one. AgentsView used less query time overall,
-but its largest saving coincided with stopping before material later evidence.
+![Session Browser showing sessions beside a selected transcript](docs/screenshots/01-list-160x45.svg)
 
-| | Session Browser | AgentsView |
-|---|---|---|
-| Retrieval | Directly from native session files | Imported archive; FTS and optional vectors |
-| Extra services | None | Daemon; embedding service for vector search |
-| Findings preference | 2 of 3 trials | 1 of 3 trials |
-| Measured query time | 284 s total | 253 s total |
-| Measured preparation | None | 19 s sync + 819 s embedding build |
+Every session adds decisions, investigations, fixes, and working patterns to an
+evolving knowledge base. That knowledge is scattered across provider-specific
+folders and databases. Session Browser makes it one browsable, searchable
+memory: a terminal-native TUI for you and a rich retrieval surface for your
+agents.
 
-This is a local descriptive result, not a general benchmark.
+## Put old sessions back to work
 
-## Install
+- **Recover lost context.** Search complete Claude Code, Codex, and OpenCode
+  transcripts together from the TUI, or let your agent find the useful parts
+  through the CLI.
+- **Great for handoffs**. Pulls the relevant context from
+  previous sessions so the next agent can pick up where you left off.
+- **Let agents research your history.** The JSON-friendly CLI and bundled skill
+  let an agent find and retrieve earlier work itself, without you pasting old
+  conversations into a new chat.
+- **Find the patterns worth keeping.** Mine repeated fixes, decisions, and
+  workflows across sessions, then turn the useful ones into reusable skills,
+  prompts, or playbooks.
+- **Resume instead of restarting.** Continue the original session directly in
+  tmux or Herdr, or copy the agent specific resume command to the clipboard, all from the TUI.
+- **Stay in the terminal.** Browse, search, export, and resume sessions where
+  your coding agents already run — no browser tab or separate desktop app
+  required.
+- **Keep your history local.** Session Browser reads the providers' native
+  histories directly.
+- **Light by design.** There is no second copy of your history, indexing pass,
+  daemon, embedding model, or separate database to set up and maintain. Install
+  it, run it, and search the histories you already have.
 
-Install as a managed CLI tool (puts `session-browser` on your `PATH` via `~/.local/bin`):
+## Ask your agent
+
+With the bundled skill installed, requests like these can use your existing
+session history as evidence:
+
+> Find what we were working on in this repo at the end of last week. Give me a
+> quick summary so we can pick it up.
+
+> Look back over the last two weeks. Have we hit the same problems more than
+> once? Suggest tooling or skills that would stop us reinventing the wheel.
+
+> I lost the thread this afternoon. Review today's sessions and make me an
+> explainer of what changed and why.
+
+## Install and run
+
+### With uv (recommended)
+
+[uv](https://docs.astral.sh/uv/) is available for macOS, Linux, and Windows.
+It installs Session Browser in an isolated environment, puts the command on
+your path, and supplies a compatible Python version if you need one.
 
 ```bash
-uv tool install --editable .
-```
-
-`--editable` means edits to the source in this repo take effect immediately. Drop it for a pinned install. Upgrade later with `uv tool upgrade session-browser`.
-
-## Run
-
-```bash
+uv tool install git+https://github.com/steveoleary/session-browser.git
 session-browser
-# or, without installing:
-uv run session-browser
-# or
-python -m session_browser
 ```
 
-The TUI adapts to the terminal rather than maintaining a fixed split. Wide
-terminals use a capped session sidebar and a spacious transcript canvas;
-medium terminals use a balanced two-pane layout; narrow terminals switch to a
-full-width sessions/transcript flow. Very short windows also collapse
-nonessential chrome. Press `z` to focus the active pane at any larger size.
-
-![Session Browser wide two-pane view](docs/screenshots/01-list-160x45.svg)
-
-*Wide two-pane browsing, with a selected transcript and provider-coloured
-session list.*
-
-## CLI (for agents and scripts)
-
-Running with no arguments opens the TUI. Subcommands provide non-interactive
-retrieval over the same sessions:
+Upgrade later with:
 
 ```bash
-# Discover sessions (JSON by default, newest first)
-session-browser list --provider claude --since 2026-06-01 --limit 20
-
-# Literal search across complete transcripts (ids | snippets | full)
-session-browser search "pytest fixture" --mode snippets --context 200
-session-browser search "deploy" --mode full --output-dir results/
-
-# Retrieve one complete transcript (text by default)
-session-browser get claude:76458688-b620-42b0-957f-4b64e9cc784b
-session-browser get 76458688-b620-42b0-957f-4b64e9cc784b --output handoff.md
-session-browser get claude:7645 --format json   # unique prefix, git-style
+uv tool upgrade session-browser
 ```
 
-Sessions are addressed as `provider:id`; a raw id works when unique, and so
-does a unique prefix of either form (like git short hashes) — an ambiguous
-prefix errors and lists the matching candidates.
-Shared filters: `--provider`, `--repo`, `--cwd`, `--exclude-cwd`, `--here`,
-`--since`, `--until`, `--include-current`, `--limit` (dates are ISO 8601 or
-relative — `-30m`, `-2h`, `-1d`, `-1w`; repo/cwd are case-insensitive
-substrings).
-`--here` scopes to the current working directory by exact path-prefix and
-reports a `warnings` entry for sessions excluded because they record no cwd.
-`--exclude-cwd SUBSTR` subtracts instead of selecting — repeatable, ANDed with
-`--cwd`/`--here`, and applied before `--limit` so throwaway scratch sessions
-cannot consume the result budget. It is opt-in, reports what it removed in
-`warnings`, and keeps sessions that record no cwd:
+### With pipx
+
+If you already use [pipx](https://pipx.pypa.io/), install and upgrade directly
+from the same Git repository:
 
 ```bash
-session-browser list --here --exclude-cwd /private/tmp/ --limit 20
+pipx install git+https://github.com/steveoleary/session-browser.git
+pipx upgrade session-browser
 ```
 
-The caller's own live session is auto-excluded by default (detected from the
-agent's session-id env var, e.g. `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID`,
-and reported in `warnings`); pass `--include-current` to keep it.
-`--output`/`--output-dir` refuse to replace existing files without
-`--overwrite`; `search --output-dir` writes a `manifest.json` describing the
-query, results, match counts, and any parse warnings. Errors exit nonzero
-with a JSON error object on stderr when `--format json` is active.
-
-## Demo corpus
-
-The TUI and CLI demos poorly against a real session history — real
-transcripts are messy, private, and sparse. For demos and screenshots, a
-generator writes a compact but rich fake history (Claude, Codex, and
-OpenCode sessions with varied dates, searchable content, one long
-transcript, and scratchpad noise):
+### From a clone
 
 ```bash
-python -m session_browser.demo              # writes ./demo-home (15 sessions)
+git clone https://github.com/steveoleary/session-browser.git
+cd session-browser
+uv tool install --editable .
+session-browser
 ```
 
-Everything then runs against it unchanged by pointing HOME at it:
+The editable install always runs the code in your checkout.
+
+## See it in action
+
+### Search across every session
+
+Press `/` and search once across all three providers. The session list narrows
+to the conversations that contain your phrase, while the transcript shows the
+match in context. When you find the right one, press `t` to continue it in tmux
+or Herdr, or `c` to copy its resume command — search, read, and resume without
+leaving the UI.
+
+![Global transcript search for sqlite](docs/screenshots/02-search-sqlite-120x40.svg)
+
+### Read the part that matters
+
+Press `z` to give the transcript the full terminal, then use `n` and `N` to move
+between matches inside the conversation.
+
+![Focused transcript with an in-session search for WAL](docs/screenshots/03-detail-focus-wal-120x40.svg)
+
+The layout adapts to the available space: a wide two-pane browser on a large
+terminal, a balanced view at medium sizes, and a full-width sessions/transcript
+flow when space is tight.
+
+## Command line
+
+Running `session-browser` with no arguments opens the TUI. The same history is
+available through four commands for agents, scripts, and targeted retrieval:
 
 ```bash
-HOME=$PWD/demo-home session-browser                        # the TUI
-HOME=$PWD/demo-home session-browser list | head            # 15 sessions
-HOME=$PWD/demo-home session-browser search "sqlite"
-HOME=$PWD/demo-home session-browser list --exclude-cwd scratchpad
+# Browse recent sessions from this project
+session-browser list --here --limit 20
+
+# Search complete transcripts and return useful context
+session-browser search --here --mode snippets "pytest fixture"
+
+# Retrieve a session by canonical id, raw id, or unique prefix
+session-browser get claude:7645 --output handoff.md
+
+# Summarise providers, activity, and working directories
+session-browser stats --here
 ```
 
-Timestamps are anchored to the generation time, so the corpus always looks
-recent. Regenerate with `--force`; choose another directory with `--home`.
-Content is invented: no real session text ever appears in the fake corpus.
+Use `session-browser COMMAND --help` for filters, output formats, date ranges,
+and retrieval windows. Commands return JSON by default where it is useful for
+automation.
 
-The README screenshots are generated from the same corpus with Textual's
-fixed-size headless driver:
+## Skill for agents
+
+The bundled `using-session-browser` skill lets Claude Code, Codex, and OpenCode
+recover earlier work themselves, assemble better handoffs, and mine recurring
+knowledge from your session history.
+
+Install it with the [skills CLI](https://skills.sh):
 
 ```bash
-python scripts/capture_demo.py
-python scripts/capture_demo.py --check   # verify states without writing files
+npx skills add steveoleary/session-browser@using-session-browser
 ```
 
-![Global transcript search](docs/screenshots/02-search-sqlite-120x40.svg)
+Its source lives in
+[`skills/using-session-browser/`](skills/using-session-browser/SKILL.md).
 
-*Global search filters the history and highlights the matching transcript
-entry.*
+## Essential keys
 
-![Focused transcript search](docs/screenshots/03-detail-focus-wal-120x40.svg)
-
-*`z` focus mode gives the transcript the full width for in-session match
-navigation.*
-
-## Keybindings
+Press `?` in the app for the complete key map.
 
 | Key | Action |
 |-----|--------|
-| `/` | Search / filter sessions |
-| `s` | Find within selected session |
-| `tab`, `←` / `→` | Switch sessions / transcript pane |
-| `Enter`, `Esc` | Open transcript / step back |
-| `z` | Toggle full-width focus view |
-| `?` | Show all shortcuts |
-| `p` | Toggle this-project scope |
+| `/` | Search all sessions |
+| `s` | Find within the selected session |
+| `Tab`, `←` / `→` | Switch between sessions and transcript |
+| `Enter`, `Esc` | Open a transcript / step back |
+| `z` | Focus the active pane |
 | `n` / `N` | Next / previous match |
-| `c` | Copy resume command |
-| `i` | Copy session id (e.g. `claude:7645…`) |
-| `t` | Open session in tmux or herdr (whichever is running) |
-| `e` / `E` | Copy / export chat |
-| `r` | Refresh sessions |
-| `j`/`k`, `g`/`G`, `ctrl+d`/`ctrl+u` | Navigate |
+| `c` | Copy a resume command |
+| `i` | Copy the canonical session id |
+| `e` / `E` | Copy / export the conversation |
+| `p` | Toggle this-project scope |
+| `?` | Show all shortcuts |
 | `q` | Quit |
 
 ## Development
 
 ```bash
 uv sync
-uv run pytest          # tests.py, test_transcript.py, test_cli.py
+uv run pytest session_browser/ -q
+uv run ruff check .
+uv run ruff format --check .
 ```
+
+The committed regression fixtures in `docs/fixtures/` can be checked with:
+
+```bash
+uv run python -m session_browser.case_runner run
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
