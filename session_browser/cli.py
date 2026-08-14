@@ -312,7 +312,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_filter_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--provider", help="exact provider name, e.g. claude")
+    # Validated rather than filtered with. An unknown value used to filter
+    # every session out and exit 0, so `--provider claude-code` -- the
+    # product's actual name, and a natural guess -- reported that there were
+    # no Claude Code sessions at all. Rejecting it names the three valid
+    # values instead, which is what the CLI's other enum flags already do.
+    # ``type`` runs before the choices check, so CLAUDE still works.
+    p.add_argument(
+        "--provider",
+        type=str.lower,
+        choices=sorted(ALL_SCANNERS),
+        help="provider to scan (case-insensitive)",
+    )
     p.add_argument(
         "--repo",
         help="case-insensitive substring of the project directory name "
