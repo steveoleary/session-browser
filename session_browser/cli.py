@@ -36,7 +36,16 @@ Output contracts (stable shapes the consuming agent can rely on):
                                 summary_matches?, snippets_omitted?,
                                 snippets/entries depending on mode}, ...],
                    "skipped?": [{id, error}, ...], "warnings?": [...]}
-                  (first_match/last_match are entry indices usable directly
+                  (each snippet is {"role", "entry_index", "text"} plus
+                   "query" when several phrases were given. **role is the
+                   provenance signal**: "tool" means the phrase was in
+                   something the agent read — a file, a diff, a command's
+                   output — while "user"/"assistant" mean somebody wrote it.
+                   A transcript records everything that passed through the
+                   session, so a literal hit proves the text occurred, not
+                   that anyone discussed it; --mode ids carries no roles and
+                   so nominates candidates rather than confirming them.
+                   first_match/last_match are entry indices usable directly
                    with `get --entries`; multiple query phrases are OR'd in
                    one scan, "query" is then a list; with --around each
                    result also carries "offset" as in list. Matching is
@@ -55,12 +64,21 @@ Output contracts (stable shapes the consuming agent can rely on):
                                 "files_written": N, "results": N}
 - search --output-dir (text): "wrote N file(s) to <dir> (manifest: <path>)"
 - stats (json):  {"total": N, "warnings?": [...],
+                  "transcript_health": "not_checked",
                   "activity": {"days", "start", "end", "counts": [N, ...]},
                   "providers": [{"provider", "count", "percent",
                                  "updated_at"}, ...],
                   "top_cwds": [{"cwd", "count"}, ...],
                   "oldest", "newest", "filters": {...}}
-                 (counts is one bucket per local calendar day, oldest→newest:
+                 ("transcript_health" is always "not_checked": stats never
+                  opens a transcript, so its total counts sessions
+                  *discovered*, not sessions readable — corrupt and
+                  zero-entry records are in the number, and only `list`,
+                  which does open them, names them in its warnings.
+                  "top_cwds" decomposes the total by directory, which is
+                  also the cheapest check on a --repo/--cwd substring that
+                  matched more projects than intended.
+                  counts is one bucket per local calendar day, oldest→newest:
                   bucket i is activity.start + i days. It renders on a single
                   line, and the request echo in "filters" comes last, so the
                   blocks that answer a question survive a `| head -N`)
@@ -326,8 +344,10 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--repo",
-        help="case-insensitive substring of the project directory name "
-        "(the last path segment of a session's cwd, not a git remote)",
+        help="case-insensitive substring of the project name — the last "
+        "segment of the session's directory, or of its project root where "
+        "the provider records one (opencode does, so a worktree session "
+        "reports the parent project). Not a git remote",
     )
     p.add_argument("--cwd", help="case-insensitive substring of working directory")
     p.add_argument(
@@ -1631,6 +1651,14 @@ def cmd_stats(args) -> int:
     payload: dict = {"total": total}
     if warnings:
         payload["warnings"] = warnings
+    # What this total is a count *of*, stated in the payload rather than left
+    # to the reader. `list` opens the transcripts it returns and names the
+    # unreadable ones in `warnings`; `stats` is forbidden from opening any
+    # (see the cli.stats guard in docs/perf_budgets.json), so it aggregates
+    # corrupt and empty records into the number silently. That is the correct
+    # trade — the fix is not to breach the guard, it is to stop the number
+    # claiming more than it knows. A constant string costs no file opens.
+    payload["transcript_health"] = "not_checked"
     payload["activity"] = {
         "days": args.days,
         "start": start.isoformat(),
