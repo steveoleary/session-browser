@@ -250,13 +250,6 @@ dependencies = [
     { name = "textual" },
 ]
 
-[package.optional-dependencies]
-test = [
-    { name = "httpx" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "httpx" },
@@ -267,13 +260,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.2" },
-    { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=1.3" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "textual", specifier = ">=0.80.0" },
 ]
-provides-extras = ["test"]
 
 [package.metadata.requires-dev]
 dev = [
