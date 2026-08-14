@@ -20,8 +20,11 @@ sessions. Core rule: narrow before reading; large transcripts go to files.
    skill wrong — do not work around it by dumping full transcripts. Refresh the
    install (`uv tool install --force --from <repo> session-browser`, or your
    package manager's upgrade) and retry the narrowing command.
-2. Discover with metadata first. Prefer `--cwd` over `--repo`; repository
-   metadata can be empty. To orient in an unfamiliar history — which
+2. Discover with metadata first. `--repo NAME` matches the project directory
+   name (the last path segment of a session's cwd), not a git remote — so
+   `--repo session-browser`, never `--repo org/session-browser`. Use `--cwd`
+   when you need to match a longer path fragment. To orient in an unfamiliar
+   history — which
    providers and directories hold the sessions, how recent they are — run
    `session-browser stats --format json` (shared filters apply, e.g.
    `--here`); it returns provider counts with `updated_at` — the same name
@@ -208,7 +211,7 @@ rg -n -C 3 "Command surface|Non-Goals|Output" build/agent-queryable-session.md
 | Re-running search per alternate phrase | One `search "a" "b" "c"` scans all transcripts once |
 | Hand-computing `--since`/`--until` from a `get`'d timestamp to find neighbors | `list --around ID` — one call, anchor excluded, signed `offset` per result |
 | `search --mode full` to stdout | Use `--output-dir` or snippets first |
-| Relying on `--repo` only | Prefer `--cwd`; repo may be empty |
+| `--repo org/name`, or a path fragment | `--repo` matches the directory name alone: `--repo name`. Use `--cwd` to match a path |
 | Common English words as OR terms ("digit", "sensitive", "table") | They match everywhere; use multiword phrases the answer itself would contain |
 | Raising `--limit` to reach an old session under the recency sort | Heed the truncation warning: `--sort oldest` or a `--since`/`--until` window gets there directly. Raising the limit is not wrong, just slower — results nest, so a bigger limit is always a superset, never a shifted window |
 | Raising `--limit` because throwaway harness/scratch sessions fill the results | Subtract them instead: `--exclude-cwd <path>`. It runs before `--limit`, so the budget is spent on real work. Read the noisy prefix off `stats --format json` → `top_cwds` first |

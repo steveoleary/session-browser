@@ -19,6 +19,7 @@ from session_browser.discovery import (
     _epoch_ms_to_iso,
     _file_mtime_iso,
     _last_activity_iso,
+    _repo_name,
     _scan_codex_files,
     discover_all,
     scan_claude,
@@ -127,6 +128,7 @@ class TestScanClaude:
         assert sessions[0].provider == "claude"
         assert "Fix the login" in sessions[0].summary
         assert sessions[0].branch == "develop"
+        assert sessions[0].repository == "project"
 
     def test_updated_at_uses_last_turn_not_system_or_mtime(self, tmp_path):
         """updated_at must reflect the last real turn, ignoring a later
@@ -207,6 +209,7 @@ class TestScanCodex:
         assert len(sessions) == 1
         assert sessions[0].id == "019d-abc"
         assert sessions[0].provider == "codex"
+        assert sessions[0].repository == "project"
 
     def test_updated_at_uses_last_turn_not_lifecycle(self, tmp_path):
         """updated_at must reflect the last user/agent message, ignoring
@@ -334,6 +337,9 @@ class TestScanCodexDb:
         assert s.summary == "hello world"
         assert s.cwd == "/p"
         assert s.branch == "main"
+        # Derived from cwd, so the fast path and the file scan agree on it
+        # without the index needing a column for it.
+        assert s.repository == "p"
         assert s.created_at == "2026-04-10T13:00:00.000Z"
         assert s.updated_at == "2026-04-10T13:00:05.000Z"
         assert s.content_path == str(f)
@@ -818,6 +824,31 @@ class TestLastActivity:
         assert _last_activity_iso(f, "codex") == "2026-06-29T12:00:00Z"
 
 
+class TestRepositoryName:
+    """The value ``--repo`` matches, which was empty for every session on
+    every provider until it was populated here."""
+
+    @pytest.mark.parametrize(
+        ("cwd", "expected"),
+        [
+            ("/Users/u/Projects/session-browser", "session-browser"),
+            ("/Users/u/Projects/session-browser/", "session-browser"),
+            ("session-browser", "session-browser"),
+            ("", ""),
+            ("/", ""),
+            ("//", ""),
+        ],
+    )
+    def test_repo_name_is_the_final_path_segment(self, cwd, expected):
+        assert _repo_name(cwd) == expected
+
+    def test_repo_name_never_touches_the_filesystem(self, tmp_path):
+        """A cwd whose directory is long gone still names its project. 378 of
+        1554 real sessions have one, and an existence check would blank them
+        while also putting a stat in the discovery path."""
+        assert _repo_name(str(tmp_path / "deleted-months-ago")) == "deleted-months-ago"
+
+
 class TestScanOpencode:
     def _make_opencode_db(self, tmp_path):
         """Create a minimal opencode-style SQLite database."""
@@ -886,6 +917,39 @@ class TestScanOpencode:
         assert sessions[0].provider == "opencode"
         assert sessions[0].summary == "Fix authentication bug"
         assert sessions[0].cwd == "/Users/test/myproject"
+        assert sessions[0].repository == "myproject"
+
+    def test_repository_falls_back_to_the_worktree_path(self, tmp_path):
+        """``project.name`` is NULL for every row in a real install, so the
+        path has to answer. The worktree is preferred over the session's own
+        directory because it is the project root, and so still names the
+        project for a session started in a subdirectory of it."""
+        db_path = self._make_opencode_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("UPDATE project SET name = NULL")
+        conn.execute("UPDATE session SET directory = '/Users/test/myproject/src'")
+        conn.commit()
+        conn.close()
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_opencode()
+
+        assert sessions[0].repository == "myproject"
+        assert sessions[0].cwd == "/Users/test/myproject/src"
+
+    def test_repository_falls_past_the_global_projects_root_worktree(self, tmp_path):
+        """Opencode files sessions with no project under a catch-all whose
+        worktree is "/", which names nothing. Those fall through to their own
+        directory rather than going blank -- 115 real sessions do."""
+        db_path = self._make_opencode_db(tmp_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("UPDATE project SET name = NULL, worktree = '/'")
+        conn.commit()
+        conn.close()
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_opencode()
+
         assert sessions[0].repository == "myproject"
 
     def test_scan_opencode_no_db(self, tmp_path):

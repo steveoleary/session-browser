@@ -313,7 +313,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_filter_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--provider", help="exact provider name, e.g. claude")
-    p.add_argument("--repo", help="case-insensitive substring of repository")
+    p.add_argument(
+        "--repo",
+        help="case-insensitive substring of the project directory name "
+        "(the last path segment of a session's cwd, not a git remote)",
+    )
     p.add_argument("--cwd", help="case-insensitive substring of working directory")
     p.add_argument(
         "--exclude-cwd",
@@ -508,7 +512,20 @@ def apply_filters(
         out = [s for s in out if s.provider.lower() == p]
     if args.repo:
         q = args.repo.lower()
+        blank = sum(1 for s in out if not (s.repository or "").strip())
         out = [s for s in out if q in (s.repository or "").lower()]
+        # An empty result and an empty *field* are indistinguishable to the
+        # caller, and this flag spent its whole life returning the first while
+        # meaning the second. Report the blanks whenever the filter comes up
+        # empty, so "no sessions in that repo" cannot be read off a filter
+        # that had nothing to match against.
+        if not out and blank and warnings is not None:
+            warnings.append(
+                f"--repo matched nothing, and {blank} session(s) have no "
+                f"recorded project name — a session run outside any project "
+                f"directory has none. Those can only be reached by --cwd "
+                f"<path fragment>, a content search, or --provider."
+            )
     if args.cwd:
         q = args.cwd.lower()
         out = [s for s in out if q in (s.cwd or "").lower()]
