@@ -25,21 +25,32 @@ than an error, so a typo (`--repo coffe_run`) looks exactly like an answer.
 **2. A hit is as often a quotation as a statement.** A transcript records every
 file the agent read, every diff, every pasted doc — not only what someone said.
 `--mode snippets` puts a `role` on each snippet: `tool` means the phrase was in
-something the agent *read*, `user` and `assistant` mean somebody wrote it.
-Check `role` before quoting a hit as evidence that a thing was discussed.
-`--mode ids` carries no roles, which is why ids alone nominate candidates and
-never confirm a finding.
+something the agent *read*, `user` and `assistant` mean somebody wrote it, and
+`system` is injected or copied text — compaction summaries, task notifications,
+pasted reports — which can quote earlier speech and is never fresh evidence
+that anyone said it *there*. Check `role` before quoting a hit as evidence that
+a thing was discussed. `--mode ids` carries no roles, which is why ids alone
+nominate candidates and never confirm a finding. For a provenance census
+without pulling whole snippets into context, count roles over a compact
+projection — `--max-snippets 0` lifts the default cap of 20 per result, which
+otherwise silently truncates the tally you are counting.
 
 **3. Sessions self-correct.** A confident mid-session claim is often reversed a
 few entries later: claim → user pushback → correction. Treat any snippet or
 mid-session window as a *lead*. Before quoting a decision, read the ending —
-`get ID --role assistant --tail 10`.
+`get ID --role assistant --tail 10`. To *find* a reversal rather than guard
+against one, search the phrases people actually use — "I was wrong", "I was
+mistaken", "actually", "correction" — then check that claim and correction
+share a session and that both are `assistant`- or `user`-authored, not `tool`.
 
 **4. `stats` counts what it discovered, not what is readable.** It never opens
-a transcript, by design, so its total cannot see sessions that are corrupt or
-empty. `list` does open them and names them in `warnings`. Never report a
-`stats` total as a count of real conversations; cross-check with `list` when an
-exact number matters.
+a transcript, by design — it says so in the payload, `"transcript_health":
+"not_checked"` — so its total cannot see sessions that are corrupt or empty.
+`list` does open them, but it does **not** remove them: all of them stay in
+`.sessions`, and the warning names a handful of ids and then says "(N more)".
+The readable count is yours to compute — rows with `total_entries > 0`. Also
+note the total is caller-relative: your own live session is excluded unless you
+pass `--include-current`.
 
 ## Flags are not documented here
 
@@ -65,7 +76,19 @@ where they disagree, `--help` describes the binary you are actually running.
 1. **Orient.** `session-browser stats --format json` (shared filters apply,
    e.g. `--here`) gives provider counts, per-day activity and `top_cwds` values
    you can feed straight to `--cwd`. Mind trap 4 on its total.
-2. **Discover with metadata.** Never dismiss a session from its `summary` alone
+2. **Discover with metadata.** Two things distort discovery before any trap
+   does, and both are properties of the corpus rather than of your query:
+
+   - **Worktrees.** A session run in a git worktree is named after the worktree
+     directory unless the provider records a project root, and only opencode
+     does — so `--repo <project>` misses claude and codex worktree sessions,
+     and a reused worktree path can hold work from several projects over time.
+   - **Other agents are writing to the corpus while you read it.** Hit counts
+     and roles move under you, and a sibling answering your question can put
+     its answer into your results. `--until -30m` gives a stable snapshot;
+     without one, a measurement is not reproducible even by you.
+
+   Then: never dismiss a session from its `summary` alone
    — the summary is often just the first user message, so a bare `/model` or
    `/clear` label can hide hours of work. Every `list` row carries
    `total_entries` and `duration_seconds`; `total_entries` is the *primary*
@@ -120,6 +143,9 @@ where they disagree, `--help` describes the binary you are actually running.
 | Triage several candidates at once | `session-browser get ID1 ID2 ID3 --role user --head 3` |
 | Whole transcript | `session-browser get ID --output build/session.md` |
 | Drop harness/scratch noise | `--exclude-cwd /private/tmp/` (repeatable, applied before `--limit`) |
+| A stable snapshot while other agents are working | add `--until -30m` |
+| Every match, not the first N | omit `--limit` entirely — it is unbounded by default |
+| Count roles without pulling snippets into context | `--mode snippets --max-snippets 0`, project to `role` only |
 
 A canonical id (`claude:76458688-…`, copyable from the TUI with `i`) goes
 straight to `get ID` — no `list`/`search` first. A unique id *prefix* resolves
