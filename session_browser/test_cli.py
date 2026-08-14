@@ -2177,7 +2177,14 @@ class TestStats:
         lines = out.splitlines()
         assert len(json.loads(out)["activity"]["counts"]) == 90
         # All 90 buckets on one line, so the whole block clears a head -20.
-        assert [i for i, ln in enumerate(lines) if '"counts"' in ln] == [6]
+        # Asserted as "one line, inside the budget" rather than as an exact
+        # index: the index moved when `transcript_health` was added, which is
+        # a legitimate key addition, while the property the docstring names —
+        # the array does not explode across lines and does not sink below a
+        # head -20 — is what actually protects the reader.
+        counts_lines = [i for i, ln in enumerate(lines) if '"counts"' in ln]
+        assert len(counts_lines) == 1
+        assert counts_lines[0] < 20
         assert lines.index('  "filters": {') > lines.index('  "activity": {')
 
     def test_activity_buckets_by_day(self, stats_cli):

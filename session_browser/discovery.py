@@ -363,6 +363,13 @@ def _summary_text(text: str) -> str:
 def _repo_name(cwd: str) -> str:
     """The project name ``--repo`` matches: the final segment of *cwd*.
 
+    Callers decide *which* path they pass, and they do not all pass the
+    session's own directory: ``scan_opencode`` passes the project worktree
+    first, so a session run in a worktree of a project reports the project.
+    Saying "the last segment of the session's cwd" is therefore wrong at the
+    call site even though it is right about this function, which is exactly
+    how four separate descriptions of this behaviour ended up disagreeing.
+
     A directory name, deliberately, not a git remote. Two of the three
     providers record no remote at all — Claude's JSONL carries ``cwd`` and
     ``gitBranch`` and nothing else — so a remote-derived value would be
