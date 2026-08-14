@@ -1,23 +1,45 @@
 [build-system]
-requires = ["setuptools>=61"]
+# 77 is the first release that understands the SPDX `license` string and
+# `license-files` below; 61 would silently ignore them.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "session-browser"
 version = "0.1.0"
-description = "Lightweight agent session browser TUI"
+description = "Find and retrieve prior agent sessions across Claude Code, Codex and OpenCode — a fast CLI and TUI."
+readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Steve O'Leary", email = "647621+steveoleary@users.noreply.github.com" },
+]
+keywords = ["agent", "claude-code", "codex", "opencode", "sessions", "tui"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  # The declared floor above, up to the version the suite is run on.
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Libraries :: Application Frameworks",
+  "Topic :: Utilities",
+]
 dependencies = [
   "rich>=15.0.0",
   "textual>=0.80.0",
 ]
 
-[project.optional-dependencies]
-test = [
-  "httpx>=0.27.0",
-  "pytest>=8.2",
-  "pytest-asyncio>=1.3",
-]
+# Test dependencies live in the `dev` dependency-group below, not in an extra.
+# `uv sync` installs that group by default, which is how this repo's suite is
+# actually run; nothing referenced the extra.
+
+[project.urls]
+Homepage = "https://github.com/steveoleary/session-browser"
+Repository = "https://github.com/steveoleary/session-browser"
+Issues = "https://github.com/steveoleary/session-browser/issues"
 
 [project.scripts]
 session-browser = "session_browser.app:main"
