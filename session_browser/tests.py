@@ -717,6 +717,106 @@ class TestLastActivity:
         assert _last_activity_iso(empty, "claude") == ""
         assert _last_activity_iso(tmp_path / "nope.jsonl", "claude") == ""
 
+    # Codex writes a turn under a different vocabulary per history mode, and
+    # recognising only the legacy one cost more than a wrong timestamp: no
+    # turn found means widening the window until the whole file has been read,
+    # which on the real corpus was 93 MB read across 147 rollouts to return "".
+
+    def test_codex_legacy_event(self, tmp_path):
+        f = tmp_path / "legacy.jsonl"
+        f.write_text(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-06-29T12:00:00Z",
+                    "payload": {"type": "user_message", "message": "hi"},
+                }
+            )
+            + "\n"
+        )
+        assert _last_activity_iso(f, "codex") == "2026-06-29T12:00:00Z"
+
+    def test_codex_paginated_item_completed(self, tmp_path):
+        f = tmp_path / "paginated.jsonl"
+        f.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": ts,
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {"type": kind, "id": "i"},
+                        },
+                    }
+                )
+                for ts, kind in (
+                    ("2026-06-29T12:00:00Z", "UserMessage"),
+                    # The assistant side counts too: recognising only the user
+                    # side would timestamp a session whose last act was the
+                    # reply at its previous user turn.
+                    ("2026-06-29T12:00:09Z", "AgentMessage"),
+                    ("2026-06-29T12:00:11Z", "CommandExecution"),
+                )
+            )
+            + "\n"
+        )
+        assert _last_activity_iso(f, "codex") == "2026-06-29T12:00:09Z"
+
+    def test_codex_response_item_when_no_event_vocabulary(self, tmp_path):
+        f = tmp_path / "response.jsonl"
+        f.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "timestamp": ts,
+                        "payload": {"type": "message", "role": role},
+                    }
+                )
+                for ts, role in (
+                    ("2026-06-29T12:00:00Z", "user"),
+                    ("2026-06-29T12:00:09Z", "assistant"),
+                    # A developer message is the system prompt, not a turn.
+                    ("2026-06-29T12:00:11Z", "developer"),
+                )
+            )
+            + "\n"
+        )
+        assert _last_activity_iso(f, "codex") == "2026-06-29T12:00:09Z"
+
+    def test_codex_non_turn_records_are_still_ignored(self, tmp_path):
+        f = tmp_path / "lifecycle.jsonl"
+        f.write_text(
+            "\n".join(
+                json.dumps(record)
+                for record in (
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-06-29T12:00:00Z",
+                        "payload": {"type": "user_message", "message": "hi"},
+                    },
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-29T12:00:05Z",
+                        "payload": {"type": "reasoning"},
+                    },
+                    {
+                        "type": "turn_context",
+                        "timestamp": "2026-06-29T12:00:07Z",
+                        "payload": {"cwd": "/tmp"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-06-29T12:00:09Z",
+                        "payload": {"type": "token_count", "total": 9},
+                    },
+                )
+            )
+            + "\n"
+        )
+        assert _last_activity_iso(f, "codex") == "2026-06-29T12:00:00Z"
+
 
 class TestScanOpencode:
     def _make_opencode_db(self, tmp_path):
