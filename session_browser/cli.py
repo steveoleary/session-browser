@@ -309,6 +309,19 @@ def build_parser() -> argparse.ArgumentParser:
         "stats",
         help="summarize sessions: provider breakdown, daily "
         "activity, top working directories",
+        # An epilog rather than a note in the module docstring, which no
+        # agent can reach: this exact field was documented there and a test
+        # reader still had to ask what it meant.
+        epilog=(
+            'JSON output carries "transcript_health": "not_checked", always. '
+            "stats never opens a transcript, so its total counts sessions "
+            "discovered, not sessions readable -- corrupt and zero-entry "
+            "records are inside the number. Only `list` opens them, and it "
+            'names them in its "warnings". "top_cwds" decomposes the total '
+            "by directory, which is also the cheapest check on a --repo or "
+            "--cwd substring that matched more projects than intended."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_filter_args(p_stats)
     p_stats.add_argument(
@@ -344,10 +357,13 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--repo",
-        help="case-insensitive substring of the project name — the last "
-        "segment of the session's directory, or of its project root where "
-        "the provider records one (opencode does, so a worktree session "
-        "reports the parent project). Not a git remote",
+        help="case-insensitive substring of the project name: the last "
+        "segment of the session's project root where the provider records "
+        "one, else of its directory. Not a git remote. Only opencode "
+        "records a root, so for claude and codex a session run in a git "
+        "worktree is named after the worktree directory rather than the "
+        "project it belongs to. Read cwd off the hits when worktrees are "
+        "in play",
     )
     p.add_argument("--cwd", help="case-insensitive substring of working directory")
     p.add_argument(
@@ -403,7 +419,13 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         "by default they are auto-excluded (detected from the "
         "agent's session-id env var, e.g. CLAUDE_CODE_SESSION_ID)",
     )
-    p.add_argument("--limit", type=int, help="maximum number of results")
+    p.add_argument(
+        "--limit",
+        type=int,
+        help="maximum number of results; omit it and every match is "
+        "returned, unbounded. When it does truncate, a warning reports how "
+        "many were dropped and their date range",
+    )
 
 
 def _print_error(exc: CliError, fmt: str) -> None:
