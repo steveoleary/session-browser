@@ -9,7 +9,10 @@ Output contracts (stable shapes the consuming agent can rely on):
   stats' provider rows alike. Two names for it meant reading the wrong
   one returned null rather than raising, which is unfalsifiable at the
   call site: "no timestamp recorded" and "wrong key" look identical.
+- session_dict "branch" is null when a provider has no branch field at all,
+  and "" only when the provider supports it but recorded no active branch.
 - list:       {"sessions": [session_dict + "total_entries", ...],
+               "counts": {"returned", "readable", "empty", "unreadable"},
                "warnings?": [...]}
               (total_entries is null for an unreadable transcript; with
                --around, each session also carries "offset" — signed
@@ -565,6 +568,7 @@ def apply_filters(
         out = [s for s in out if s.provider.lower() == p]
     if args.repo:
         q = args.repo.lower()
+        candidates = out
         blank = sum(1 for s in out if not (s.repository or "").strip())
         out = [s for s in out if q in (s.repository or "").lower()]
         # An empty result and an empty *field* are indistinguishable to the
@@ -579,9 +583,32 @@ def apply_filters(
                 f"directory has none. Those can only be reached by --cwd "
                 f"<path fragment>, a content search, or --provider."
             )
+        if not out and warnings is not None:
+            _append_near_miss_warning(
+                warnings,
+                flag="--repo",
+                query=args.repo,
+                values=[s.repository for s in candidates if s.repository],
+            )
     if args.cwd:
         q = args.cwd.lower()
+        candidates = out
+        blank = sum(1 for s in out if not (s.cwd or "").strip())
         out = [s for s in out if q in (s.cwd or "").lower()]
+        if not out and blank and warnings is not None:
+            warnings.append(
+                f"--cwd matched nothing, and {blank} session(s) have no "
+                f"recorded working directory. Those can only be reached by "
+                f"a content search or --provider."
+            )
+        if not out and warnings is not None:
+            _append_near_miss_warning(
+                warnings,
+                flag="--cwd",
+                query=args.cwd,
+                values=[s.cwd for s in candidates if s.cwd],
+                path_components=True,
+            )
     around = _resolve_anchor(sessions, args)
     since = until = until_excl = None
     if around is not None:
@@ -601,9 +628,11 @@ def apply_filters(
                 until_excl = until + timedelta(days=1)
     if since or until:
         kept = []
+        missing_time = 0
         for s in out:
             ts = _session_time(s)
             if ts is None:
+                missing_time += 1
                 continue  # date filters need a parseable time
             if since and ts < since:
                 continue
@@ -613,6 +642,12 @@ def apply_filters(
                 continue
             kept.append(s)
         out = kept
+        if missing_time and warnings is not None:
+            warnings.append(
+                f"date filters excluded {missing_time} session(s) with no "
+                f"parseable last-activity timestamp; they cannot be placed "
+                f"inside or outside the requested window"
+            )
     if getattr(args, "here", False):
         base = os.getcwd()
         missing = sum(1 for s in out if not (s.cwd or "").strip())
@@ -681,6 +716,39 @@ def apply_filters(
     if apply_limit and args.limit is not None:
         out = _limited(out, args.limit)
     return out
+
+
+def _append_near_miss_warning(
+    warnings: list[str],
+    *,
+    flag: str,
+    query: str,
+    values: list[str],
+    path_components: bool = False,
+) -> None:
+    """Suggest close recorded values after a free-text filter matches nothing.
+
+    The filters remain literal substrings and are never broadened silently.
+    For cwd values, compare against path components as well as full paths so
+    ``coffe_run`` can suggest ``/work/coffee_run`` instead of being judged
+    dissimilar merely because of its parent directories.
+    """
+    by_key: dict[str, str] = {}
+    for value in values:
+        key = value.lower()
+        by_key.setdefault(key, value)
+        if path_components:
+            for component in Path(value).parts:
+                if component not in (os.sep, ""):
+                    by_key.setdefault(component.lower(), value)
+    close = difflib.get_close_matches(query.lower(), by_key, n=3, cutoff=0.8)
+    suggestions = list(dict.fromkeys(by_key[key] for key in close))
+    if suggestions:
+        rendered = ", ".join(repr(value) for value in suggestions)
+        warnings.append(
+            f"{flag} {query!r} matched nothing; did you mean {rendered}? "
+            f"The filter was not changed."
+        )
 
 
 def _exclude_patterns(args) -> list[str]:
@@ -860,7 +928,15 @@ def cmd_list(args) -> int:
                     _signed_offset(ts, around[1]) if ts is not None else None
                 )
             items.append(item)
-        payload: dict = {"sessions": items}
+        payload: dict = {
+            "sessions": items,
+            "counts": {
+                "returned": len(counts),
+                "readable": sum(n is not None and n > 0 for n in counts),
+                "empty": sum(n == 0 for n in counts),
+                "unreadable": sum(n is None for n in counts),
+            },
+        }
         if warnings:
             payload["warnings"] = warnings
         print(json.dumps(payload, indent=2))

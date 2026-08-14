@@ -26,7 +26,10 @@ class Session:
     provider: str
     summary: str = ""
     cwd: str = ""
-    branch: str = ""
+    # None means the provider has no branch field at all; "" means it has
+    # one, but this session recorded no branch. Keeping those states distinct
+    # prevents a consumer from reading "unavailable" as "known empty".
+    branch: str | None = ""
     repository: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -487,6 +490,11 @@ def scan_opencode() -> list[Session]:
                     provider="opencode",
                     summary=r["title"] or "",
                     cwd=r["directory"] or r["worktree"] or "",
+                    # OpenCode's session/project schema has no branch column.
+                    # Do not serialize that structural absence as a known-
+                    # empty string, which is what Claude/Codex legitimately
+                    # record for a session with no active branch.
+                    branch=None,
                     # The project table has a name column and it is NULL for
                     # every row in a real install, so the path is what there
                     # is. Preferred over it anyway when set: it is the name
