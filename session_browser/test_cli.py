@@ -135,6 +135,31 @@ class TestList:
         _, out, _ = cli("list", "--cwd", "projb")
         assert [s["id"] for s in json.loads(out)["sessions"]] == ["codex:bbb"]
 
+    def test_repo_miss_with_unpopulated_sessions_warns(self, cli, sessions):
+        """An empty result and an empty *field* must not look alike.
+
+        This flag returned an empty set for every input for as long as it
+        existed, because no scanner ever populated the field it reads. A
+        caller cannot tell that apart from "no sessions in that repo", so a
+        session with nothing to match against says so.
+        """
+        sessions[0].repository = ""
+        _, out, _ = cli("list", "--repo", "nosuchproject")
+        data = json.loads(out)
+        assert data["sessions"] == []
+        warning = next(w for w in data["warnings"] if "--repo matched nothing" in w)
+        assert "1 session(s) have no recorded project name" in warning
+        assert "--cwd" in warning
+
+    def test_repo_miss_with_every_session_populated_stays_quiet(self, cli):
+        """No blanks means the empty result is the real answer."""
+        _, out, _ = cli("list", "--repo", "nosuchproject")
+        data = json.loads(out)
+        assert data["sessions"] == []
+        assert not any(
+            "no recorded project name" in w for w in data.get("warnings", [])
+        )
+
     def test_date_filters_inclusive_boundaries(self, cli):
         _, out, _ = cli("list", "--since", "2026-06-05")
         assert [s["id"] for s in json.loads(out)["sessions"]] == [
