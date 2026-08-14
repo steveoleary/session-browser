@@ -2220,9 +2220,33 @@ class TestStats:
         assert "top working directories" in out
 
     def test_text_empty_state(self, stats_cli):
-        code, out, _ = stats_cli("stats", "--provider", "nonexistent")
+        # A filter that matches nothing but is *valid*. It used to be
+        # --provider nonexistent, which no longer parses: an unknown provider
+        # is now rejected rather than quietly filtering every session out.
+        code, out, _ = stats_cli("stats", "--cwd", "no-such-directory")
         assert code == 0
         assert "no sessions match" in out
+
+    def test_unknown_provider_is_rejected_not_filtered_with(self, capsys):
+        """`--provider claude-code` used to report that there were no Claude
+        Code sessions. Naming the valid values beats an empty set that reads
+        as an answer.
+
+        Goes through argparse rather than the fixture, because argparse exits
+        the process on a bad value instead of returning a code — which is the
+        behaviour being asserted, and is what the CLI's other enum flags do.
+        """
+        with pytest.raises(SystemExit) as exc:
+            run_cli(["stats", "--provider", "claude-code"])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "invalid choice: 'claude-code'" in err
+        assert "claude" in err and "codex" in err and "opencode" in err
+
+    def test_provider_stays_case_insensitive(self, stats_cli):
+        code, out, _ = stats_cli("stats", "--provider", "CLAUDE")
+        assert code == 0
+        assert "no sessions match" not in out
 
     def test_invalid_days_and_top(self, stats_cli):
         code, _, err = stats_cli("stats", "--days", "0", "--format", "json")
