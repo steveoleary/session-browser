@@ -114,8 +114,8 @@ and what deliberately does not:
 
 The counters above work at the grain of a file, a statement, a parse, so CPU
 added *inside* a loop that does the same I/O moves none of them. A second layer
-closes most of that gap: five probes drive one hot loop each over a fixed input
-and count **executed Python opcodes**. Still a count, not a timing — identical
+closes most of that gap: one probe per hot loop drives it over a fixed input
+and counts **executed Python opcodes**. Still a count, not a timing — identical
 on every machine — but fine enough to see a loop body change.
 
 They are enforced by `TestLoopOpcodeBudgets` alongside the workload budgets,
@@ -181,6 +181,14 @@ Reading the result:
     silently dropped.
 - A change that does not alter what search reads cannot show a speed
   difference. Pick queries and a workload that actually exercise the change.
+
+`benchmarks/` holds two smaller scripts as well, and neither judges anything —
+they print timings for you to read, against your own corpus, with no baseline
+and no verdict. `search_end_to_end.py` times whole-corpus search per query;
+`search_ripgrep.py` times the raw candidate scan with ripgrep against the pure
+Python fallback, by patching the ripgrep path off. Reach for them while
+exploring where time goes; reach for `retrieval_compare.py` when a change needs
+a decision.
 
 ## Local `session-browser` command
 
