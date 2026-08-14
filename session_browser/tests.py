@@ -918,6 +918,7 @@ class TestScanOpencode:
         assert sessions[0].summary == "Fix authentication bug"
         assert sessions[0].cwd == "/Users/test/myproject"
         assert sessions[0].repository == "myproject"
+        assert sessions[0].branch is None
 
     def test_repository_falls_back_to_the_worktree_path(self, tmp_path):
         """``project.name`` is NULL for every row in a real install, so the

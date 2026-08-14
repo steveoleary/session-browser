@@ -160,6 +160,30 @@ class TestList:
             "no recorded project name" in w for w in data.get("warnings", [])
         )
 
+    @pytest.mark.parametrize(
+        ("flag", "typo", "expected"),
+        [
+            ("--repo", "org/alpa", "org/alpha"),
+            ("--cwd", "projAA", "/home/u/projA"),
+        ],
+    )
+    def test_free_text_filter_near_miss_is_suggested_not_applied(
+        self, cli, flag, typo, expected
+    ):
+        _, out, _ = cli("list", flag, typo)
+        data = json.loads(out)
+        assert data["sessions"] == []
+        warning = next(w for w in data["warnings"] if "did you mean" in w)
+        assert expected in warning
+        assert "filter was not changed" in warning
+
+    def test_cwd_miss_with_unpopulated_sessions_warns(self, cli, sessions):
+        sessions[0].cwd = ""
+        _, out, _ = cli("list", "--cwd", "nosuchdirectory")
+        data = json.loads(out)
+        assert data["sessions"] == []
+        assert any("no recorded working directory" in w for w in data["warnings"])
+
     def test_date_filters_inclusive_boundaries(self, cli):
         _, out, _ = cli("list", "--since", "2026-06-05")
         assert [s["id"] for s in json.loads(out)["sessions"]] == [
@@ -173,6 +197,16 @@ class TestList:
         ]
         _, out, _ = cli("list", "--since", "2026-06-02", "--until", "2026-06-08")
         assert [s["id"] for s in json.loads(out)["sessions"]] == ["codex:bbb"]
+
+    def test_date_filter_reports_sessions_it_cannot_place(self, cli, sessions):
+        sessions[0].updated_at = ""
+        _, out, _ = cli("list", "--since", "2026-06-01")
+        data = json.loads(out)
+        assert "claude:aaa" not in [s["id"] for s in data["sessions"]]
+        assert any(
+            "1 session(s) with no parseable last-activity timestamp" in w
+            for w in data["warnings"]
+        )
 
     def test_limit(self, cli):
         _, out, _ = cli("list", "--limit", "1")
@@ -190,12 +224,19 @@ class TestList:
 
     def test_entry_count_and_duration_triage_signals(self, cli):
         _, out, _ = cli("list")
-        by_id = {s["id"]: s for s in json.loads(out)["sessions"]}
+        data = json.loads(out)
+        by_id = {s["id"]: s for s in data["sessions"]}
         assert by_id["claude:aaa"]["total_entries"] == 2
         assert by_id["codex:bbb"]["total_entries"] == 1
         assert by_id["claude:ccc"]["duration_seconds"] == 7200
         # No created_at recorded: the span cannot be derived.
         assert by_id["claude:aaa"]["duration_seconds"] is None
+        assert data["counts"] == {
+            "returned": 3,
+            "readable": 3,
+            "empty": 0,
+            "unreadable": 0,
+        }
 
     def test_unreadable_transcript_counts_null(self, sessions, monkeypatch, capsys):
         sessions.append(
@@ -556,6 +597,12 @@ class TestListDiagnostics:
         warns = " ".join(data["warnings"])
         assert "claude:bad" in warns and "unreadable" in warns
         assert "claude:hollow" in warns and "zero entries" in warns
+        assert data["counts"] == {
+            "returned": 5,
+            "readable": 3,
+            "empty": 1,
+            "unreadable": 1,
+        }
 
     def test_healthy_sessions_produce_no_diagnostics(self, cli):
         _, out, err = cli("list")
@@ -1076,6 +1123,12 @@ class TestSearch:
         }
         assert "snippets" not in data["results"][0]
         assert "entries" not in data["results"][0]
+
+    def test_free_text_near_miss_diagnostic_survives_search_envelope(self, cli):
+        _, out, _ = cli("search", "wombat", "--cwd", "projAA", "--mode", "ids")
+        data = json.loads(out)
+        assert data["results"] == []
+        assert any("/home/u/projA" in w for w in data["warnings"])
 
     def test_snippets_default_mode_respects_context(self, cli):
         _, out, _ = cli("search", "wombat", "--context", "6")
@@ -2206,6 +2259,12 @@ class TestStats:
         data = json.loads(out)
         assert data["total"] == 2
         assert [p["provider"] for p in data["providers"]] == ["claude"]
+
+    def test_stats_preserves_free_text_near_miss_diagnostic(self, stats_cli):
+        _, out, _ = stats_cli("stats", "--cwd", "projAA", "--format", "json")
+        data = json.loads(out)
+        assert data["total"] == 0
+        assert any("/home/u/projA" in w for w in data["warnings"])
 
     def test_exclude_cwd_updates_every_aggregate(self, stats_cli):
         """stats derives all of its numbers from the filtered set, so an

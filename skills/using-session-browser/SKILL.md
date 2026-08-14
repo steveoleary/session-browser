@@ -48,9 +48,9 @@ a transcript, by design — it says so in the payload, `"transcript_health":
 "not_checked"` — so its total cannot see sessions that are corrupt or empty.
 `list` does open them, but it does **not** remove them: all of them stay in
 `.sessions`, and the warning names a handful of ids and then says "(N more)".
-The readable count is yours to compute — rows with `total_entries > 0`. Also
-note the total is caller-relative: your own live session is excluded unless you
-pass `--include-current`.
+Use its top-level `counts.readable` rather than treating the array length as a
+readable count. Also note the total is caller-relative: your own live session
+is excluded unless you pass `--include-current`.
 
 ## Flags are not documented here
 
