@@ -35,7 +35,7 @@ from itertools import accumulate
 from itertools import count as _count
 from pathlib import Path
 
-from session_browser.discovery import Session, _opencode_db_path
+from session_browser.discovery import Session, _codex_injected, _opencode_db_path
 
 
 class TranscriptUnreadable(Exception):
@@ -1925,9 +1925,7 @@ def iter_entries(session: Session, warnings: list[str]) -> Iterator[TranscriptEn
         yield from _parse_jsonl(path, warnings, _claude_entries)
     elif session.provider == "codex":
         path = _existing_file(session)
-        yield from _dedupe_adjacent_assistant(
-            _parse_jsonl(path, warnings, _codex_entries)
-        )
+        yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, _codex_entries))
     elif session.provider == "opencode":
         db_path = _opencode_db_path()
         if not db_path.is_file():
@@ -2345,29 +2343,78 @@ def _claude_tool_result_text(content) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _dedupe_adjacent_assistant(
+# Codex writes a user turn under two different vocabularies, and which one
+# depends on the thread's history mode. Upstream's rollout policy persists
+# ``user_message`` and ``agent_message`` events only in Legacy mode; Paginated
+# mode persists ``item_completed`` events carrying TurnItems instead. Neither
+# is present in every file — measured over a 784-rollout corpus, 614 files
+# carry the first, 42 the second, and 128 carry neither. What survives both
+# eras is the raw ``response_item`` the model was sent, because that side of
+# the policy is history-mode independent.
+#
+# So the response item is the fallback, not the canonical record: Codex also
+# presents *injected* input as role=user (hook prompts, the AGENTS.md
+# preamble, environment context), and upstream keeps those distinct from a
+# TurnItem::UserMessage precisely because they are not something a human
+# typed. Taking role=user as the primary signal would index every session's
+# boilerplate. Precedence is therefore canonical-event first, response item
+# only when no canonical record claims the same turn.
+_CODEX_RESPONSE_USER = {"source": "response_item"}
+
+
+def _dedupe_codex_turns(
     entries: Iterator[TranscriptEntry],
 ) -> Iterator[TranscriptEntry]:
-    """Drop an assistant entry that repeats the previous one verbatim.
+    """Collapse Codex's two-record turns to one entry each.
 
-    Codex records each assistant message twice — an event_msg
-    ``agent_message`` and a ``response_item`` message, milliseconds apart —
-    so every assistant turn parsed naively appears as two identical
-    adjacent entries. Keep the first of each pair. Only *adjacent*
-    assistant repeats are dropped: any intervening entry (a user turn, a
-    tool call) resets the comparison, so a genuinely repeated answer
-    across turns survives. Deduping both sources beats parsing just one:
-    a file that carries only one of the two event kinds still yields its
-    assistant turns."""
+    Two separate duplications, both from the same cause — Codex writes a turn
+    as an event *and* as the raw response item, milliseconds apart.
+
+    Assistant: keep the first of two identical adjacent entries. Any
+    intervening entry resets the comparison, so a genuinely repeated answer
+    across turns survives, and a file carrying only one of the two event kinds
+    still yields its assistant turns.
+
+    User: the pairing is resolved by *source*, not by text. Measured over the
+    real corpus, all 2015 response/canonical pairs are adjacent with the
+    response item first — but 19 of them are not text-identical, because the
+    response item carries extra model-context wrapping, so an equality test
+    leaks those. A response-item user entry is therefore held back one entry
+    and dropped when a canonical record follows it, whatever that record says.
+    Only response→canonical collapses: canonical→canonical is left alone, and
+    60 of those are real retries after an aborted turn.
+    """
+    pending: TranscriptEntry | None = None
     prev_text: str | None = None
     for e in entries:
-        if e.role == "assistant":
+        role = e.role
+        if pending is not None:
+            # The canonical record claims the turn; otherwise the held-back
+            # response item was the only record of it and must be emitted --
+            # unless it was injected context rather than something a human
+            # typed. That test runs here rather than in the parser on purpose:
+            # on a legacy rollout every response item is claimed by the event
+            # that follows it, so checking at the parse site would pay for
+            # 1790 records to reject 230.
+            if (
+                role != "user" or e.metadata is _CODEX_RESPONSE_USER
+            ) and not _codex_injected(pending.text):
+                yield pending
+            pending = None
+            prev_text = None
+        if role == "user" and e.metadata is _CODEX_RESPONSE_USER:
+            pending = e
+            prev_text = None
+            continue
+        if role == "assistant":
             if e.text == prev_text:
                 continue
             prev_text = e.text
         else:
             prev_text = None
         yield e
+    if pending is not None and not _codex_injected(pending.text):
+        yield pending
 
 
 def _codex_entries(obj: dict) -> Iterator[TranscriptEntry]:
@@ -2400,6 +2447,8 @@ def _codex_entries(obj: dict) -> Iterator[TranscriptEntry]:
         msg = obj.get("message", "")
         if type(msg) is str and msg:
             yield TranscriptEntry("assistant", msg, ts)
+    elif etype == "item_completed":
+        yield from _codex_item_completed(obj, ts)
     elif etype == "response.output_item.done":
         item = obj.get("item")
         if type(item) is not dict:
@@ -2422,22 +2471,41 @@ def _codex_response_item(payload: dict, ts: str) -> Iterator[TranscriptEntry]:
     The caller has already established that *payload* is a dict; this is the
     hottest Codex record type, so it is not re-checked here."""
     ptype = payload.get("type", "")
-    # Assistant-only on purpose: user turns also arrive as user_message
-    # events, so taking both would duplicate them.
-    if ptype == "message" and payload.get("role") == "assistant":
-        content = payload.get("content")
-        # Bailing out replaces substituting an empty list: an empty list
-        # produced no texts, hence an empty join, hence no entry.
-        if type(content) is not list:
-            return
-        texts = [
-            c.get("text", "")
-            for c in content
-            if type(c) is dict and c.get("type") == "output_text"
-        ]
-        text = "".join(texts)
-        if text:
-            yield TranscriptEntry("assistant", text, ts)
+    if ptype == "message":
+        role = payload.get("role")
+        if role == "assistant":
+            content = payload.get("content")
+            # Bailing out replaces substituting an empty list: an empty list
+            # produced no texts, hence an empty join, hence no entry.
+            if type(content) is not list:
+                return
+            texts = [
+                c.get("text", "")
+                for c in content
+                if type(c) is dict and c.get("type") == "output_text"
+            ]
+            text = "".join(texts)
+            if text:
+                yield TranscriptEntry("assistant", text, ts)
+        elif role == "user":
+            # The era-independent record of a user turn, tagged so the dedupe
+            # pass can drop it when a canonical event claims the same turn.
+            # ``input_text`` is the shape here, not the ``output_text`` the
+            # assistant side uses; an ``input_image`` part carries no text and
+            # so yields nothing, though the record still counts as activity
+            # for discovery.
+            content = payload.get("content")
+            if type(content) is not list:
+                return
+            texts = [
+                c.get("text", "")
+                for c in content
+                if type(c) is dict and c.get("type") == "input_text"
+            ]
+            text = "".join(texts)
+            if text:
+                yield TranscriptEntry("user", text, ts, _CODEX_RESPONSE_USER)
+        # ``developer`` messages carry the system prompt: no readable turn.
     elif ptype in ("function_call", "custom_tool_call"):
         name = payload.get("name", "?")
         args = (
@@ -2458,7 +2526,34 @@ def _codex_response_item(payload: dict, ts: str) -> Iterator[TranscriptEntry]:
             output = _json_compact(output)
         if output:
             yield TranscriptEntry("tool", output, ts, {"kind": "output"})
-    # reasoning / developer / system payloads: no readable content, skipped.
+    # reasoning / system payloads: no readable content, skipped.
+
+
+def _codex_item_completed(payload: dict, ts: str) -> Iterator[TranscriptEntry]:
+    """Parse a paginated-era ``item_completed`` event into zero or one entry.
+
+    Only ``UserMessage`` is taken. An ``AgentMessage`` item repeats the
+    response item the model returned, which is already parsed above, and
+    every other TurnItem (reasoning, command execution, file change) either
+    duplicates a response item or carries no readable turn.
+    """
+    item = payload.get("item")
+    if type(item) is not dict or item.get("type") != "UserMessage":
+        return
+    content = item.get("content")
+    if type(content) is not list:
+        return
+    # ``text`` here, a third spelling: the item vocabulary is neither the
+    # response item's ``input_text`` nor the assistant's ``output_text``. A
+    # ``skill`` part names an invoked skill and carries no user prose.
+    texts = [
+        c.get("text", "")
+        for c in content
+        if type(c) is dict and c.get("type") == "text"
+    ]
+    text = "".join(texts)
+    if text:
+        yield TranscriptEntry("user", text, ts)
 
 
 def _codex_user_text(payload: dict) -> str:

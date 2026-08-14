@@ -1006,8 +1006,218 @@ class TestCodexParser:
         assert t.entries[0].timestamp == "t1"
         assert t.entries[1].timestamp == "t2"
 
-    def test_response_item_user_role_skipped(self, tmp_path):
-        """response_item with role=user is skipped to avoid duplicate messages."""
+    # ------------------------------------------------------------------
+    # The three eras of a Codex user turn. Which vocabulary a rollout uses
+    # depends on its thread history mode, and no single one appears in every
+    # file, so each is covered here on its own and in the pairings that occur.
+    # ------------------------------------------------------------------
+
+    def response_user(self, text: str) -> dict:
+        return {
+            "type": "response_item",
+            "timestamp": "2026-06-01T09:00:00Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            },
+        }
+
+    def item_completed_user(self, text: str) -> dict:
+        return {
+            "type": "event_msg",
+            "timestamp": "2026-06-01T09:00:01Z",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "item-1",
+                    "content": [{"type": "text", "text": text}],
+                },
+            },
+        }
+
+    def event_user(self, text: str) -> dict:
+        return {
+            "type": "event_msg",
+            "timestamp": "2026-06-01T09:00:01Z",
+            "payload": {"type": "user_message", "message": text},
+        }
+
+    def test_response_item_user_turn_is_the_only_record_in_a_paginated_rollout(
+        self, tmp_path
+    ):
+        """A rollout with neither canonical vocabulary still yields its turns.
+
+        128 of 784 real rollouts look like this. Before the response item was
+        parsed, searching them for anything the user typed returned nothing.
+        """
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                self.response_user("clean out any duplication from the fallback"),
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "will do"}],
+                    },
+                },
+            ],
+        )
+        t = load_transcript(self.codex_session(f))
+        assert [(e.role, e.text) for e in t.entries] == [
+            ("user", "clean out any duplication from the fallback"),
+            ("assistant", "will do"),
+        ]
+        assert t.entries[0].timestamp == "2026-06-01T09:00:00Z"
+
+    def test_item_completed_user_turn(self, tmp_path):
+        """The paginated vocabulary: a UserMessage TurnItem. Its ``skill``
+        parts name an invoked skill and carry no prose, so they add nothing."""
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-06-01T09:00:01Z",
+                    "payload": {
+                        "type": "item_completed",
+                        "item": {
+                            "type": "UserMessage",
+                            "id": "item-1",
+                            "content": [
+                                {"type": "text", "text": "use the herdr skill"},
+                                {"type": "skill", "name": "herdr", "path": "/x/y.md"},
+                            ],
+                        },
+                    },
+                },
+                # Only UserMessage is taken: an AgentMessage item repeats the
+                # response item the model returned.
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "item_completed",
+                        "item": {"type": "AgentMessage", "id": "item-2"},
+                    },
+                },
+            ],
+        )
+        t = load_transcript(self.codex_session(f))
+        assert [(e.role, e.text) for e in t.entries] == [
+            ("user", "use the herdr skill")
+        ]
+
+    def test_paired_response_item_is_dropped_by_source_not_by_text(self, tmp_path):
+        """The legacy pairing, with texts that differ.
+
+        19 real pairs are not text-identical — the response item carries extra
+        model-context wrapping — so pairing on equality would leak them. The
+        canonical event wins, and its text is the one kept.
+        """
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                self.response_user("# Context from my IDE setup:\n\nship it"),
+                self.event_user("ship it"),
+            ],
+        )
+        t = load_transcript(self.codex_session(f))
+        assert [(e.role, e.text) for e in t.entries] == [("user", "ship it")]
+
+    def test_paired_response_item_is_dropped_in_the_paginated_era_too(self, tmp_path):
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                self.response_user("ship it"),
+                self.item_completed_user("ship it"),
+            ],
+        )
+        t = load_transcript(self.codex_session(f))
+        assert [(e.role, e.text) for e in t.entries] == [("user", "ship it")]
+
+    def test_pairing_survives_an_intervening_lifecycle_record(self, tmp_path):
+        """Upstream does not promise the two records are adjacent, and a
+        record that yields no entry must not break the pair."""
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                self.response_user("ship it"),
+                {"type": "event_msg", "payload": {"type": "token_count", "total": 7}},
+                {"type": "turn_context", "payload": {"cwd": "/tmp"}},
+                self.event_user("ship it"),
+            ],
+        )
+        t = load_transcript(self.codex_session(f))
+        assert [(e.role, e.text) for e in t.entries] == [("user", "ship it")]
+
+    def test_repeated_canonical_user_turns_are_never_collapsed(self, tmp_path):
+        """A retry after an aborted turn repeats the text verbatim, and 60 of
+        those exist in the real corpus. Only response→canonical collapses."""
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                self.event_user("try again"),
+                self.event_user("try again"),
+                self.response_user("and again"),
+                self.response_user("and again"),
+            ],
+        )
+        t = load_transcript(self.codex_session(f))
+        assert [e.text for e in t.entries] == [
+            "try again",
+            "try again",
+            "and again",
+            "and again",
+        ]
+
+    def test_injected_context_is_not_indexed(self, tmp_path):
+        """Codex presents its own injected context as role=user. Indexing it
+        would match every session in a repository on its AGENTS.md."""
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                self.response_user("# AGENTS.md instructions for /repo\n\nbe careful"),
+                self.response_user("<environment_context>\n <cwd>/repo</cwd>"),
+                self.response_user('<codex_internal_context source="goal">\ngoal'),
+                # Not injected: the image prefix opens a real question, and
+                # dropping it would lose the question with it.
+                self.response_user("<image name=[Image #1]></image>why the dupes?"),
+            ],
+        )
+        t = load_transcript(self.codex_session(f))
+        assert [e.text for e in t.entries] == [
+            "<image name=[Image #1]></image>why the dupes?"
+        ]
+
+    def test_injected_context_still_loses_to_a_canonical_record(self, tmp_path):
+        """The filter is a fallback-path rule. A human who genuinely opens a
+        message that way is recorded canonically, and that record wins."""
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                self.response_user("<environment_context>\n <cwd>/repo</cwd>"),
+                self.event_user("<environment_context> is what I want to discuss"),
+            ],
+        )
+        t = load_transcript(self.codex_session(f))
+        assert [e.text for e in t.entries] == [
+            "<environment_context> is what I want to discuss"
+        ]
+
+    def test_response_item_user_image_only_yields_no_text(self, tmp_path):
+        """An image part carries no searchable text. The record still counts
+        as activity for discovery, which is tested there, not here."""
         f = tmp_path / "r.jsonl"
         write_claude_jsonl(
             f,
@@ -1017,7 +1227,26 @@ class TestCodexParser:
                     "payload": {
                         "type": "message",
                         "role": "user",
-                        "content": [{"type": "output_text", "text": "user duplicate"}],
+                        "content": [{"type": "input_image", "image_url": "data:x"}],
+                    },
+                },
+            ],
+        )
+        t = load_transcript(self.codex_session(f))
+        assert t.entries == []
+
+    def test_developer_response_item_is_skipped(self, tmp_path):
+        """role=developer carries the system prompt, not a turn."""
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": "<permissions>"}],
                     },
                 },
                 {

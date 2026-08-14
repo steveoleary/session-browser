@@ -294,8 +294,77 @@ def _scan_codex_files() -> list[Session]:
     return sessions
 
 
+# The Codex record vocabulary is shared by this module's summary/activity
+# scans and by the parser in transcript.py, and it lives here because
+# transcript.py already imports from discovery — the reverse would be a cycle.
+# The three-era story it encodes is written out above the Codex parser.
+#
+# Enumerated from every tag that opens a role=user response item across a
+# 784-rollout corpus, not guessed. Two tags found there are deliberately
+# absent: ``<image>`` prefixes a genuine turn ("<image name=[Image #1]>…Why am
+# I seeing dupes…"), and dropping it would lose the question with it; an
+# ``<INSTRUCTIONS>`` block only ever appears inside the AGENTS.md preamble.
+_CODEX_INJECTED_TAGS = frozenset(
+    {
+        "codex_internal_context",
+        "environment_context",
+        "heartbeat",
+        "recommended_plugins",
+        "skill",
+        "turn_aborted",
+        "user_action",
+        "user_instructions",
+        "user_shell_command",
+    }
+)
+_CODEX_AGENTS_PREAMBLE = "# AGENTS.md instructions"
+
+
+def _codex_injected(text: str) -> bool:
+    """True when a role=user response item is injected context, not speech."""
+    stripped = text.lstrip()
+    if not stripped.startswith("<"):
+        return stripped.startswith(_CODEX_AGENTS_PREAMBLE)
+    # The tag can carry attributes — ``<codex_internal_context source="goal">``
+    # — so the name ends at the first space when one precedes the bracket.
+    close = stripped.find(">", 1)
+    if close < 0:
+        return False
+    space = stripped.find(" ", 1)
+    if 0 < space < close:
+        close = space
+    return stripped[1:close] in _CODEX_INJECTED_TAGS
+
+
+def _codex_parts_text(content, part_type: str) -> str:
+    """Join the *part_type* text parts of a Codex content list.
+
+    Each era spells the part differently — ``input_text`` on a response item,
+    ``text`` on a TurnItem, ``output_text`` on the assistant side — so the
+    spelling is the caller's to name.
+    """
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        c.get("text", "")
+        for c in content
+        if isinstance(c, dict) and c.get("type") == part_type
+    )
+
+
+def _summary_text(text: str) -> str:
+    """One line of at most 120 characters, for a session's summary field."""
+    return text[:120].replace("\n", " ")
+
+
 def _codex_first_user_message(path: Path) -> str:
-    """Extract first user message from a codex JSONL for the summary."""
+    """Extract first user message from a codex JSONL for the summary.
+
+    All three eras, for the same reason ``_is_turn`` covers all three: a
+    paginated rollout carries no ``user_message`` event, so this returned ""
+    for 171 of 784 real sessions -- after reading every one of them to the
+    end, 106 MB to produce a blank.
+    """
     try:
         with open(path) as fh:
             for line in fh:
@@ -306,25 +375,48 @@ def _codex_first_user_message(path: Path) -> str:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                # Codex wraps events in event_msg envelope
-                payload = (
-                    obj.get("payload", {}) if obj.get("type") == "event_msg" else obj
-                )
+                # Codex wraps both events and raw model records in an
+                # envelope; only the oldest rollouts put the record itself at
+                # the top level.
+                otype = obj.get("type")
+                if otype in ("event_msg", "response_item"):
+                    payload = obj.get("payload", {})
+                else:
+                    payload = obj
+                if not isinstance(payload, dict):
+                    continue
                 ptype = payload.get("type", "")
                 if ptype == "user_message":
                     msg = payload.get("message", "")
                     if isinstance(msg, str) and msg:
-                        return msg[:120].replace("\n", " ")
+                        return _summary_text(msg)
                     content = payload.get("content", "")
                     if isinstance(content, str) and content:
-                        return content[:120].replace("\n", " ")
+                        return _summary_text(content)
                     if isinstance(content, list):
                         for part in content:
                             if (
                                 isinstance(part, dict)
                                 and part.get("type") == "input_text"
                             ):
-                                return part.get("text", "")[:120].replace("\n", " ")
+                                return _summary_text(part.get("text", ""))
+                elif ptype == "item_completed":
+                    item = payload.get("item")
+                    if isinstance(item, dict) and item.get("type") == "UserMessage":
+                        text = _codex_parts_text(item.get("content"), "text")
+                        if text:
+                            return _summary_text(text)
+                elif otype == "response_item" and ptype == "message":
+                    if payload.get("role") != "user":
+                        continue
+                    # The fallback record, and the only one an era-less
+                    # rollout has. Injected context is skipped here for the
+                    # same reason the parser skips it: a summary reading
+                    # "# AGENTS.md instructions for ..." names every session
+                    # in the repository identically.
+                    text = _codex_parts_text(payload.get("content"), "input_text")
+                    if text and not _codex_injected(text):
+                        return _summary_text(text)
     except Exception as exc:
         # Best-effort summary: an unreadable file costs a blank summary, not
         # the session. Logged at debug so it is recoverable when one is blank.
@@ -405,7 +497,17 @@ def _file_mtime_iso(path: Path) -> str:
 # without any new activity). The timestamp of the *last* such turn is the true
 # "last activity" time, immune to file-mtime drift.
 _CLAUDE_TURN_TYPES = {"user", "assistant"}
+# Codex's legacy vocabulary. Its paginated rollouts carry neither of these --
+# see the era note above the Codex parser in transcript.py -- so a file
+# written in that mode had no recognisable turn at all, and its last activity
+# collapsed to created_at. Worse, it collapsed expensively: finding no turn
+# means widening the tail window until the whole file has been read, which on
+# the real corpus was 93 MB read across 147 rollouts to return "".
 _CODEX_TURN_PAYLOADS = {"user_message", "agent_message"}
+_CODEX_TURN_ITEMS = {"UserMessage", "AgentMessage"}
+# Both roles: recognising only the user side would leave a session whose last
+# act was the assistant's reply timestamped at its previous user turn.
+_CODEX_TURN_ROLES = {"user", "assistant"}
 
 
 def _is_turn(obj: dict, provider: str) -> bool:
@@ -413,10 +515,24 @@ def _is_turn(obj: dict, provider: str) -> bool:
     if provider == "claude":
         return obj.get("type") in _CLAUDE_TURN_TYPES
     if provider == "codex":
-        if obj.get("type") != "event_msg":
-            return False
+        otype = obj.get("type")
         payload = obj.get("payload")
-        return isinstance(payload, dict) and payload.get("type") in _CODEX_TURN_PAYLOADS
+        if not isinstance(payload, dict):
+            return False
+        if otype == "response_item":
+            # Era-independent, and the record nearest the tail in practice.
+            return (
+                payload.get("type") == "message"
+                and payload.get("role") in _CODEX_TURN_ROLES
+            )
+        if otype != "event_msg":
+            return False
+        ptype = payload.get("type")
+        if ptype in _CODEX_TURN_PAYLOADS:
+            return True
+        if ptype == "item_completed":
+            item = payload.get("item")
+            return isinstance(item, dict) and item.get("type") in _CODEX_TURN_ITEMS
     return False
 
 

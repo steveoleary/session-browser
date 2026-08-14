@@ -881,14 +881,108 @@ def _probe_jsonl(root: Path) -> Path:
     return path
 
 
+def _probe_codex_jsonl(root: Path) -> Path:
+    """A small Codex rollout, in the record mix a real one carries.
+
+    Proportions matter more than volume here: ``reasoning`` and the tool
+    call/output pair dominate a real rollout, ``message`` records are a
+    minority, and the branch order in the parser is what decides how many
+    comparisons the common records pay. A file of nothing but user turns
+    would score a change to the rarest branch as though it were the hot one.
+    """
+    path = root / "probe-codex.jsonl"
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ts = "2026-01-01T00:00:00Z"
+
+        def response(payload: dict) -> str:
+            return json.dumps(
+                {"type": "response_item", "timestamp": ts, "payload": payload}
+            )
+
+        lines: list[str] = []
+        for i in range(40):
+            lines.append(response({"type": "reasoning", "encrypted_content": "opaque"}))
+            lines.append(
+                response(
+                    {
+                        "type": "function_call",
+                        "name": "shell",
+                        "arguments": f'{{"cmd": "ls {i}"}}',
+                    }
+                )
+            )
+            lines.append(
+                response({"type": "function_call_output", "output": f"file {i}\n"})
+            )
+            lines.append(
+                response(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"question {i} about offsets",
+                            }
+                        ],
+                    }
+                )
+            )
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": ts,
+                        "payload": {
+                            "type": "user_message",
+                            "message": f"question {i} about offsets",
+                        },
+                    }
+                )
+            )
+            lines.append(
+                response(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": f"answer {i}"}],
+                    }
+                )
+            )
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": ts,
+                        "payload": {"type": "token_count", "total": i},
+                    }
+                )
+            )
+        path.write_text("\n".join(lines) + "\n")
+    return path
+
+
 def loop_probes(root: Path) -> list[LoopProbe]:
     jsonl = _probe_jsonl(root)
+    codex_jsonl = _probe_codex_jsonl(root)
 
     def parse_jsonl() -> None:
         warnings: list[str] = []
         # The per-line decode loop: the single hottest path in the codebase,
         # run once per line of every transcript ever read.
         for _ in transcript._parse_jsonl(jsonl, warnings, transcript._claude_entries):
+            pass
+
+    def codex_entries() -> None:
+        warnings: list[str] = []
+        # The Codex record loop as production composes it: the per-record
+        # branch dispatch *and* the dedupe generator every entry passes
+        # through. Both are traversed once per record of every Codex
+        # transcript read, and the corpus is majority Codex.
+        for _ in transcript._dedupe_codex_turns(
+            transcript._parse_jsonl(codex_jsonl, warnings, transcript._codex_entries)
+        ):
             pass
 
     def ticking_rows() -> None:
@@ -965,6 +1059,15 @@ def loop_probes(root: Path) -> list[LoopProbe]:
             "any parse. It decides whether a file is read at all, so work "
             "added here is paid on sessions that never match.",
             raw_may_match,
+        ),
+        LoopProbe(
+            "loop.codex_entries",
+            "The Codex record loop and the dedupe generator behind it. Codex "
+            "is the largest provider in a real corpus, so a comparison added "
+            "to the branch dispatch is paid on every record of every rollout "
+            "read -- including the reasoning and tool records that never "
+            "produce a user-visible entry.",
+            codex_entries,
         ),
         LoopProbe(
             "loop.codex_db_rows",
