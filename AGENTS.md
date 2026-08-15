@@ -261,6 +261,18 @@ history**; every commit is authored by the expected identity; gitleaks is clean
 over full history; `.tracker/` is untracked; no `*.log` is tracked now or
 historically; and `.git-blame-ignore-revs` names only commits that still exist.
 
+**"Anywhere in history" means blobs, not commit messages.** The history check
+walks every version of every file and greps contents and paths; it never reads
+a commit message. An identifier quoted in a message therefore survives a run
+that reports eight passes. That is not hypothetical — the history rewrite of
+15 August 2026 had to strip one from a commit body that the preflight had been
+reporting clean all along, and it was found by grepping `git log` by hand. The
+hook has the same blind spot from the other end: it sees staged content and
+staged paths, and at `pre-commit` time the message does not exist yet, so
+closing it there means a second hook rather than a bigger one. Both gaps are
+tracked. Until they are closed, a green preflight says nothing about what your
+commit messages contain.
+
 `--remote` takes a name *or* a URL, so a new public repo can be checked before
 the working checkout is repointed at it. Omit it and check 1 is skipped.
 
