@@ -4,10 +4,10 @@
 #
 # Git does not clone hooks, so they need an install step. This one appends a
 # MARKED SECTION to .git/hooks/pre-commit rather than owning the file, because
-# the tracker manages its own section in the same hook with the same technique
-# (`--- BEGIN TRACKER INTEGRATION ---`). Owning the file, or pointing
-# core.hooksPath at a tracked directory, would silently disable the tracker's hooks the
-# next time it installed them — silently being the problem.
+# other tooling may manage its own section in the same hook with the same
+# technique. Owning the file, or pointing core.hooksPath at a tracked
+# directory, would silently disable anything else that installed a hook there —
+# silently being the problem.
 #
 # Re-running is safe: the existing LEAK-GUARD section is replaced, everything
 # else in the file is left exactly as it was.
@@ -48,6 +48,21 @@ done
 
 pattern_count() { git config --get-all hooks.leakpattern 2>/dev/null | grep -c . || true; }
 
+# Lines in the hook that belong to something other than us: not our section,
+# not the shebang, not blank. Reported so a re-run visibly leaves them alone.
+foreign_lines() {
+  [ -f "$hook" ] || { printf '0\n'; return; }
+  awk -v b="$begin" -v e="$end" '
+    $0 == b          { skip = 1; next }
+    $0 == e          { skip = 0; next }
+    skip             { next }
+    /^#!/            { next }
+    /^[[:space:]]*$/ { next }
+                     { n++ }
+    END              { print n + 0 }
+  ' "$hook"
+}
+
 if [ -n "$add_pattern" ]; then
   git config --add hooks.leakpattern "$add_pattern" \
     || die "could not add the pattern."
@@ -63,8 +78,8 @@ if [ "$mode" = "check" ]; then
     printf 'pre-commit  NOT installed — run scripts/install-hooks.sh\n'
     status=1
   fi
-  if [ -f "$hook" ] && grep -q 'BEGIN TRACKER INTEGRATION' "$hook"; then
-    printf 'pre-commit  tracker section present and preserved\n'
+  if [ "$(foreign_lines)" -gt 0 ]; then
+    printf 'pre-commit  other sections present and preserved\n'
   fi
   n="$(pattern_count)"
   printf 'patterns    %s configured in this clone\n' "${n:-0}"
@@ -105,8 +120,8 @@ cp "$tmp" "$hook"
 chmod +x "$hook" "$guard"
 
 printf 'Installed leak-guard into %s\n' "$hook"
-if grep -q 'BEGIN TRACKER INTEGRATION' "$hook"; then
-  printf 'Preserved the existing tracker section in the same hook.\n'
+if [ "$(foreign_lines)" -gt 0 ]; then
+  printf 'Preserved the other sections already in that hook.\n'
 fi
 
 n="$(pattern_count)"
