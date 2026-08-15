@@ -236,6 +236,28 @@ git config --get-all hooks.leakpattern      # read them back
 A clone with no patterns configured is a clone with nothing to hide, which is the
 right default for a public repo and for anyone else who clones it.
 
+**Ignore rules for whatever you run alongside this repo belong in
+`.git/info/exclude`, not in `.gitignore`.** Local tooling — an editor's state, a
+tracker, a scratch database — leaves directories in the working tree that are
+nobody else's business, and a `.gitignore` entry for one publishes both the tool
+and the fact that it is used here. `.git/info/exclude` has the same syntax, is
+per-clone, and is never pushed:
+
+```bash
+cat >> .git/info/exclude <<'EOF'
+.some-tool-state/
+EOF
+git check-ignore -v .some-tool-state/    # prove it took
+```
+
+The cost is that a **fresh clone ignores nothing**, so the first thing to do
+after cloning is write that file — before the tool in question creates its
+directory, or `git status` will offer it to you as an ordinary untracked path.
+Preflight check 6 does not cover this case: it catches paths that are ignored
+*and* tracked, and on a clone with no excludes such a path is simply not ignored.
+If you find an untracked directory belonging to local tooling, add it here.
+Adding it to `.gitignore` is the wrong fix and undoes the point.
+
 Optionally the hook also checks the commit author, when a clone sets
 `git config hooks.expectedemail 'you@example.com'`. Unset by default, so it is
 inert for everyone else. It catches committing from a machine whose global git
