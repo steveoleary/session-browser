@@ -11,12 +11,12 @@
 # the value is on every push, not only on migration day.
 #
 # Checks, in order:
-#   1  the remote carries no foreign refs (refs/data/*, __generated_ref__)
+#   1  the remote carries only ordinary refs (heads, tags, PRs)
 #   2  no configured identifier appears anywhere in the working tree
 #   3  no configured identifier appears anywhere in history
 #   4  every commit in history is authored by the expected identity
 #   5  gitleaks finds no secrets across full history
-#   6  .tracker/ is not tracked
+#   6  no locally-excluded path is tracked
 #   7  no *.log file is tracked, in the tree or anywhere in history
 #   8  .git-blame-ignore-revs names only commits that still exist
 #
@@ -67,19 +67,36 @@ printf 'preflight: %s' "$(basename "$(git rev-parse --show-toplevel)")"
 [ -n "$remote" ] && printf ' -> %s' "$remote"
 printf '\n\n'
 
-# --- 1. remote carries no foreign refs -------------------------------------------
+# --- 1. remote carries only ordinary refs --------------------------------------
 if [ -n "$remote" ]; then
   refs="$(git ls-remote "$remote" 2>/dev/null)"
   if [ -z "$refs" ]; then
     skip "remote '$remote' returned no refs (empty repo, or unreachable)"
-  elif printf '%s' "$refs" | grep -qE 'refs/data/|__generated_ref__'; then
-    fail "remote carries foreign refs"
-    printf '%s' "$refs" | grep -E 'refs/data/|__generated_ref__' | while IFS= read -r r; do
-      detail "$r"
-    done
-    detail "remove with: git push $remote --delete <ref>"
   else
-    pass "remote carries no foreign refs"
+    # Two rules. The structural one: anything outside heads/tags/PRs is some
+    # tool using the repository as a data store, and checking the shape catches
+    # a tool nobody thought of. It cannot see a tool that hides data in a
+    # BRANCH, though, so the second rule is a per-clone list of ref patterns,
+    # read from the same untracked config the identifiers use. Unset by
+    # default, so this is inert for anyone else.
+    bad="$(printf '%s' "$refs" | grep -vE '\srefs/(heads|tags|pull)/|\sHEAD$' || true)"
+    while IFS= read -r pat; do
+      [ -n "$pat" ] || continue
+      hit="$(printf '%s' "$refs" | grep -E "$pat" || true)"
+      [ -n "$hit" ] && bad="$(printf '%s\n%s' "$bad" "$hit")"
+    done <<EOF
+$(git config --get-all hooks.forbiddenref 2>/dev/null)
+EOF
+    bad="$(printf '%s' "$bad" | grep -v '^$' | sort -u || true)"
+    if [ -n "$bad" ]; then
+      fail "remote carries refs it should not"
+      # printf '%s\n' — without the newline the last line is an incomplete
+      # read and `while read` silently drops it, under-reporting the guard.
+      printf '%s\n' "$bad" | while IFS= read -r r; do detail "$r"; done
+      detail "remove with: git push $remote --delete <ref>"
+    else
+      pass "remote carries only ordinary refs"
+    fi
   fi
 else
   skip "no --remote given, so the remote-ref check did not run"
@@ -163,13 +180,21 @@ else
   fi
 fi
 
-# --- 6. .tracker/ not tracked ----------------------------------------------------
-excluded_tracked="$(git ls-files .tracker 2>/dev/null | grep -c . || true)"
-if [ "${excluded_tracked:-0}" -gt 0 ]; then
-  fail ".tracker/ is tracked (${excluded_tracked} files)"
-  detail "add .tracker/ to .gitignore and git rm -r --cached .tracker"
+# --- 6. nothing ignored is also tracked ----------------------------------------
+# Asks git directly for files that are both tracked and ignored. A path in
+# .gitignore or in this clone's .git/info/exclude that is nevertheless tracked
+# means the ignore rule is decorative and the file ships regardless. Checking
+# the contradiction rather than one known directory catches whatever was
+# excluded for local reasons this script has never heard of.
+ignored_tracked="$(git ls-files -c -i --exclude-standard 2>/dev/null | grep -c . || true)"
+if [ "${ignored_tracked:-0}" -gt 0 ]; then
+  fail "${ignored_tracked} tracked file(s) are also ignored"
+  git ls-files -c -i --exclude-standard 2>/dev/null | head -20 | while IFS= read -r f; do
+    detail "$f"
+  done
+  detail "untrack with: git rm -r --cached <path>"
 else
-  pass ".tracker/ is not tracked"
+  pass "nothing tracked is also ignored"
 fi
 
 # --- 7. no tracked *.log, in tree or history -----------------------------------

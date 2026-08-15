@@ -242,10 +242,11 @@ inert for everyone else. It catches committing from a machine whose global git
 identity is somebody else's — the failure that no directory convention covers.
 
 The installer appends a **marked section** to `.git/hooks/pre-commit` rather than
-owning the file, because the tracker manages its own section in the same hook with the
-same technique. Re-running replaces only our section and leaves the rest intact.
-Do not set `core.hooksPath` at a tracked directory here: it would silently
-disable the tracker's hooks the next time `bd` installed them.
+owning the file, because other tooling may manage its own section in the same
+hook with the same technique. Re-running replaces only our section and leaves
+the rest intact, and says how many foreign lines it preserved. Do not set
+`core.hooksPath` at a tracked directory here: it would silently disable anything
+else that installed a hook there — silently being the problem.
 
 Escape hatch is git's own — `git commit --no-verify`.
 
@@ -255,23 +256,40 @@ Escape hatch is git's own — `git commit --no-verify`.
 scripts/preflight-public.sh --remote origin
 ```
 
-Eight checks, exit non-zero on any failure: the remote carries no the tracker data
+Eight checks, exit non-zero on any failure: the remote carries only ordinary
 refs; no configured identifier appears in the working tree or **anywhere in
 history**; every commit is authored by the expected identity; gitleaks is clean
-over full history; `.tracker/` is untracked; no `*.log` is tracked now or
+over full history; nothing tracked is also ignored; no `*.log` is tracked now or
 historically; and `.git-blame-ignore-revs` names only commits that still exist.
 
+Two of those are written by shape rather than by name, so they keep working
+against tooling this script has never heard of. Check 1 fails on any ref outside
+`refs/heads`, `refs/tags` and `refs/pull`, because anything else is something
+using the repository as a data store. Check 6 asks git for files that are both
+tracked and ignored: an ignore rule that does not actually keep a path out is
+decorative, and the file ships regardless of what it says.
+
+The shape rule has one hole it cannot close by itself — a tool that hides data
+in a **branch** is using a perfectly ordinary ref. So check 1 also takes a
+per-clone list of ref patterns:
+
+```bash
+git config --add hooks.forbiddenref 'some-generated-ref-name'
+```
+
+Unset by default, exactly like the identifier patterns, and for the same reason:
+a clone with none configured is a clone with nothing to hide. Both halves report
+together, and a clone that needs the second half is expected to add it once.
+
 **"Anywhere in history" means blobs, not commit messages.** The history check
-walks every version of every file and greps contents and paths; it never reads
-a commit message. An identifier quoted in a message therefore survives a run
-that reports eight passes. That is not hypothetical — the history rewrite of
-15 August 2026 had to strip one from a commit body that the preflight had been
-reporting clean all along, and it was found by grepping `git log` by hand. The
-hook has the same blind spot from the other end: it sees staged content and
-staged paths, and at `pre-commit` time the message does not exist yet, so
-closing it there means a second hook rather than a bigger one. Both gaps are
-tracked. Until they are closed, a green preflight says nothing about what your
-commit messages contain.
+walks every version of every file and greps contents and paths; it never reads a
+commit message. An identifier quoted in a message therefore survives a run that
+reports eight passes, and one did — found by grepping `git log` by hand, not by
+this script. The hook has the same blind spot from the other end: it sees staged
+content and staged paths, and at `pre-commit` time the message does not exist
+yet, so closing it means a `commit-msg` hook alongside rather than a bigger
+`pre-commit`. Until then, a green preflight says nothing about what your commit
+messages contain.
 
 `--remote` takes a name *or* a URL, so a new public repo can be checked before
 the working checkout is repointed at it. Omit it and check 1 is skipped.
