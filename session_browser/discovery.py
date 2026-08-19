@@ -67,6 +67,10 @@ def scan_claude() -> list[Session]:
             try:
                 session_id = f.stem
                 summary, cwd, branch, created_at = "", "", "", ""
+                # Any earlier line's cwd, kept because the first user message
+                # sometimes carries none and the decoded directory name is a
+                # lossy last resort (see below).
+                seen_cwd = ""
                 with open(f) as fh:
                     for line in fh:
                         line = line.strip()
@@ -76,6 +80,8 @@ def scan_claude() -> list[Session]:
                             obj = json.loads(line)
                         except json.JSONDecodeError:
                             continue
+                        if not seen_cwd:
+                            seen_cwd = obj.get("cwd", "")
                         # Extract metadata from first user message
                         if obj.get("type") == "user" and not obj.get("isMeta"):
                             msg = obj.get("message", {})
@@ -86,16 +92,23 @@ def scan_claude() -> list[Session]:
                             branch = obj.get("gitBranch", "")
                             created_at = obj.get("timestamp", "")
                             break
-                # Decode project path from dir name
+                # Decode project path from dir name. Claude Code encodes "/"
+                # as "-", which is lossy: a directory whose real name contains
+                # a hyphen (session-browser, feed-finder-chrome) decodes into
+                # extra separators and yields a path that matches nothing, so
+                # --here and --cwd silently skip the session. Hence the order:
+                # the first user message's cwd, then any cwd seen earlier in
+                # the file, then the decode.
                 decoded_project = project_dir.name.replace("-", "/")
+                resolved_cwd = cwd or seen_cwd or decoded_project
                 sessions.append(
                     Session(
                         id=session_id,
                         provider="claude",
                         summary=summary,
-                        cwd=cwd or decoded_project,
+                        cwd=resolved_cwd,
                         branch=branch,
-                        repository=_repo_name(cwd or decoded_project),
+                        repository=_repo_name(resolved_cwd),
                         created_at=created_at,
                         updated_at=(
                             _last_activity_iso(f, "claude")
