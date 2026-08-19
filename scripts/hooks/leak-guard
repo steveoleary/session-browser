@@ -12,7 +12,13 @@
 # Read them back with `git config --get-all hooks.leakpattern`. scripts/
 # install-hooks.sh seeds them interactively. A clone with none configured is a
 # clone with nothing to hide, which is the correct default for a public repo and
-# for anyone else who clones it.
+# for anyone else who clones it. They are loaded through scripts/hooks/
+# leak-patterns.sh, which every guard shares so that none of them can drift into
+# blocking a different list than its neighbour.
+#
+# This hook cannot see the commit MESSAGE — at pre-commit time git has not
+# written one yet. That half is scripts/hooks/leak-guard-msg, installed as
+# commit-msg by the same installer.
 #
 # What is checked, and only within the files this commit actually touches:
 #   * file CONTENTS, via git grep against the index, scoped to the staged paths.
@@ -54,12 +60,17 @@ if [ -n "$expected" ]; then
 fi
 
 # --- patterns -----------------------------------------------------------------
-# Read into a plain loop rather than mapfile: bash 3.2 is what /usr/bin/env bash
-# resolves to on macOS and mapfile does not exist there.
-patterns=()
-while IFS= read -r line; do
-  [ -n "$line" ] && patterns+=("$line")
-done < <(git config --get-all hooks.leakpattern 2>/dev/null || true)
+lib="$(git rev-parse --show-toplevel)/scripts/hooks/leak-patterns.sh"
+if [ ! -r "$lib" ]; then
+  # Refuse rather than pass: a guard that cannot load its list has checked
+  # nothing, and saying so is the only honest outcome.
+  printf 'leak-guard: refusing this commit\n\n  cannot read %s\n\n' "$lib" >&2
+  printf 'To commit anyway: git commit --no-verify\n' >&2
+  exit 1
+fi
+# shellcheck source=scripts/hooks/leak-patterns.sh
+. "$lib"
+leak_read_patterns
 
 if [ ${#patterns[@]} -eq 0 ]; then
   [ "$fail" -eq 0 ] && exit 0

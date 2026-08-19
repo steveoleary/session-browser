@@ -13,7 +13,7 @@
 # Checks, in order:
 #   1  the remote carries only ordinary refs (heads, tags, PRs)
 #   2  no configured identifier appears anywhere in the working tree
-#   3  no configured identifier appears anywhere in history
+#   3  no configured identifier appears anywhere in history — blobs AND messages
 #   4  every commit in history is authored by the expected identity
 #   5  gitleaks finds no secrets across full history
 #   6  no locally-excluded path is tracked
@@ -58,10 +58,11 @@ skip() { n_skip=$((n_skip+1)); printf '  SKIP  %s\n' "$1"; }
 fail() { n_fail=$((n_fail+1)); printf '  FAIL  %s\n' "$1"; }
 detail() { printf '          %s\n' "$1"; }
 
-patterns=()
-while IFS= read -r line; do
-  [ -n "$line" ] && patterns+=("$line")
-done < <(git config --get-all hooks.leakpattern 2>/dev/null || true)
+lib="$(git rev-parse --show-toplevel)/scripts/hooks/leak-patterns.sh"
+[ -r "$lib" ] || { printf 'preflight: cannot read %s\n' "$lib" >&2; exit 2; }
+# shellcheck source=scripts/hooks/leak-patterns.sh
+. "$lib"
+leak_read_patterns
 
 printf 'preflight: %s' "$(basename "$(git rev-parse --show-toplevel)")"
 [ -n "$remote" ] && printf ' -> %s' "$remote"
@@ -142,13 +143,39 @@ else
       done <<< "$(git grep -I -i -l -e "$pat" $revs -- . 2>/dev/null | sed 's/^[0-9a-f]*://' | sort -u || true)"
     done
   fi
-  if [ -n "$hist_hits" ]; then
+  # Blobs are only half of history. A commit MESSAGE is not a file, so nothing
+  # above can see one, and an identifier quoted in a body survives a run that
+  # reports all-clear — which is exactly how one got through. There is no line
+  # to cite for a message, so hits are labelled by commit instead.
+  #
+  # Two passes on purpose. The cheap one greps every message at once and costs
+  # one grep per pattern; only when it finds something does the expensive one
+  # run, walking commits to say which. A clean history — the normal case — never
+  # pays for the attribution.
+  msg_hits=""
+  if [ -n "$revs" ]; then
+    all_messages="$(git log --all --format=%B 2>/dev/null || true)"
+    for pat in "${patterns[@]}"; do
+      printf '%s\n' "$all_messages" | grep -i -q -e "$pat" 2>/dev/null || continue
+      while IFS= read -r rev; do
+        [ -n "$rev" ] || continue
+        if git log -1 --format=%B "$rev" 2>/dev/null | grep -i -q -e "$pat" 2>/dev/null; then
+          # The abbreviated hash only. Printing the subject would reproduce the
+          # identifier in the output of the tool that exists to keep it in.
+          msg_hits="${msg_hits}$(git rev-parse --short "$rev")  (message) contains '${pat}'
+"
+        fi
+      done <<< "$revs"
+    done
+  fi
+
+  if [ -n "$hist_hits" ] || [ -n "$msg_hits" ]; then
     fail "identifiers present in history"
-    printf '%s\n' "$hist_hits" | while IFS= read -r l; do
+    printf '%s%s\n' "$hist_hits" "$msg_hits" | while IFS= read -r l; do
       [ -n "$l" ] && detail "$l"
     done
   else
-    pass "no identifiers anywhere in history"
+    pass "no identifiers anywhere in history, in blobs or in messages"
   fi
 fi
 

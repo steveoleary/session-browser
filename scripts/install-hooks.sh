@@ -3,14 +3,20 @@
 # Install this repository's git hooks into .git/hooks.
 #
 # Git does not clone hooks, so they need an install step. This one appends a
-# MARKED SECTION to .git/hooks/pre-commit rather than owning the file, because
+# MARKED SECTION to each hook it manages rather than owning the file, because
 # other tooling may manage its own section in the same hook with the same
 # technique. Owning the file, or pointing core.hooksPath at a tracked
 # directory, would silently disable anything else that installed a hook there —
 # silently being the problem.
 #
-# Re-running is safe: the existing LEAK-GUARD section is replaced, everything
-# else in the file is left exactly as it was.
+# Two hooks, because one cannot do both jobs:
+#   pre-commit   scripts/hooks/leak-guard      staged file contents and paths
+#   commit-msg   scripts/hooks/leak-guard-msg  the prepared commit message
+# At pre-commit time git has not written a message yet, so the message check
+# has to be a hook of its own rather than more of the first one.
+#
+# Re-running is safe: the existing marked sections are replaced, everything
+# else in those files is left exactly as it was.
 #
 # Usage:
 #   scripts/install-hooks.sh            install / refresh the hooks
@@ -21,18 +27,25 @@
 
 set -uo pipefail
 
-begin='# --- BEGIN LEAK-GUARD (managed by scripts/install-hooks.sh) ---'
-end='# --- END LEAK-GUARD ---'
+pre_begin='# --- BEGIN LEAK-GUARD (managed by scripts/install-hooks.sh) ---'
+pre_end='# --- END LEAK-GUARD ---'
+msg_begin='# --- BEGIN LEAK-GUARD-MSG (managed by scripts/install-hooks.sh) ---'
+msg_end='# --- END LEAK-GUARD-MSG ---'
 
 die() { printf 'install-hooks: %s\n' "$*" >&2; exit 1; }
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository."
 git_dir="$(git rev-parse --git-dir)"
 top="$(git rev-parse --show-toplevel)"
-hook="$git_dir/hooks/pre-commit"
+pre_hook="$git_dir/hooks/pre-commit"
+msg_hook="$git_dir/hooks/commit-msg"
 guard="$top/scripts/hooks/leak-guard"
+msg_guard="$top/scripts/hooks/leak-guard-msg"
+lib="$top/scripts/hooks/leak-patterns.sh"
 
 [ -f "$guard" ] || die "missing $guard"
+[ -f "$msg_guard" ] || die "missing $msg_guard"
+[ -f "$lib" ] || die "missing $lib"
 
 mode="install"
 add_pattern=""
@@ -41,27 +54,71 @@ while [ $# -gt 0 ]; do
     --check) mode="check"; shift ;;
     --add-pattern) add_pattern="${2:?--add-pattern needs a value}"; shift 2 ;;
     --add-pattern=*) add_pattern="${1#*=}"; shift ;;
-    -h|--help) sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
 done
 
 pattern_count() { git config --get-all hooks.leakpattern 2>/dev/null | grep -c . || true; }
 
-# Lines in the hook that belong to something other than us: not our section,
-# not the shebang, not blank. Reported so a re-run visibly leaves them alone.
+# Lines in a hook that belong to something other than us: not one of OUR
+# sections, not the shebang, not blank. Reported so a re-run visibly leaves them
+# alone. Both markers are stripped whichever hook is being inspected, so the two
+# sections never count each other as foreign.
 foreign_lines() {
-  [ -f "$hook" ] || { printf '0\n'; return; }
-  awk -v b="$begin" -v e="$end" '
-    $0 == b          { skip = 1; next }
-    $0 == e          { skip = 0; next }
-    skip             { next }
-    /^#!/            { next }
-    /^[[:space:]]*$/ { next }
-                     { n++ }
-    END              { print n + 0 }
-  ' "$hook"
+  [ -f "$1" ] || { printf '0\n'; return; }
+  awk -v b1="$pre_begin" -v e1="$pre_end" -v b2="$msg_begin" -v e2="$msg_end" '
+    $0 == b1 || $0 == b2 { skip = 1; next }
+    $0 == e1 || $0 == e2 { skip = 0; next }
+    skip                 { next }
+    /^#!/                { next }
+    /^[[:space:]]*$/     { next }
+                         { n++ }
+    END                  { print n + 0 }
+  ' "$1"
 }
+
+# install_section <hook> <begin> <end> <body>
+install_section() {
+  hook="$1"; b="$2"; e="$3"; body="$4"
+
+  # Start from whatever is already there, minus any previous section of ours.
+  tmp="$(mktemp)"
+  if [ -f "$hook" ]; then
+    awk -v b="$b" -v e="$e" '
+      $0 == b { skip = 1; next }
+      $0 == e { skip = 0; next }
+      !skip   { print }
+    ' "$hook" > "$tmp"
+  else
+    printf '#!/usr/bin/env sh\n' > "$tmp"
+  fi
+
+  # A file that existed but had no shebang would silently not run.
+  head -1 "$tmp" | grep -q '^#!' || {
+    printf '#!/usr/bin/env sh\n%s' "$(cat "$tmp")" > "$tmp.s" && mv "$tmp.s" "$tmp"
+  }
+
+  {
+    printf '%s\n' "$b"
+    printf '%s\n' "$body"
+    printf '%s\n' "$e"
+  } >> "$tmp"
+
+  cp "$tmp" "$hook"
+  chmod +x "$hook"
+  rm -f "$tmp"
+}
+
+# Single-quoted: "$@" must survive into the hook, not be expanded here. git
+# passes commit-msg the path of the prepared message as $1, and a guard that
+# never receives it refuses rather than passes.
+pre_body='if [ -x "$(git rev-parse --show-toplevel)/scripts/hooks/leak-guard" ]; then
+  "$(git rev-parse --show-toplevel)/scripts/hooks/leak-guard" || exit 1
+fi'
+msg_body='if [ -x "$(git rev-parse --show-toplevel)/scripts/hooks/leak-guard-msg" ]; then
+  "$(git rev-parse --show-toplevel)/scripts/hooks/leak-guard-msg" "$@" || exit 1
+fi'
 
 if [ -n "$add_pattern" ]; then
   git config --add hooks.leakpattern "$add_pattern" \
@@ -72,61 +129,40 @@ fi
 
 if [ "$mode" = "check" ]; then
   status=0
-  if [ -f "$hook" ] && grep -qF "$begin" "$hook"; then
-    printf 'pre-commit  leak-guard section installed\n'
-  else
-    printf 'pre-commit  NOT installed — run scripts/install-hooks.sh\n'
-    status=1
-  fi
-  if [ "$(foreign_lines)" -gt 0 ]; then
-    printf 'pre-commit  other sections present and preserved\n'
-  fi
+  report_hook() {
+    if [ -f "$1" ] && grep -qF "$2" "$1"; then
+      printf '%-11s %s section installed\n' "$3" "$4"
+    else
+      printf '%-11s %s NOT installed — run scripts/install-hooks.sh\n' "$3" "$4"
+      status=1
+    fi
+    if [ "$(foreign_lines "$1")" -gt 0 ]; then
+      printf '%-11s other sections present and preserved\n' "$3"
+    fi
+  }
+  report_hook "$pre_hook" "$pre_begin" "pre-commit" "leak-guard"
+  report_hook "$msg_hook" "$msg_begin" "commit-msg" "leak-guard-msg"
   n="$(pattern_count)"
-  printf 'patterns    %s configured in this clone\n' "${n:-0}"
-  [ "${n:-0}" -gt 0 ] || printf 'patterns    none — the guard will pass everything until you add some\n'
+  printf '%-11s %s configured in this clone\n' "patterns" "${n:-0}"
+  [ "${n:-0}" -gt 0 ] || printf '%-11s none — the guards will pass everything until you add some\n' "patterns"
   exit "$status"
 fi
 
 mkdir -p "$git_dir/hooks"
 
-# Start from whatever is already there, minus any previous section of ours.
-tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
+install_section "$pre_hook" "$pre_begin" "$pre_end" "$pre_body"
+install_section "$msg_hook" "$msg_begin" "$msg_end" "$msg_body"
+chmod +x "$guard" "$msg_guard"
 
-if [ -f "$hook" ]; then
-  awk -v b="$begin" -v e="$end" '
-    $0 == b { skip = 1; next }
-    $0 == e { skip = 0; next }
-    !skip   { print }
-  ' "$hook" > "$tmp"
-else
-  printf '#!/usr/bin/env sh\n' > "$tmp"
-fi
-
-# A file that existed but had no shebang would silently not run.
-head -1 "$tmp" | grep -q '^#!' || {
-  printf '#!/usr/bin/env sh\n%s' "$(cat "$tmp")" > "$tmp.s" && mv "$tmp.s" "$tmp"
-}
-
-{
-  printf '%s\n' "$begin"
-  printf 'if [ -x "$(git rev-parse --show-toplevel)/scripts/hooks/leak-guard" ]; then\n'
-  printf '  "$(git rev-parse --show-toplevel)/scripts/hooks/leak-guard" || exit 1\n'
-  printf 'fi\n'
-  printf '%s\n' "$end"
-} >> "$tmp"
-
-cp "$tmp" "$hook"
-chmod +x "$hook" "$guard"
-
-printf 'Installed leak-guard into %s\n' "$hook"
-if [ "$(foreign_lines)" -gt 0 ]; then
-  printf 'Preserved the other sections already in that hook.\n'
+printf 'Installed leak-guard into %s\n' "$pre_hook"
+printf 'Installed leak-guard-msg into %s\n' "$msg_hook"
+if [ "$(foreign_lines "$pre_hook")" -gt 0 ] || [ "$(foreign_lines "$msg_hook")" -gt 0 ]; then
+  printf 'Preserved the other sections already in those hooks.\n'
 fi
 
 n="$(pattern_count)"
 if [ "${n:-0}" -eq 0 ]; then
-  printf '\nNo patterns configured yet — the guard will pass everything.\n'
+  printf '\nNo patterns configured yet — the guards will pass everything.\n'
   printf 'Add them to this clone (they are never tracked or pushed):\n'
   printf '  scripts/install-hooks.sh --add-pattern <text>\n'
 else

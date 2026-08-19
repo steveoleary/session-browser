@@ -215,6 +215,13 @@ scripts/install-hooks.sh          # install / refresh
 scripts/install-hooks.sh --check  # status, changes nothing
 ```
 
+Two hooks are installed, because one cannot do both jobs:
+
+| hook | script | what it reads |
+| --- | --- | --- |
+| `pre-commit` | `scripts/hooks/leak-guard` | staged file contents and staged paths |
+| `commit-msg` | `scripts/hooks/leak-guard-msg` | the prepared commit message |
+
 `scripts/hooks/leak-guard` refuses a commit that stages text this clone has been
 told not to publish, checking both file contents and file paths, and reporting
 `file:line`. It only reads the files the commit actually touches. That scoping is
@@ -222,6 +229,32 @@ deliberate: an unscoped grep over the index means one offending tracked file
 blocks *every* unrelated commit in the repo, which trains you to type
 `--no-verify` by reflex and buys nothing. Whole-tree and whole-history assurance
 is the preflight script's job, not the hook's.
+
+`scripts/hooks/leak-guard-msg` refuses a commit whose **message** carries one of
+the same patterns, reporting the line within the message. It is a second hook
+rather than more of the first for a structural reason: at `pre-commit` time git
+has not written a message yet, so no amount of added code there could ever see
+one. That was the hole an identifier went through — a commit body naming a
+tracker ID passed the pre-commit guard cleanly and was caught afterwards by a
+human grepping `git log --format=%B`, which is the manual step these guards exist
+to remove.
+
+It checks everything above the scissors line, **comment lines included**, which
+is deliberate: git only discards `#` lines under some cleanup modes. An editor
+commit strips them; `git commit -m` and `-F` record them verbatim. The hook
+cannot tell which mode it was invoked under, and guessing permissively means
+passing exactly the message that gets published — so a pattern anywhere git might
+keep it is a refusal. The scissors tail is the one part always dropped (that is
+where `git commit --verbose` writes the staged diff), and it belongs to the other
+guard anyway.
+
+Both hooks read their patterns through `scripts/hooks/leak-patterns.sh`, which
+exists so there is one place that knows where the list lives. A second copy of
+that loop is a copy that can drift, and a guard reading a stale list is a guard
+that passes what its neighbour refuses. All three readers — both hooks and the
+preflight — go through it, and each **refuses rather than passes** if it cannot
+load the list: a guard that cannot read its patterns has checked nothing, and
+reporting success would be a lie told on exactly the day it mattered.
 
 **The blocked patterns are not in this repository, and that is the design.** A
 guard that shipped its own blocklist would publish the exact strings it exists to
@@ -263,10 +296,12 @@ Optionally the hook also checks the commit author, when a clone sets
 inert for everyone else. It catches committing from a machine whose global git
 identity is somebody else's — the failure that no directory convention covers.
 
-The installer appends a **marked section** to `.git/hooks/pre-commit` rather than
-owning the file, because other tooling may manage its own section in the same
-hook with the same technique. Re-running replaces only our section and leaves
-the rest intact, and says how many foreign lines it preserved. Do not set
+The installer appends a **marked section** to `.git/hooks/pre-commit` and to
+`.git/hooks/commit-msg` rather than owning either file, because other tooling may
+manage its own section in the same hook with the same technique. Re-running
+replaces only our sections and leaves the rest intact, and says how many foreign
+lines it preserved. `--check` reports both hooks separately, so a clone that has
+one and not the other is visible rather than assumed. Do not set
 `core.hooksPath` at a tracked directory here: it would silently disable anything
 else that installed a hook there — silently being the problem.
 
@@ -280,7 +315,8 @@ scripts/preflight-public.sh --remote origin
 
 Eight checks, exit non-zero on any failure: the remote carries only ordinary
 refs; no configured identifier appears in the working tree or **anywhere in
-history**; every commit is authored by the expected identity; gitleaks is clean
+history, in a blob or in a commit message**; every commit is authored by the
+expected identity; gitleaks is clean
 over full history; nothing tracked is also ignored; no `*.log` is tracked now or
 historically; and `.git-blame-ignore-revs` names only commits that still exist.
 
@@ -303,15 +339,19 @@ Unset by default, exactly like the identifier patterns, and for the same reason:
 a clone with none configured is a clone with nothing to hide. Both halves report
 together, and a clone that needs the second half is expected to add it once.
 
-**"Anywhere in history" means blobs, not commit messages.** The history check
-walks every version of every file and greps contents and paths; it never reads a
-commit message. An identifier quoted in a message therefore survives a run that
-reports eight passes, and one did — found by grepping `git log` by hand, not by
-this script. The hook has the same blind spot from the other end: it sees staged
-content and staged paths, and at `pre-commit` time the message does not exist
-yet, so closing it means a `commit-msg` hook alongside rather than a bigger
-`pre-commit`. Until then, a green preflight says nothing about what your commit
-messages contain.
+**"Anywhere in history" means blobs *and* commit messages.** Check 3 walks every
+version of every file, and then reads every message reachable from every ref. It
+did not always: for a while it read blobs only, and an identifier quoted in a
+commit body survived a run reporting eight passes — found by grepping `git log`
+by hand, not by this script. Message hits are reported by abbreviated commit hash
+rather than `file:line`, because a message has no line worth citing, and the
+subject is deliberately not printed: reproducing the identifier in the output of
+the tool that exists to contain it defeats the point.
+
+The message scan is two-pass. One grep per pattern over all messages at once
+answers *whether* there is anything; only a hit triggers the walk that says
+*which commit*. A clean history — the normal case — never pays for the
+attribution.
 
 `--remote` takes a name *or* a URL, so a new public repo can be checked before
 the working checkout is repointed at it. Omit it and check 1 is skipped.

@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+#
+# Refuse a commit whose MESSAGE carries text this clone has been told not to
+# publish.
+#
+# This is the other half of scripts/hooks/leak-guard, and it is a separate hook
+# for one structural reason: at pre-commit time the message does not exist yet,
+# so the pre-commit guard cannot grow to cover this no matter how much is added
+# to it. git hands the prepared message to commit-msg and nowhere earlier.
+#
+# The gap this closes is not theoretical. A commit body naming an internal
+# identifier passed the pre-commit guard cleanly and was caught afterwards by a
+# human grepping `git log --format=%B` — the manual step these guards exist to
+# remove.
+#
+# Patterns come from the same per-clone config as every other guard, through
+# scripts/hooks/leak-patterns.sh, so the two hooks cannot disagree about what is
+# blocked. A clone with none configured is a clone with nothing to hide, which
+# is the correct default for a public repo and for anyone else who clones it.
+#
+# Argument is git's own: $1 is the file holding the prepared message.
+#
+# Escape hatch is git's own: `git commit --no-verify`.
+
+set -uo pipefail
+
+# Matches listed per pattern before the rest are summarised as a count.
+max_report="${LEAK_GUARD_MAX_REPORT:-6}"
+
+top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+lib="${top}/scripts/hooks/leak-patterns.sh"
+
+refuse() {
+  printf 'leak-guard (message): refusing this commit\n%s\n\n' "$1" >&2
+  printf 'Patterns are per-clone in .git/config (hooks.leakpattern) and are not\n' >&2
+  printf 'tracked. To commit anyway: git commit --no-verify\n' >&2
+  exit 1
+}
+
+# Anything that stops this hook from reading either the patterns or the message
+# is a refusal, not a pass. A guard that fails open is a guard that reports
+# nothing on exactly the day it was needed.
+[ -n "$top" ] || refuse "
+  not inside a git repository, so nothing could be checked"
+[ -r "$lib" ] || refuse "
+  cannot read $lib, so the pattern list could not be loaded"
+
+msgfile="${1:-}"
+[ -n "$msgfile" ] && [ -r "$msgfile" ] || refuse "
+  no readable message file was passed, so nothing could be checked
+  (re-run scripts/install-hooks.sh — the hook is wired wrong)"
+
+# shellcheck source=scripts/hooks/leak-patterns.sh
+. "$lib"
+leak_read_patterns
+[ ${#patterns[@]} -eq 0 ] && exit 0
+
+# Everything above the scissors line is checked — COMMENT LINES INCLUDED.
+#
+# That looks wrong at first: git drops '#' lines, so why refuse one? Because it
+# only drops them under some cleanup modes. `git commit` through an editor uses
+# 'strip' and discards them; `git commit -m` and `-F` use 'whitespace' and
+# record them verbatim, comment marker and all. This hook cannot see which mode
+# it was invoked under, and guessing wrong in the permissive direction is a
+# guard that passes exactly the message that gets published. So it does not
+# guess: if a pattern is anywhere git might keep it, the commit is refused, and
+# deleting the line costs a second.
+#
+# The scissors tail is the one part that is always dropped — `git commit
+# --verbose` writes the whole staged diff below it — so that much is cut. It is
+# also the pre-commit guard's territory: firing on it here would refuse every
+# verbose commit of a file that guard has already cleared.
+scissors='------------------------ >8 ------------------------'
+message="$(awk -v s="$scissors" 'index($0, s) { exit } { print }' "$msgfile")"
+[ -n "$message" ] || exit 0
+
+fail=0
+report=""
+
+for pat in "${patterns[@]}"; do
+  # grep rather than `git grep`: a message is not a file in the index, so git
+  # grep cannot reach it. Both read the same POSIX basic-regexp dialect, which
+  # is what the configured patterns are written in. -i to match the guard's
+  # case-insensitivity, -n for the line to cite.
+  hits="$(printf '%s\n' "$message" | grep -i -n -e "$pat" 2>/dev/null || true)"
+  [ -n "$hits" ] || continue
+
+  n_hits="$(printf '%s\n' "$hits" | grep -c . || true)"
+  shown=0
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    shown=$((shown + 1))
+    # The line number only. Echoing the matching line would reprint the string
+    # this hook exists to keep out of places it does not belong.
+    if [ "$shown" -le "$max_report" ]; then
+      report="${report}
+  message line ${hit%%:*}  contains '${pat}'"
+    fi
+    fail=1
+  done <<< "$hits"
+  if [ "${n_hits:-0}" -gt "$max_report" ]; then
+    report="${report}
+  … and $((n_hits - max_report)) more match(es) for '${pat}'"
+  fi
+done
+
+[ "$fail" -eq 0 ] || refuse "$report"
+
+exit 0
