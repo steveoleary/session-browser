@@ -165,8 +165,9 @@ def render_text(
     """Readable, Markdown-compatible transcript body.
 
     *entry_indices* are the absolute positions of a role-filtered subset;
-    each block is then prefixed with its index so it can be fed back to
-    get --entries or matched against search's entry_index."""
+    each block is then prefixed with its position so it can be fed back to
+    get --entries or matched against an entry_index from search or from
+    get's JSON."""
     if entry_indices is None:
         blocks = [f"{entry_label(e)}: {e.text}" for e in transcript.entries]
     else:
@@ -270,7 +271,14 @@ def transcript_to_dict(
     t: Transcript, *, entry_indices: list[int] | None = None
 ) -> dict:
     """*entry_indices* (role-filtered subset) adds each entry's absolute
-    position as "index", matching get --entries / search entry_index."""
+    position as "entry_index" -- one name for the concept everywhere, so a
+    reader arriving from a search snippet finds the same key here.
+
+    It used to be "index" while search snippets said "entry_index", and a
+    reader who looked for the search name in this payload, did not find it,
+    and concluded get carried no positions at all. Two names for one field
+    fail that way silently: the miss reads as "not recorded", not as "wrong
+    key". Same argument as last_activity/updated_at, same resolution."""
     entries = []
     for pos, e in enumerate(t.entries):
         item = {
@@ -280,7 +288,7 @@ def transcript_to_dict(
             "metadata": e.metadata,
         }
         if entry_indices is not None:
-            item = {"index": entry_indices[pos], **item}
+            item = {"entry_index": entry_indices[pos], **item}
         entries.append(item)
     return {
         "session": session_to_dict(t.session),

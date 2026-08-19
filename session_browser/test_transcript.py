@@ -1851,7 +1851,7 @@ class TestRendering:
         t = self._transcript()
         kept = Transcript(t.session, [t.entries[0], t.entries[5]], t.warnings)
         d = transcript_to_dict(kept, entry_indices=[0, 5])
-        assert [(e["index"], e["role"]) for e in d["entries"]] == [
+        assert [(e["entry_index"], e["role"]) for e in d["entries"]] == [
             (0, "user"),
             (5, "system"),
         ]

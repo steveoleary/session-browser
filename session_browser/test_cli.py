@@ -822,7 +822,7 @@ class TestRoleWindowComposition:
         )
         data = json.loads(out)
         assert [e["text"] for e in data["entries"]] == ["user 2"]
-        assert data["entries"][0]["index"] == 4
+        assert data["entries"][0]["entry_index"] == 4
         assert "entry_range" not in data
 
     def test_head_bounds_kept_roles(self, mixedcli):
@@ -838,7 +838,7 @@ class TestRoleWindowComposition:
         )
         data = json.loads(out)
         assert [e["text"] for e in data["entries"]] == ["reply 0", "reply 1"]
-        assert [e["index"] for e in data["entries"]] == [1, 3]
+        assert [e["entry_index"] for e in data["entries"]] == [1, 3]
 
     def test_entries_stays_absolute_with_role(self, mixedcli):
         _, out, _ = mixedcli(
@@ -852,7 +852,7 @@ class TestRoleWindowComposition:
             "json",
         )
         data = json.loads(out)
-        assert [e["index"] for e in data["entries"]] == [2, 4]
+        assert [e["entry_index"] for e in data["entries"]] == [2, 4]
         assert data["entry_range"] == {"start": 2, "end": 5}
 
 
@@ -1592,7 +1592,9 @@ class TestGetRoleFilter:
         data = json.loads(out)
         assert data["roles"] == ["error"]
         assert data["total_entries"] == 5
-        assert [(e["index"], e["text"]) for e in data["entries"]] == [(3, "1 failed")]
+        assert [(e["entry_index"], e["text"]) for e in data["entries"]] == [
+            (3, "1 failed")
+        ]
 
     def test_error_label_marked_in_text(self, mixed_cli):
         _, out, _ = mixed_cli("get", "claude:mmm", "--role", "error")
@@ -1612,7 +1614,7 @@ class TestGetRoleFilter:
         assert code == 0
         data = json.loads(out)
         assert data["roles"] == ["user", "assistant", "error"]
-        assert [e["index"] for e in data["entries"]] == [0, 1, 3, 4]
+        assert [e["entry_index"] for e in data["entries"]] == [0, 1, 3, 4]
 
     def test_composes_with_entry_window_absolute_indices(self, mixed_cli):
         code, out, _ = mixed_cli(
@@ -1628,7 +1630,9 @@ class TestGetRoleFilter:
         assert code == 0
         data = json.loads(out)
         assert data["entry_range"] == {"start": 2, "end": 4}
-        assert [(e["index"], e["text"]) for e in data["entries"]] == [(4, "fixed it")]
+        assert [(e["entry_index"], e["text"]) for e in data["entries"]] == [
+            (4, "fixed it")
+        ]
 
     def test_no_matches_reported_not_empty_session(self, mixed_cli):
         code, out, _ = mixed_cli("get", "claude:mmm", "--role", "system")
@@ -1644,11 +1648,29 @@ class TestGetRoleFilter:
         assert code == 1 and out == ""
         assert json.loads(err)["error"]["code"] == "invalid_role"
 
-    def test_unfiltered_entries_carry_no_index(self, mixed_cli):
+    def test_unfiltered_entries_carry_no_entry_index(self, mixed_cli):
         _, out, _ = mixed_cli("get", "claude:mmm", "--format", "json")
         data = json.loads(out)
         assert "roles" not in data
-        assert all("index" not in e for e in data["entries"])
+        assert all("entry_index" not in e for e in data["entries"])
+
+    def test_get_and_search_name_the_position_the_same_way(self, mixed_cli):
+        """One name for one concept. A reader who has just seen a snippet's
+        entry_index must find that key, not a synonym, in the get payload —
+        looking for the search name and missing it reads as "get records no
+        position at all", which is what happened."""
+        _, out, _ = mixed_cli(
+            "search", "fixed it", "--format", "json", "--mode", "snippets"
+        )
+        snippet = json.loads(out)["results"][0]["snippets"][0]
+
+        _, out, _ = mixed_cli(
+            "get", "claude:mmm", "--role", "assistant", "--format", "json"
+        )
+        entry = json.loads(out)["entries"][-1]
+
+        assert "entry_index" in snippet and "entry_index" in entry
+        assert entry["entry_index"] == snippet["entry_index"] == 4
 
 
 class TestMultiPhraseSearch:
