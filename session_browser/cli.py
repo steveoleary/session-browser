@@ -24,10 +24,12 @@ Output contracts (stable shapes the consuming agent can rely on):
               (--entries windows by absolute position; --head/--tail
                window the *kept* entries — with --role that means e.g.
                the last N user turns, and entry_range is then omitted;
-               kept entries carry their absolute "index". "clip" reports
-               the per-entry char cap: stdout defaults to 4000 with a
-               "… [clipped …]" marker inside the text, --output defaults
-               to complete, --clip N overrides either, 0 disables.
+               kept entries carry their absolute "entry_index" — the same
+               key, and the same numbering, as a search snippet's.
+               "clip" reports the per-entry char cap: stdout defaults to
+               4000 with a "… [clipped …]" marker inside the text,
+               --output defaults to complete, --clip N overrides either,
+               0 disables.
                Several ids batch into {"sessions": [payload, ...],
                "skipped?": [{id, error}, ...]}; a single id keeps the
                flat legacy shape)
@@ -216,7 +218,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="A:B",
         help="return only entries A:B (0-based, inclusive; "
         "open ends allowed: '40', '40:', ':40'); indices "
-        "match search's entry_index/first_match/last_match "
+        "match the entry_index carried by search snippets and by "
+        "get's own JSON entries, and search's first_match/last_match, "
         "and are always absolute, even with --role",
     )
     window.add_argument(
