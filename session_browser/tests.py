@@ -130,6 +130,55 @@ class TestScanClaude:
         assert sessions[0].branch == "develop"
         assert sessions[0].repository == "project"
 
+    def test_cwd_falls_back_to_an_earlier_line_not_the_decoded_dir_name(self, tmp_path):
+        """The dir-name decode turns "/" back into "-" blindly, so a project
+        whose real leaf name has a hyphen decodes into a path that exists
+        nowhere. Any cwd already on an earlier line beats it."""
+        projects = (
+            tmp_path / ".claude" / "projects" / "-Users-test-Projects-session-browser"
+        )
+        projects.mkdir(parents=True)
+        lines = [
+            {"type": "last-prompt", "cwd": ""},
+            {"type": "attachment", "cwd": "/Users/test/Projects/session-browser"},
+            {
+                "type": "user",
+                "message": {"content": "no cwd on this one"},
+                "timestamp": "2026-08-13T10:00:00Z",
+            },
+        ]
+        (projects / "s3.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n"
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_claude()
+
+        assert sessions[0].cwd == "/Users/test/Projects/session-browser"
+        assert sessions[0].repository == "session-browser"
+
+    def test_cwd_decodes_dir_name_when_no_line_carries_one(self, tmp_path):
+        """The decode stays as the last resort, for a transcript that records
+        no cwd anywhere."""
+        projects = tmp_path / ".claude" / "projects" / "-Users-test-agentlab"
+        projects.mkdir(parents=True)
+        lines = [
+            {"type": "system", "timestamp": "2026-08-13T09:00:00Z"},
+            {
+                "type": "user",
+                "message": {"content": "still no cwd"},
+                "timestamp": "2026-08-13T10:00:00Z",
+            },
+        ]
+        (projects / "s4.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n"
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_claude()
+
+        assert sessions[0].cwd == "/Users/test/agentlab"
+
     def test_updated_at_uses_last_turn_not_system_or_mtime(self, tmp_path):
         """updated_at must reflect the last real turn, ignoring a later
         session-open 'system' event and a bumped file mtime."""
