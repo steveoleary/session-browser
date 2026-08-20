@@ -25,6 +25,7 @@ from session_browser.discovery import (
     scan_claude,
     scan_codex,
     scan_opencode,
+    scan_pi,
 )
 from session_browser.herdr import HerdrError, HerdrPane, workspace_label_for_path
 from session_browser.resume import (
@@ -1132,6 +1133,10 @@ class TestScanOpencode:
             hits = search_session_contents(sessions, "adb")
         assert hits == set()
 
+    def test_resume_pi(self):
+        cmd = resume_command("pi", "01a020b0-7ffa")
+        assert cmd == "pi --session 01a020b0-7ffa"
+
     def test_resume_opencode(self):
         cmd = resume_command("opencode", "ses_abc123")
         assert cmd == "opencode -s ses_abc123"
@@ -1139,6 +1144,169 @@ class TestScanOpencode:
     def test_resume_opencode_with_cwd(self):
         cmd = resume_command("opencode", "ses_abc123", "/Users/test/project")
         assert cmd == "cd /Users/test/project && opencode -s ses_abc123"
+
+
+# ---------------------------------------------------------------------------
+# pi discovery: per-file JSONL with a cwd-carrying header line
+# ---------------------------------------------------------------------------
+
+
+class TestScanPi:
+    def _write(
+        self,
+        tmp_path,
+        lines,
+        *,
+        project="--Users-test-Projects-game--",
+        name="2026-08-18T17-52-48-324Z_01a01601-22c4-7973-bf04-2698dd8d19ca.jsonl",
+    ):
+        d = tmp_path / ".pi" / "agent" / "sessions" / project
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / name
+        path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+        return path
+
+    def _session_lines(self):
+        return [
+            {
+                "type": "session",
+                "version": 3,
+                "id": "01a01601-22c4-7973-bf04-2698dd8d19ca",
+                "timestamp": "2026-08-18T17:52:48.324Z",
+                "cwd": "/Users/test/Projects/game",
+            },
+            {
+                "type": "model_change",
+                "timestamp": "2026-08-18T17:52:49.030Z",
+                "provider": "qwen-lab",
+                "modelId": "qwen38-local",
+            },
+            {
+                "type": "message",
+                "timestamp": "2026-08-18T17:52:55.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Bootstrap the game skeleton"}
+                    ],
+                },
+            },
+            {
+                "type": "message",
+                "timestamp": "2026-08-18T17:53:10.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Scaffolding it now"}],
+                },
+            },
+        ]
+
+    def test_scan_pi_sessions(self, tmp_path):
+        self._write(tmp_path, self._session_lines())
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_pi()
+
+        assert len(sessions) == 1
+        s = sessions[0]
+        assert s.id == "01a01601-22c4-7973-bf04-2698dd8d19ca"
+        assert s.provider == "pi"
+        assert s.summary == "Bootstrap the game skeleton"
+        assert s.cwd == "/Users/test/Projects/game"
+        assert s.repository == "game"
+        assert s.created_at == "2026-08-18T17:52:48.324Z"
+        assert s.updated_at == "2026-08-18T17:53:10.000Z"
+
+    def test_branch_is_absent_not_empty(self, tmp_path):
+        """pi records no branch anywhere in its format, which is a different
+        fact from a session that ran on no branch."""
+        self._write(tmp_path, self._session_lines())
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_pi()
+
+        assert sessions[0].branch is None
+
+    def test_cwd_comes_from_the_header_not_the_decoded_dir_name(self, tmp_path):
+        """The directory name encodes "/" as "-" exactly as Claude's does, so
+        decoding a hyphenated project yields a path that exists nowhere. Every
+        pi transcript carries the real cwd on its first line instead."""
+        lines = self._session_lines()
+        lines[0]["cwd"] = "/Users/test/Projects/agent-loadout"
+        self._write(tmp_path, lines, project="--Users-test-Projects-agent-loadout--")
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_pi()
+
+        assert sessions[0].cwd == "/Users/test/Projects/agent-loadout"
+        assert sessions[0].repository == "agent-loadout"
+
+    def test_id_falls_back_to_the_filename_uuid(self, tmp_path):
+        """The stem's uuid suffix is the same id the header carries, so a
+        truncated or unparseable header still leaves the session resumable."""
+        self._write(tmp_path, [{"type": "model_change", "provider": "x"}])
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_pi()
+
+        assert sessions[0].id == "01a01601-22c4-7973-bf04-2698dd8d19ca"
+
+    def test_tool_traffic_is_not_activity(self, tmp_path):
+        """A tool result is the harness answering itself. Last activity is the
+        last thing a participant said -- the same line claude and codex draw."""
+        lines = self._session_lines()
+        lines.append(
+            {
+                "type": "message",
+                "timestamp": "2026-08-18T19:00:00.000Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolName": "bash",
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            }
+        )
+        self._write(tmp_path, lines)
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_pi()
+
+        assert sessions[0].updated_at == "2026-08-18T17:53:10.000Z"
+
+    def test_summary_reads_the_first_user_turn_only(self, tmp_path):
+        lines = self._session_lines()
+        lines.append(
+            {
+                "type": "message",
+                "timestamp": "2026-08-18T18:00:00.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "second thing I asked"}],
+                },
+            }
+        )
+        self._write(tmp_path, lines)
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_pi()
+
+        assert sessions[0].summary == "Bootstrap the game skeleton"
+
+    def test_scan_pi_no_sessions_dir(self, tmp_path):
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            assert scan_pi() == []
+
+    def test_one_unreadable_file_does_not_lose_the_others(self, tmp_path):
+        self._write(tmp_path, self._session_lines())
+        d = tmp_path / ".pi" / "agent" / "sessions" / "--Users-test-Projects-game--"
+        (d / "2026-08-18T18-00-00-000Z_broken.jsonl").write_bytes(
+            b"\xff\xfe not json\n"
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_pi()
+
+        assert "01a01601-22c4-7973-bf04-2698dd8d19ca" in {s.id for s in sessions}
 
 
 # ---------------------------------------------------------------------------
@@ -3684,8 +3852,12 @@ def _herdr_pane(
     session_id=None,
     tab_id=None,
     workspace_id=None,
+    kind="id",
 ):
-    """One entry as `herdr pane list` prints it."""
+    """One entry as `herdr pane list` prints it.
+
+    ``kind`` is how herdr identified the session: ``"id"`` for claude and
+    codex, ``"path"`` for pi, whose detector reports the transcript file."""
     pane = {
         "pane_id": pane_id,
         "tab_id": tab_id or pane_id.replace(":p", ":t"),
@@ -3696,7 +3868,7 @@ def _herdr_pane(
         pane["agent"] = agent
         pane["agent_session"] = {
             "agent": agent,
-            "kind": "id",
+            "kind": kind,
             "source": f"herdr:{agent}",
             "value": session_id or "",
         }
@@ -3771,6 +3943,34 @@ class TestHerdrPaneLookup:
     def test_ignores_panes_without_an_agent(self):
         panes = [HerdrPane("w1:p1", "w1:t1", "w1", "/a", "", "")]
         assert herdr.find_pane(panes, "claude", {""}) is None
+
+    def test_pi_pane_is_matched_by_transcript_path(self):
+        """Herdr identifies a pi pane by the transcript file it has open, not
+        by an id, and says so in ``kind``. The path is compared against the
+        session's content_path, normalised on both sides."""
+        path = "/Users/test/.pi/agent/sessions/--Users-test-game--/s.jsonl"
+        panes = [
+            HerdrPane("w1:p1", "w1:t1", "w1", "/a", "pi", path, "path"),
+        ]
+        found = herdr.find_pane(
+            panes,
+            "pi",
+            {"01a01601"},
+            "/Users/test/.pi/./agent/sessions/--Users-test-game--/s.jsonl",
+        )
+        assert found is not None and found.pane_id == "w1:p1"
+
+    def test_pi_pane_on_another_transcript_is_not_a_match(self):
+        panes = [
+            HerdrPane("w1:p1", "w1:t1", "w1", "/a", "pi", "/other/s.jsonl", "path"),
+        ]
+        assert herdr.find_pane(panes, "pi", {"01a01601"}, "/mine/s.jsonl") is None
+
+    def test_a_path_pane_is_never_matched_against_the_id_set(self):
+        """Ids and paths are different namespaces; a hit across them could
+        only ever be an accident."""
+        panes = [HerdrPane("w1:p1", "w1:t1", "w1", "/a", "pi", "abc", "path")]
+        assert herdr.find_pane(panes, "pi", {"abc"}) is None
 
     def test_workspace_found_through_a_pane_in_that_folder(self):
         panes = [
@@ -3882,6 +4082,33 @@ class TestHerdrPrepareSession:
         assert plan.reused is True
         assert (plan.pane, plan.tab) == ("w4:p2", "w4:t2")
         # Nothing was created and resume was not typed a second time.
+        assert calls == [["herdr", "pane", "list"]]
+
+    def test_reuses_a_pi_pane_reported_by_transcript_path(self, tmp_path):
+        # pi's detector names the session by the file it has open, so reuse
+        # has to compare against content_path rather than the id.
+        transcript = tmp_path / "2026-08-18T17-52-48-324Z_01a01601.jsonl"
+        transcript.write_text("{}\n")
+        calls, fake_run = _herdr_stub(
+            panes=[
+                _herdr_pane(
+                    "w4:p2",
+                    cwd="/home/user/proj",
+                    agent="pi",
+                    session_id=str(transcript),
+                    kind="path",
+                ),
+            ]
+        )
+        with (
+            patch.object(herdr.shutil, "which", return_value="/usr/bin/herdr"),
+            patch.object(herdr.subprocess, "run", side_effect=fake_run),
+        ):
+            plan = herdr.prepare_session(
+                "pi", "01a01601", "/home/user/proj", content_path=str(transcript)
+            )
+
+        assert (plan.reused, plan.pane) == (True, "w4:p2")
         assert calls == [["herdr", "pane", "list"]]
 
     def test_reuses_a_pane_sitting_on_an_ancestor_id(self, tmp_path):

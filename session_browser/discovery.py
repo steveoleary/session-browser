@@ -535,6 +535,95 @@ def _opencode_db_path() -> Path:
     return Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
 
+def scan_pi() -> list[Session]:
+    """Discover pi sessions from JSONL files.
+
+    Layout is ``~/.pi/agent/sessions/<encoded-cwd>/<stamp>_<uuid>.jsonl``.
+    The directory name encodes "/" as "-" exactly as Claude's does, and is
+    lossy in the same way — a project called ``agent-loadout`` decodes into a
+    path that exists nowhere. Nothing here decodes it: every pi transcript
+    opens with a header line carrying the real cwd, so the lossy name is never
+    the best source available.
+    """
+    sessions: list[Session] = []
+    root = Path.home() / ".pi" / "agent" / "sessions"
+    if not root.is_dir():
+        return sessions
+    for project_dir in root.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for f in project_dir.glob("*.jsonl"):
+            try:
+                session_id, cwd, created_at, summary = "", "", "", ""
+                with open(f) as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(obj, dict):
+                            continue
+                        otype = obj.get("type")
+                        if otype == "session":
+                            session_id = obj.get("id", "") or session_id
+                            cwd = obj.get("cwd", "") or cwd
+                            created_at = obj.get("timestamp", "") or created_at
+                        elif otype == "message":
+                            msg = obj.get("message")
+                            if not isinstance(msg, dict):
+                                continue
+                            if msg.get("role") != "user":
+                                continue
+                            summary = _summary_text(_pi_message_text(msg))
+                            # First user turn: everything this scan wants is
+                            # at or above it.
+                            break
+                # The filename's uuid suffix is the same id the header line
+                # carries, so a file whose header is missing or unparseable
+                # still gets the id pi itself would resume by.
+                session_id = session_id or f.stem.split("_", 1)[-1]
+                sessions.append(
+                    Session(
+                        id=session_id,
+                        provider="pi",
+                        summary=summary,
+                        cwd=cwd,
+                        # pi records no branch anywhere in its format. None,
+                        # not "" — see the note on the field.
+                        branch=None,
+                        repository=_repo_name(cwd),
+                        created_at=created_at,
+                        updated_at=(
+                            _last_activity_iso(f, "pi")
+                            or created_at
+                            or _file_mtime_iso(f)
+                        ),
+                        content_path=str(f),
+                    )
+                )
+            except Exception as exc:
+                log.warning("Skipping pi session %s: %s", f.name, exc)
+    return sessions
+
+
+def _pi_message_text(msg: dict) -> str:
+    """Readable text of one pi message, ignoring non-text content parts."""
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = [
+        p.get("text", "")
+        for p in content
+        if isinstance(p, dict) and p.get("type") == "text"
+    ]
+    return " ".join(t for t in parts if t)
+
+
 def _epoch_ms_to_iso(ts, *, zulu: bool = False) -> str:
     """Convert epoch-millisecond integer to UTC ISO string.
 
@@ -580,6 +669,11 @@ _CODEX_TURN_ITEMS = {"UserMessage", "AgentMessage"}
 # Both roles: recognising only the user side would leave a session whose last
 # act was the assistant's reply timestamped at its previous user turn.
 _CODEX_TURN_ROLES = {"user", "assistant"}
+# pi writes one "message" line per turn and one per tool result, tagging the
+# role inside. Only the two conversational roles count: "toolResult" is the
+# harness answering itself, which is the same line the claude and codex rules
+# draw (neither counts tool traffic as activity).
+_PI_TURN_ROLES = {"user", "assistant"}
 
 
 def _is_turn(obj: dict, provider: str) -> bool:
@@ -605,6 +699,12 @@ def _is_turn(obj: dict, provider: str) -> bool:
         if ptype == "item_completed":
             item = payload.get("item")
             return isinstance(item, dict) and item.get("type") in _CODEX_TURN_ITEMS
+        return False
+    if provider == "pi":
+        if obj.get("type") != "message":
+            return False
+        msg = obj.get("message")
+        return isinstance(msg, dict) and msg.get("role") in _PI_TURN_ROLES
     return False
 
 
@@ -660,6 +760,7 @@ ALL_SCANNERS = {
     "claude": scan_claude,
     "codex": scan_codex,
     "opencode": scan_opencode,
+    "pi": scan_pi,
 }
 
 

@@ -271,7 +271,11 @@ class TestPrefilterInvariants:
         session is the ceiling.
         """
         counts = measured["cli.search.rare.no_rg"]
-        file_sessions = perf_budget.CLAUDE_SESSIONS + perf_budget.CODEX_SESSIONS
+        file_sessions = (
+            perf_budget.CLAUDE_SESSIONS
+            + perf_budget.CODEX_SESSIONS
+            + perf_budget.PI_SESSIONS
+        )
         assert counts["prefilter_file_scans"] == file_sessions
 
 

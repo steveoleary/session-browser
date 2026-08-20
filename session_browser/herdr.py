@@ -17,8 +17,9 @@ too.
 
 How far that reaches depends on herdr, not on us: it populates
 ``agent_session`` for the agents it has a detector for (observed for ``claude``,
-with ``source: "herdr:claude"``) and leaves it null otherwise — opencode panes
-report ``agent`` but no session. For those, ``find_pane`` cannot match and every
+with ``source: "herdr:claude"``, and for ``pi``, which it identifies by
+transcript path rather than by id) and leaves it null otherwise — opencode
+panes report ``agent`` but no session. For those, ``find_pane`` cannot match and every
 handoff opens a fresh tab, duplicating a conversation that is already on screen.
 That is a gap in detection upstream, so it is not worked around here; when herdr
 starts reporting the id, reuse begins working with no change to this module.
@@ -67,7 +68,10 @@ class HerdrPane:
 
     ``agent`` is the agent kind herdr detected in the pane and ``session_id``
     the session that agent is on; both are empty for a pane running an
-    ordinary shell.
+    ordinary shell. ``session_kind`` is how herdr identified that session —
+    ``"id"`` for an agent it can name by id, ``"path"`` for one it can only
+    point at by transcript file (pi) — and so says which of a browser
+    session's fields ``session_id`` should be compared against.
     """
 
     pane_id: str
@@ -76,6 +80,7 @@ class HerdrPane:
     cwd: str
     agent: str
     session_id: str
+    session_kind: str = ""
 
 
 @dataclass
@@ -217,7 +222,9 @@ def list_panes() -> list[HerdrPane]:
 
 def _as_pane(raw: dict) -> HerdrPane:
     session = raw.get("agent_session")
-    session_id = session.get("value") if isinstance(session, dict) else None
+    is_session = isinstance(session, dict)
+    session_id = session.get("value") if is_session else None
+    session_kind = session.get("kind") if is_session else None
     return HerdrPane(
         pane_id=str(raw.get("pane_id") or ""),
         tab_id=str(raw.get("tab_id") or ""),
@@ -225,26 +232,40 @@ def _as_pane(raw: dict) -> HerdrPane:
         cwd=str(raw.get("cwd") or ""),
         agent=str(raw.get("agent") or ""),
         session_id=str(session_id or ""),
+        session_kind=str(session_kind or ""),
     )
 
 
 def find_pane(
-    panes: list[HerdrPane], provider: str, session_ids: set[str]
+    panes: list[HerdrPane],
+    provider: str,
+    session_ids: set[str],
+    content_path: str = "",
 ) -> HerdrPane | None:
     """The pane already running this conversation, if herdr reports one.
 
     The agent kind is compared as well as the id, because an id alone could
     match a pane running a different tool on a coincidentally equal id. The
-    three providers this browser supports are named exactly as herdr names its
-    agent kinds (``claude``, ``codex``, ``opencode``), so ``provider`` needs no
-    translation.
+    four providers this browser supports are named exactly as herdr names its
+    agent kinds (``claude``, ``codex``, ``opencode``, ``pi``), so ``provider``
+    needs no translation.
+
+    Herdr identifies a session either way round, and says which in ``kind``: an
+    id for claude and codex, but for pi the path of the transcript file, since
+    that is what a pi pane's detector can see. A ``path`` pane is therefore
+    compared against *content_path*, normalised on both sides, and never
+    against the id set — the two namespaces have nothing in common, and
+    comparing across them could only ever match by accident.
     """
+    target = os.path.normpath(content_path) if content_path else ""
     for pane in panes:
-        if (
-            pane.session_id
-            and pane.session_id in session_ids
-            and pane.agent == provider
-        ):
+        if not pane.session_id or pane.agent != provider:
+            continue
+        if pane.session_kind == "path":
+            if target and os.path.normpath(pane.session_id) == target:
+                return pane
+            continue
+        if pane.session_id in session_ids:
             return pane
     return None
 
@@ -293,7 +314,10 @@ def prepare_session(
     label = workspace_label_for_path(cwd)
     panes = list_panes()
     existing = find_pane(
-        panes, provider, lineage_ids(provider, session_id, content_path)
+        panes,
+        provider,
+        lineage_ids(provider, session_id, content_path),
+        content_path,
     )
     if existing:
         return HerdrPlan(

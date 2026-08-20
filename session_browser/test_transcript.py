@@ -49,6 +49,22 @@ def claude_session(path: Path) -> Session:
     return Session(id="cl-1", provider="claude", content_path=str(path))
 
 
+def pi_session(path: Path) -> Session:
+    return Session(id="pi-1", provider="pi", content_path=str(path))
+
+
+def pi_message(role: str, content, ts: str = "", **extra) -> dict:
+    """One pi transcript line: the envelope carries the timestamp, the
+    message carries the role and content."""
+    return {
+        "type": "message",
+        "id": "m1",
+        "parentId": None,
+        "timestamp": ts,
+        "message": {"role": role, "content": content, **extra},
+    }
+
+
 class TestClaudeParser:
     def test_string_user_and_assistant_messages(self, tmp_path):
         f = tmp_path / "s.jsonl"
@@ -1720,6 +1736,222 @@ class TestOpencodeParser:
             t = load_transcript(s)
         assert [e.text for e in t.entries] == ["before", "after"]
         assert t.warnings == []
+
+
+class TestPiParser:
+    def test_user_and_assistant_text_parts(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                {
+                    "type": "session",
+                    "version": 3,
+                    "id": "01a01601",
+                    "timestamp": "2026-08-18T17:52:48.324Z",
+                    "cwd": "/Users/test/Projects/game",
+                },
+                pi_message(
+                    "user",
+                    [{"type": "text", "text": "fix the reverse gear"}],
+                    "2026-08-18T17:53:00.000Z",
+                ),
+                pi_message(
+                    "assistant",
+                    [{"type": "text", "text": "on it"}],
+                    "2026-08-18T17:53:05.000Z",
+                ),
+            ],
+        )
+        t = load_transcript(pi_session(f))
+        assert [(e.role, e.text) for e in t.entries] == [
+            ("user", "fix the reverse gear"),
+            ("assistant", "on it"),
+        ]
+        assert t.entries[0].timestamp == "2026-08-18T17:53:00.000Z"
+        assert t.warnings == []
+
+    def test_session_and_bookkeeping_lines_yield_nothing(self, tmp_path):
+        """session / model_change / thinking_level_change / compaction /
+        custom are pi's bookkeeping records, not turns."""
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                {"type": "session", "version": 3, "id": "x", "cwd": "/p"},
+                {"type": "model_change", "provider": "anthropic", "modelId": "m"},
+                {"type": "thinking_level_change", "thinkingLevel": "medium"},
+                {"type": "compaction", "summary": "earlier work", "tokensBefore": 90},
+                {"type": "custom", "customType": "web-search-results", "data": {}},
+            ],
+        )
+        t = load_transcript(pi_session(f))
+        assert t.entries == []
+
+    def test_tool_call_becomes_a_tool_entry(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                pi_message(
+                    "assistant",
+                    [
+                        {"type": "text", "text": "let me look"},
+                        {
+                            "type": "toolCall",
+                            "id": "call-1",
+                            "name": "bash",
+                            "arguments": {"command": "ls -la /tmp"},
+                        },
+                    ],
+                )
+            ],
+        )
+        t = load_transcript(pi_session(f))
+        assert t.entries[0] == TranscriptEntry("assistant", "let me look")
+        tool = t.entries[1]
+        assert tool.role == "tool"
+        assert tool.metadata == {"kind": "call", "tool": "bash"}
+        assert tool.text.startswith("bash(") and "ls -la /tmp" in tool.text
+
+    def test_tool_result_is_its_own_message(self, tmp_path):
+        """pi writes the output as a separate line with role toolResult,
+        rather than folding it into the next user turn as claude does."""
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                pi_message(
+                    "toolResult",
+                    [{"type": "text", "text": "total 0"}],
+                    "2026-08-18T17:54:00.000Z",
+                    toolName="bash",
+                    toolCallId="call-1",
+                    isError=False,
+                )
+            ],
+        )
+        t = load_transcript(pi_session(f))
+        assert t.entries == [
+            TranscriptEntry(
+                "tool",
+                "total 0",
+                "2026-08-18T17:54:00.000Z",
+                {"kind": "output", "tool": "bash"},
+            )
+        ]
+
+    def test_failed_tool_result_is_flagged(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                pi_message(
+                    "toolResult",
+                    [{"type": "text", "text": "command not found"}],
+                    toolName="bash",
+                    isError=True,
+                )
+            ],
+        )
+        t = load_transcript(pi_session(f))
+        assert t.entries[0].metadata == {
+            "kind": "output",
+            "tool": "bash",
+            "is_error": True,
+        }
+        assert entry_matches_roles(t.entries[0], {"error"})
+
+    def test_multi_part_output_stays_split_never_joined(self, tmp_path):
+        """A joined entry would match text that appears nowhere contiguously
+        in the raw file, and the byte prefilter would then skip a file that
+        canonically matches -- the trap codex needs a second rg pass for."""
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                pi_message(
+                    "toolResult",
+                    [
+                        {"type": "text", "text": "first half"},
+                        {"type": "text", "text": "second half"},
+                    ],
+                    toolName="bash",
+                )
+            ],
+        )
+        t = load_transcript(pi_session(f))
+        assert [e.text for e in t.entries] == ["first half", "second half"]
+
+    def test_thinking_and_image_parts_are_skipped(self, tmp_path):
+        """Reasoning is dropped for every provider here, and an image part
+        carries base64 bytes rather than anything readable."""
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                pi_message(
+                    "assistant",
+                    [
+                        {
+                            "type": "thinking",
+                            "thinking": "hmm",
+                            "thinkingSignature": "s",
+                        },
+                        {"type": "text", "text": "here goes"},
+                    ],
+                ),
+                pi_message(
+                    "toolResult",
+                    [{"type": "image", "data": "AAAA", "mimeType": "image/png"}],
+                    toolName="screenshot",
+                ),
+            ],
+        )
+        t = load_transcript(pi_session(f))
+        assert [(e.role, e.text) for e in t.entries] == [("assistant", "here goes")]
+
+    def test_string_content_is_accepted(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(f, [pi_message("user", "plain string content")])
+        t = load_transcript(pi_session(f))
+        assert t.entries == [TranscriptEntry("user", "plain string content")]
+
+    def test_malformed_and_foreign_shapes_are_skipped(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                "{not json",
+                {"type": "message", "message": "not a dict"},
+                pi_message("wizard", [{"type": "text", "text": "unknown role"}]),
+                pi_message("user", [{"type": "text", "text": ""}]),
+                pi_message("user", ["not a dict part"]),
+                pi_message("user", [{"type": "text", "text": "survivor"}]),
+            ],
+        )
+        t = load_transcript(pi_session(f))
+        assert [e.text for e in t.entries] == ["survivor"]
+
+    def test_missing_file_raises(self, tmp_path):
+        s = pi_session(tmp_path / "gone.jsonl")
+        with pytest.raises(TranscriptUnreadable):
+            load_transcript(s)
+
+    def test_content_search_finds_text_in_a_pi_transcript(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                pi_message("user", [{"type": "text", "text": "the kookaburra sings"}]),
+                pi_message("assistant", [{"type": "text", "text": "so it does"}]),
+            ],
+        )
+        s = pi_session(f)
+        assert search_session_contents([s], "kookaburra") == {s.id}
+        result = search_session(s, "kookaburra")
+        assert result is not None
+        assert result.match_count == 1
 
 
 class TestRendering:

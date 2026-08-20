@@ -2,7 +2,8 @@
 
 The TUI demos poorly against a real session history — real transcripts are
 messy, private, and sparse. This module writes a compact but rich fake HOME
-tree (Claude JSONL, Codex JSONL, an OpenCode SQLite database) that discovery
+tree (Claude JSONL, Codex JSONL, pi JSONL, an OpenCode SQLite database) that
+discovery
 reads exactly like the real thing, so every command — list, search, stats,
 get, the TUI — runs against it unchanged by pointing HOME at it:
 
@@ -34,6 +35,7 @@ from pathlib import Path
 CLAUDE_PROJECTS = ".claude/projects"
 CODEX_SESSIONS = ".codex/sessions"
 OPENCODE_DB = ".local/share/opencode/opencode.db"
+PI_SESSIONS = ".pi/agent/sessions"
 
 # Scratchpad noise sessions carry this cwd prefix so the --exclude-cwd demo
 # has something to drop (mirrors the real /private/tmp scratchpad noise).
@@ -67,10 +69,11 @@ class DemoResult:
     claude: int
     codex: int
     opencode: int
+    pi: int = 0
 
     @property
     def total(self) -> int:
-        return self.claude + self.codex + self.opencode
+        return self.claude + self.codex + self.opencode + self.pi
 
 
 def _dt(spec: _Spec, now: datetime, offset_minutes: int = 0) -> datetime:
@@ -306,6 +309,22 @@ _OC1 = _turns(
     "Batching on bytes alone (256 KB) gives fewer, fuller invocations "
     "and removes a magic number nobody can defend.",
 )
+_PI1 = _turns(
+    "The car can't reverse — the throttle axis is clamped to positive "
+    "values somewhere in the input layer.",
+    "The gamepad mapping folds both triggers onto one axis and clamps at "
+    "zero, so reverse never reaches the sim. Splitting the triggers before "
+    "the clamp restores it, and the keyboard path needs no change.",
+    command="rg -n 'clamp' src/sim/input.ts",
+    output="src/sim/input.ts:64:  return Math.max(0, throttle)",
+)
+_PI2 = _turns(
+    "Bootstrap the loadout editor: skeleton only, no behaviour yet.",
+    "Scaffolded the editor with a Vite + TypeScript skeleton, one module "
+    "per panel and a stub store. Nothing is wired to the agent config yet, "
+    "which keeps the first commit reviewable.",
+)
+
 _OC2 = _turns(
     "Draft the PR CI workflow: what should it actually run?",
     "Lint, the unit suite, and the perf budget tests. Nothing timed — "
@@ -461,6 +480,30 @@ def _specs(here: str) -> list[_Spec]:
             14,
             _CODEX4,
         ),
+        # pi — per-file JSONL under an encoded project dir, cwd on the
+        # header line, no branch anywhere in the format.
+        _Spec(
+            "pi",
+            "01a020b0-7ffa-7552-8d62-2aeb60b18db1",
+            "Fix reverse gear in the driving sim",
+            "/Users/demo/Projects/game",
+            "",
+            "",
+            1,
+            20,
+            _PI1,
+        ),
+        _Spec(
+            "pi",
+            "01a01bf2-ab30-7c41-9e52-1d2e3f4a5b6c",
+            "Bootstrap the agent loadout editor",
+            "/Users/demo/Projects/agent-loadout",
+            "",
+            "",
+            8,
+            15,
+            _PI2,
+        ),
         # OpenCode — SQLite-backed, with repository names for --repo demos.
         _Spec(
             "opencode",
@@ -573,6 +616,76 @@ def _write_claude(home: Path, spec: _Spec, now: datetime) -> None:
                 )
             )
     (project / f"{spec.id}.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def _pi_project_dir(cwd: str) -> str:
+    """pi encodes the project path as a flat directory name, fenced by "--"."""
+    return "--" + cwd.strip("/").replace("/", "-") + "--"
+
+
+def _write_pi(home: Path, spec: _Spec, now: datetime) -> None:
+    project = home / PI_SESSIONS / _pi_project_dir(spec.cwd)
+    project.mkdir(parents=True, exist_ok=True)
+    started = _ts(spec, now)
+    lines = [
+        json.dumps(
+            {
+                "type": "session",
+                "version": 3,
+                "id": spec.id,
+                "timestamp": started,
+                "cwd": spec.cwd,
+            }
+        ),
+        json.dumps(
+            {
+                "type": "model_change",
+                "id": f"{spec.id}-mc",
+                "parentId": None,
+                "timestamp": started,
+                "provider": "anthropic",
+                "modelId": "claude-sonnet-4-5",
+            }
+        ),
+    ]
+    call_id = ""
+    for i, turn in enumerate(spec.turns):
+        ts = _ts(spec, now, i)
+        envelope = {
+            "type": "message",
+            "id": f"{spec.id}-m{i:03d}",
+            "parentId": f"{spec.id}-m{i - 1:03d}" if i else f"{spec.id}-mc",
+            "timestamp": ts,
+        }
+        if turn.role == "tool_call":
+            call_id = f"call-{i:03d}"
+            message = {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "toolCall",
+                        "id": call_id,
+                        "name": "bash",
+                        "arguments": {"command": turn.text},
+                    }
+                ],
+            }
+        elif turn.role == "tool_output":
+            message = {
+                "role": "toolResult",
+                "toolCallId": call_id,
+                "toolName": "bash",
+                "isError": False,
+                "content": [{"type": "text", "text": turn.text}],
+            }
+        else:
+            message = {
+                "role": turn.role,
+                "content": [{"type": "text", "text": turn.text}],
+            }
+        lines.append(json.dumps({**envelope, "message": message}))
+    stamp = started.replace(":", "-").replace("+00-00", "Z")
+    (project / f"{stamp}_{spec.id}.jsonl").write_text("\n".join(lines) + "\n")
 
 
 def _write_codex(home: Path, spec: _Spec, now: datetime) -> None:
@@ -785,6 +898,8 @@ def generate(
         _write_claude(home, spec, now)
     for spec in by_provider.get("codex", []):
         _write_codex(home, spec, now)
+    for spec in by_provider.get("pi", []):
+        _write_pi(home, spec, now)
     oc = by_provider.get("opencode", [])
     if oc:
         _write_opencode(home, oc, now)
@@ -793,6 +908,7 @@ def generate(
         len(by_provider.get("claude", [])),
         len(by_provider.get("codex", [])),
         len(oc),
+        len(by_provider.get("pi", [])),
     )
 
 
@@ -837,7 +953,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"Wrote {result.total} sessions to {result.home} "
         f"({result.claude} claude, {result.codex} codex, "
-        f"{result.opencode} opencode)."
+        f"{result.opencode} opencode, {result.pi} pi)."
     )
     print(_usage(result.home))
     return 0

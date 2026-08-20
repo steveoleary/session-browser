@@ -311,6 +311,7 @@ def instrumented(
 CLAUDE_SESSIONS = 180  # above _PROC_MIN_CANDIDATES, so the process
 CODEX_SESSIONS = 40  # routing decision is reachable and pinnable
 OPENCODE_SESSIONS = 40
+PI_SESSIONS = 40
 RARE_EVERY = 60  # one session in sixty carries the rare term
 
 
@@ -448,6 +449,62 @@ def build_corpus(root: Path) -> Path:
         )
     conn.commit()
     conn.close()
+
+    pi_root = home / ".pi" / "agent" / "sessions"
+    for i in range(PI_SESSIONS):
+        project = pi_root / f"--Users-perf-project{i % 3}--"
+        project.mkdir(parents=True, exist_ok=True)
+        sid = f"perf-pi-{i:04d}"
+        day = f"2026-01-{(i % 28) + 1:02d}"
+        lines = [
+            json.dumps(
+                {
+                    "type": "session",
+                    "version": 3,
+                    "id": sid,
+                    "timestamp": f"{day}T09:00:00.000Z",
+                    "cwd": f"/Users/perf/project{i % 3}",
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "message",
+                    "id": f"{sid}-m000",
+                    "parentId": None,
+                    "timestamp": f"{day}T09:00:01.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"start session {i} {_filler(i, 0)}",
+                            }
+                        ],
+                    },
+                }
+            ),
+        ]
+        for line in range(1, 20):
+            text = _filler(i, line)
+            if _has_rare(i) and line == 7:
+                text = f"{text} {QUERY_RARE} sighted"
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "message",
+                        "id": f"{sid}-m{line:03d}",
+                        "parentId": f"{sid}-m{line - 1:03d}",
+                        "timestamp": f"{day}T09:0{line % 10}:00.000Z",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": text}],
+                        },
+                    }
+                )
+            )
+        (project / f"{day}T09-00-00-000Z_{sid}.jsonl").write_text(
+            "\n".join(lines) + "\n"
+        )
 
     db_path = home / ".local" / "share" / "opencode" / "opencode.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -700,6 +757,14 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "The thin raw-part scan must rule sessions out before the ordered "
             "join, so only survivors reach a canonical parse.",
             lambda: _cli("search", QUERY_RARE, "--provider", "opencode"),
+        ),
+        Workload(
+            "cli.search.pi",
+            "pi transcripts are ordinary JSONL, so they must be ruled out by "
+            "the same candidate scan the claude files go through. A parse per "
+            "session here means pi fell out of the prefilter path.",
+            lambda: _cli("search", QUERY_RARE, "--provider", "pi"),
+            needs_rg=True,
         ),
         Workload(
             "cli.list",
