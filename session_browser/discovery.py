@@ -536,12 +536,12 @@ def _opencode_db_path() -> Path:
 
 
 def scan_pi() -> list[Session]:
-    """Discover pi sessions from JSONL files.
+    """Discover Pi sessions from JSONL files.
 
     Layout is ``~/.pi/agent/sessions/<encoded-cwd>/<stamp>_<uuid>.jsonl``.
     The directory name encodes "/" as "-" exactly as Claude's does, and is
     lossy in the same way — a project called ``agent-loadout`` decodes into a
-    path that exists nowhere. Nothing here decodes it: every pi transcript
+    path that exists nowhere. Nothing here decodes it: every Pi transcript
     opens with a header line carrying the real cwd, so the lossy name is never
     the best source available.
     """
@@ -583,7 +583,7 @@ def scan_pi() -> list[Session]:
                             break
                 # The filename's uuid suffix is the same id the header line
                 # carries, so a file whose header is missing or unparseable
-                # still gets the id pi itself would resume by.
+                # still gets the id Pi itself would resume by.
                 session_id = session_id or f.stem.split("_", 1)[-1]
                 sessions.append(
                     Session(
@@ -591,7 +591,7 @@ def scan_pi() -> list[Session]:
                         provider="pi",
                         summary=summary,
                         cwd=cwd,
-                        # pi records no branch anywhere in its format. None,
+                        # Pi records no branch anywhere in its format. None,
                         # not "" — see the note on the field.
                         branch=None,
                         repository=_repo_name(cwd),
@@ -610,7 +610,7 @@ def scan_pi() -> list[Session]:
 
 
 def _pi_message_text(msg: dict) -> str:
-    """Readable text of one pi message, ignoring non-text content parts."""
+    """Readable text of one Pi message, ignoring non-text content parts."""
     content = msg.get("content", "")
     if isinstance(content, str):
         return content
@@ -669,7 +669,7 @@ _CODEX_TURN_ITEMS = {"UserMessage", "AgentMessage"}
 # Both roles: recognising only the user side would leave a session whose last
 # act was the assistant's reply timestamped at its previous user turn.
 _CODEX_TURN_ROLES = {"user", "assistant"}
-# pi writes one "message" line per turn and one per tool result, tagging the
+# Pi writes one "message" line per turn and one per tool result, tagging the
 # role inside. Only the two conversational roles count: "toolResult" is the
 # harness answering itself, which is the same line the claude and codex rules
 # draw (neither counts tool traffic as activity).

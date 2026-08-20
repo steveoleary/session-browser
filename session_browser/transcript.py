@@ -2588,18 +2588,18 @@ def _codex_user_text(payload: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# pi JSONL parser
+# Pi JSONL parser
 # ---------------------------------------------------------------------------
 
-# The two roles pi records as conversation. "toolResult" is handled separately
+# The two roles Pi records as conversation. "toolResult" is handled separately
 # below, and any other role is a shape this parser has not seen.
 _PI_MESSAGE_ROLES = ("user", "assistant")
 
 
 def _pi_entries(obj: dict) -> Iterator[TranscriptEntry]:
-    """Parse a single pi JSONL object into zero or more entries.
+    """Parse a single Pi JSONL object into zero or more entries.
 
-    Everything readable in a pi transcript is a ``message`` line; ``session``,
+    Everything readable in a Pi transcript is a ``message`` line; ``session``,
     ``model_change``, ``thinking_level_change``, ``compaction`` and ``custom``
     lines are bookkeeping and fall out yielding nothing, exactly as the other
     providers' non-turn records do.
@@ -2613,7 +2613,7 @@ def _pi_entries(obj: dict) -> Iterator[TranscriptEntry]:
     ts = obj.get("timestamp", "") or msg.get("timestamp", "")
 
     if role == "toolResult":
-        # pi splits a tool call and its output across two lines, so the output
+        # Pi splits a tool call and its output across two lines, so the output
         # arrives as its own message rather than inside the next user turn.
         # It still becomes a "tool" entry with kind "output", which is the
         # shape the role filter and the error pseudo-role already read.
@@ -2622,7 +2622,7 @@ def _pi_entries(obj: dict) -> Iterator[TranscriptEntry]:
         # codex's extra ripgrep pass: an entry whose text spans two parts of
         # one line matches a query that appears nowhere contiguously in the
         # raw bytes, so the cheap candidate scan skips a file that canonically
-        # matches. Keeping parts separate means pi needs no such pass.
+        # matches. Keeping parts separate means Pi needs no such pass.
         name = msg.get("toolName", "") or "?"
         meta: dict = {"kind": "output", "tool": name}
         if msg.get("isError"):
@@ -2661,7 +2661,7 @@ def _pi_entries(obj: dict) -> Iterator[TranscriptEntry]:
 
 
 def _pi_text_parts(content) -> Iterator[str]:
-    """The non-empty text parts of a pi content list, in order.
+    """The non-empty text parts of a Pi content list, in order.
 
     A bare string is one part; image parts carry base64 bytes and are skipped.
     """

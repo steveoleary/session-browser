@@ -70,7 +70,7 @@ class HerdrPane:
     the session that agent is on; both are empty for a pane running an
     ordinary shell. ``session_kind`` is how herdr identified that session —
     ``"id"`` for an agent it can name by id, ``"path"`` for one it can only
-    point at by transcript file (pi) — and so says which of a browser
+    point at by transcript file (Pi) — and so says which of a browser
     session's fields ``session_id`` should be compared against.
     """
 
@@ -251,8 +251,8 @@ def find_pane(
     needs no translation.
 
     Herdr identifies a session either way round, and says which in ``kind``: an
-    id for claude and codex, but for pi the path of the transcript file, since
-    that is what a pi pane's detector can see. A ``path`` pane is therefore
+    id for Claude and Codex, but for Pi the path of the transcript file, since
+    that is what a Pi pane's detector can see. A ``path`` pane is therefore
     compared against *content_path*, normalised on both sides, and never
     against the id set — the two namespaces have nothing in common, and
     comparing across them could only ever match by accident.

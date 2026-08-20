@@ -2,7 +2,7 @@
 
 **Turn your agent transcripts into working memory.**
 
-Claude Code, Codex, OpenCode and pi all keep session histories. Session
+Claude Code, Codex, OpenCode and Pi all keep session histories. Session
 Browser brings them together so you — or your agent — can find lost context,
 build a handoff, spot recurring knowledge or repeating pain points, and easily
 resume the work instead of starting again.
@@ -18,7 +18,7 @@ agents.
 ## Put old sessions back to work
 
 - **Recover lost context.** Search complete Claude Code, Codex, OpenCode and
-  pi transcripts together from the TUI, or let your agent find the useful parts
+  Pi transcripts together from the TUI, or let your agent find the useful parts
   through the CLI.
 - **Great for handoffs**. Pulls the relevant context from
   previous sessions so the next agent can pick up where you left off.
@@ -142,7 +142,7 @@ automation.
 ## Skill for agents
 
 The bundled `using-session-browser` skill lets Claude Code, Codex, OpenCode and
-pi recover earlier work themselves, assemble better handoffs, and mine recurring
+Pi recover earlier work themselves, assemble better handoffs, and mine recurring
 knowledge from your session history.
 
 Install it with the [skills CLI](https://skills.sh):
