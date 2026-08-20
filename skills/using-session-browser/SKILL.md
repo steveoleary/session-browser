@@ -5,7 +5,7 @@ description: Use when finding, searching, or retrieving prior agent sessions, tr
 
 # Using Session Browser
 
-`session-browser` searches every Claude Code, Codex, OpenCode and pi session on
+`session-browser` searches every Claude Code, Codex, OpenCode and Pi session on
 this machine. Narrow before you read: metadata, then a rare phrase, then a
 window — never a whole transcript to stdout.
 

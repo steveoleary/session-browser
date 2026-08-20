@@ -760,9 +760,9 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
         ),
         Workload(
             "cli.search.pi",
-            "pi transcripts are ordinary JSONL, so they must be ruled out by "
+            "Pi transcripts are ordinary JSONL, so they must be ruled out by "
             "the same candidate scan the claude files go through. A parse per "
-            "session here means pi fell out of the prefilter path.",
+            "session here means Pi fell out of the prefilter path.",
             lambda: _cli("search", QUERY_RARE, "--provider", "pi"),
             needs_rg=True,
         ),
