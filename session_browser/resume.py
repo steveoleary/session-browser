@@ -12,6 +12,12 @@ RESUME_PATTERNS: dict[str, str] = {
     "claude": "claude --dangerously-skip-permissions --resume {id}",
     "codex": "codex resume {id}",
     "opencode": "opencode -s {id}",
+    # --session takes a session file or a (partial) uuid and resolves it
+    # within the project's own session directory, which is why the cwd
+    # prefix matters. Not --session-id, which CREATES the session when the
+    # id does not resolve — a typo would open an empty conversation rather
+    # than fail.
+    "pi": "pi --session {id}",
 }
 
 

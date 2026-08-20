@@ -64,6 +64,7 @@ PROVIDER_COLOURS = {
     "claude": "[bold magenta]●[/] claude",
     "codex": "[bold green]●[/] codex",
     "opencode": "[bold cyan]●[/] opencode",
+    "pi": "[bold yellow]●[/] pi",
 }
 
 # Coalesce bursts of keystrokes in the global search before filtering, so a

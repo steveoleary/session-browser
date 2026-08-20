@@ -5,7 +5,7 @@ description: Use when finding, searching, or retrieving prior agent sessions, tr
 
 # Using Session Browser
 
-`session-browser` searches every Claude Code, Codex and OpenCode session on
+`session-browser` searches every Claude Code, Codex, OpenCode and pi session on
 this machine. Narrow before you read: metadata, then a rare phrase, then a
 window — never a whole transcript to stdout.
 
@@ -81,8 +81,9 @@ where they disagree, `--help` describes the binary you are actually running.
 
    - **Worktrees.** A session run in a git worktree is named after the worktree
      directory unless the provider records a project root, and only opencode
-     does — so `--repo <project>` misses claude and codex worktree sessions,
-     and a reused worktree path can hold work from several projects over time.
+     does — so `--repo <project>` misses claude, codex and pi worktree
+     sessions, and a reused worktree path can hold work from several projects
+     over time.
    - **Other agents are writing to the corpus while you read it.** Hit counts
      and roles move under you, and a sibling answering your question can put
      its answer into your results. `--until -30m` gives a stable snapshot;
@@ -183,7 +184,7 @@ Judgment `--help` does not carry:
 | Hand-computing a window from a timestamp to find neighbours | `list --around ID` — one call, anchor excluded, signed `offset` |
 | Raising `--limit` to reach an old session | Heed the truncation warning: `--sort oldest` or a `--since`/`--until` window gets there directly |
 | Raising `--limit` because scratch sessions fill the results | Subtract them: `--exclude-cwd <path>`, which runs before `--limit` |
-| `--repo` or `--cwd` on the parent project when the work ran in a git worktree | Only opencode records a project root; claude and codex name a worktree session after the *worktree directory*, so `--repo` can return a tool name rather than a project. Scope to the worktree's distinctive segment, or search unscoped and read `cwd` off the hits |
+| `--repo` or `--cwd` on the parent project when the work ran in a git worktree | Only opencode records a project root; claude, codex and pi name a worktree session after the *worktree directory*, so `--repo` can return a tool name rather than a project. Scope to the worktree's distinctive segment, or search unscoped and read `cwd` off the hits |
 | Answer found, but its artifact doesn't match the question's nouns | Wrong workstream — vocabulary recurs across projects; treat it as unconfirmed and keep searching |
 | Your own or a sibling session pollutes results | Yours is auto-excluded; for a concurrent sibling add `--until -30m` |
 | Pasting a full transcript into the final answer | Summarize it |

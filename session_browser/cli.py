@@ -535,6 +535,7 @@ def _resolve_anchor(sessions: list[Session], args) -> tuple[Session, datetime] |
 _CURRENT_SESSION_ENV = {
     "claude": "CLAUDE_CODE_SESSION_ID",
     "codex": "CODEX_THREAD_ID",
+    "pi": "PI_SESSION_ID",
 }
 
 
@@ -545,7 +546,8 @@ def _current_session_ids() -> set[str]:
     Codex carries both CLAUDE_CODE_SESSION_ID and CODEX_THREAD_ID — so this set
     naturally covers the whole live parent/child chain, not just the innermost
     caller. The values match the ids `discovery` assigns (Claude file stem,
-    Codex session_meta id), so canonical-id equality is exact."""
+    Codex session_meta id, pi session-header id), so canonical-id equality is
+    exact."""
     ids: set[str] = set()
     for provider, var in _CURRENT_SESSION_ENV.items():
         val = os.environ.get(var, "").strip()

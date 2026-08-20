@@ -19,6 +19,7 @@ import pytest
 from session_browser.demo import (
     CODEX_SESSIONS,
     OPENCODE_DB,
+    PI_SESSIONS,
     SCRATCHPAD,
     _specs,
     generate,
@@ -57,17 +58,20 @@ def test_generate_writes_all_provider_trees(tmp_path):
     codex_files = list((home / CODEX_SESSIONS).rglob("rollout-*.jsonl"))
     assert len(claude_files) == result.claude
     assert len(codex_files) == result.codex
+    pi_files = list((home / PI_SESSIONS).rglob("*.jsonl"))
+    assert len(pi_files) == result.pi
     assert (home / OPENCODE_DB).is_file()
-    assert result.total == 15
+    assert result.total == 17
 
 
 def test_corpus_is_discoverable(fake_home):
     sessions = _discover()
     by_provider = _by_provider(sessions)
-    assert len(sessions) == 15
+    assert len(sessions) == 17
     assert len(by_provider["claude"]) == 9
     assert len(by_provider["codex"]) == 4
     assert len(by_provider["opencode"]) == 2
+    assert len(by_provider["pi"]) == 2
 
 
 def test_search_finds_seeded_terms(fake_home):
@@ -79,6 +83,7 @@ def test_search_finds_seeded_terms(fake_home):
             "claude:6a1d8e3f-7c2b-4d9e-8a4f-5b6c7d8e9f0a": "asyncio",
             "codex:019d2f4a-8c33-7b2e-9d41-5f6a7b8c9d01": "docker",
             "opencode:ses_demo_ripgrep": "ripgrep",
+            "pi:01a020b0-7ffa-7552-8d62-2aeb60b18db1": "reverse",
         }.items()
         for s in sessions
         if f"{s.provider}:{s.id}" == sid
@@ -112,7 +117,7 @@ def test_refuses_existing_directory_without_force(tmp_path):
     with pytest.raises(FileExistsError):
         generate(home, now=NOW)
     result = generate(home, now=NOW, force=True)
-    assert result.total == 15
+    assert result.total == 17
 
 
 def test_same_anchor_reproduces_identical_bytes(tmp_path):
@@ -144,7 +149,7 @@ def test_cli_generation_and_listing_end_to_end(tmp_path):
         check=False,
     )
     assert gen.returncode == 0, gen.stderr
-    assert "Wrote 15 sessions" in gen.stdout
+    assert "Wrote 17 sessions" in gen.stdout
 
     env = os.environ.copy()
     env["HOME"] = str(home)
@@ -158,9 +163,10 @@ def test_cli_generation_and_listing_end_to_end(tmp_path):
     )
     assert listing.returncode == 0, listing.stderr
     payload = json.loads(listing.stdout)
-    assert len(payload["sessions"]) == 15
+    assert len(payload["sessions"]) == 17
     assert {s["provider"] for s in payload["sessions"]} == {
         "claude",
         "codex",
         "opencode",
+        "pi",
     }

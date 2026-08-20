@@ -1199,7 +1199,7 @@ def _file_may_match(path: Path, needles: list[str], provider: str) -> bool:
 
 def _prefilter_file(session: Session) -> Path | None:
     """The raw file a prefilter may scan for *session*, if any."""
-    if session.provider in ("claude", "codex"):
+    if session.provider in ("claude", "codex", "pi"):
         return Path(session.content_path) if session.content_path else None
     return None
 
@@ -1934,6 +1934,9 @@ def iter_entries(session: Session, warnings: list[str]) -> Iterator[TranscriptEn
     elif session.provider == "codex":
         path = _existing_file(session)
         yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, _codex_entries))
+    elif session.provider == "pi":
+        path = _existing_file(session)
+        yield from _parse_jsonl(path, warnings, _pi_entries)
     elif session.provider == "opencode":
         db_path = _opencode_db_path()
         if not db_path.is_file():
@@ -2582,3 +2585,95 @@ def _codex_user_text(payload: dict) -> str:
         ]
         return "\n".join(x for x in parts if x)
     return ""
+
+
+# ---------------------------------------------------------------------------
+# pi JSONL parser
+# ---------------------------------------------------------------------------
+
+# The two roles pi records as conversation. "toolResult" is handled separately
+# below, and any other role is a shape this parser has not seen.
+_PI_MESSAGE_ROLES = ("user", "assistant")
+
+
+def _pi_entries(obj: dict) -> Iterator[TranscriptEntry]:
+    """Parse a single pi JSONL object into zero or more entries.
+
+    Everything readable in a pi transcript is a ``message`` line; ``session``,
+    ``model_change``, ``thinking_level_change``, ``compaction`` and ``custom``
+    lines are bookkeeping and fall out yielding nothing, exactly as the other
+    providers' non-turn records do.
+    """
+    if obj.get("type") != "message":
+        return
+    msg = obj.get("message")
+    if type(msg) is not dict:
+        return
+    role = msg.get("role", "")
+    ts = obj.get("timestamp", "") or msg.get("timestamp", "")
+
+    if role == "toolResult":
+        # pi splits a tool call and its output across two lines, so the output
+        # arrives as its own message rather than inside the next user turn.
+        # It still becomes a "tool" entry with kind "output", which is the
+        # shape the role filter and the error pseudo-role already read.
+        #
+        # One entry per text part, never a join. Joining is what forces
+        # codex's extra ripgrep pass: an entry whose text spans two parts of
+        # one line matches a query that appears nowhere contiguously in the
+        # raw bytes, so the cheap candidate scan skips a file that canonically
+        # matches. Keeping parts separate means pi needs no such pass.
+        name = msg.get("toolName", "") or "?"
+        meta: dict = {"kind": "output", "tool": name}
+        if msg.get("isError"):
+            meta["is_error"] = True
+        for text in _pi_text_parts(msg.get("content", "")):
+            yield TranscriptEntry("tool", text, ts, meta)
+        return
+
+    if role not in _PI_MESSAGE_ROLES:
+        return
+
+    content = msg.get("content", "")
+    ctype = type(content)
+    if ctype is str:
+        if content:
+            yield TranscriptEntry(role, content, ts)
+        return
+    if ctype is not list:
+        return
+    for block in content:
+        if type(block) is not dict:
+            continue
+        btype = block.get("type", "")
+        if btype == "text":
+            text = block.get("text", "")
+            if text:
+                yield TranscriptEntry(role, text, ts)
+        elif btype == "toolCall":
+            name = block.get("name", "") or "?"
+            args = block.get("arguments", {})
+            text = f"{name}({_json_compact(args)})"
+            yield TranscriptEntry("tool", text, ts, {"kind": "call", "tool": name})
+        # "thinking" and "image" parts are skipped: reasoning is dropped for
+        # every provider here, and an image part carries base64 bytes, not
+        # text anyone can read or search.
+
+
+def _pi_text_parts(content) -> Iterator[str]:
+    """The non-empty text parts of a pi content list, in order.
+
+    A bare string is one part; image parts carry base64 bytes and are skipped.
+    """
+    ctype = type(content)
+    if ctype is str:
+        if content:
+            yield content
+        return
+    if ctype is not list:
+        return
+    for c in content:
+        if type(c) is dict and c.get("type") == "text":
+            text = c.get("text", "")
+            if text:
+                yield text

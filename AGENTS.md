@@ -1,8 +1,8 @@
 # session-browser — Agent Instructions
 
 A Python CLI + TUI (`session_browser/`) that discovers and retrieves prior
-agent sessions across providers (Claude Code, Codex, OpenCode). Tests live
-alongside the code in `session_browser/`: `tests.py`, `test_cli.py`,
+agent sessions across providers (Claude Code, Codex, OpenCode, pi). Tests
+live alongside the code in `session_browser/`: `tests.py`, `test_cli.py`,
 `test_transcript.py`, `test_case_runner.py`, `test_retrieval_compare.py` and
 `test_performance.py`.
 
