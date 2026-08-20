@@ -1771,6 +1771,22 @@ class TestPiParser:
         assert t.entries[0].timestamp == "2026-08-18T17:53:00.000Z"
         assert t.warnings == []
 
+    def test_missing_envelope_timestamp_stays_a_string(self, tmp_path):
+        """The nested ``message.timestamp`` is epoch milliseconds as an int,
+        so it is never a fallback for the envelope's ISO string: an int here
+        reaches _relative_time, which slices it and raises."""
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                {"type": "session", "version": 3, "id": "x", "cwd": "/p"},
+                pi_message("user", "hi", "", timestamp=1787161218866),
+            ],
+        )
+        t = load_transcript(pi_session(f))
+        assert [e.text for e in t.entries] == ["hi"]
+        assert t.entries[0].timestamp == ""
+
     def test_session_and_bookkeeping_lines_yield_nothing(self, tmp_path):
         """session / model_change / thinking_level_change / compaction /
         custom are pi's bookkeeping records, not turns."""

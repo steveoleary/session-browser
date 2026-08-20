@@ -2610,7 +2610,10 @@ def _pi_entries(obj: dict) -> Iterator[TranscriptEntry]:
     if type(msg) is not dict:
         return
     role = msg.get("role", "")
-    ts = obj.get("timestamp", "") or msg.get("timestamp", "")
+    # The line's own timestamp, never the one nested in ``message``: that one
+    # is epoch milliseconds as an int, and this field is a string everywhere
+    # else. A fallback to it would put an int where _relative_time slices.
+    ts = obj.get("timestamp", "")
 
     if role == "toolResult":
         # Pi splits a tool call and its output across two lines, so the output
