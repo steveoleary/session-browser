@@ -13,7 +13,8 @@
 # Checks, in order:
 #   1  the remote carries only ordinary refs (heads, tags, PRs)
 #   2  no configured identifier appears anywhere in the working tree
-#   3  no configured identifier appears anywhere in history — blobs AND messages
+#   3  no configured identifier appears anywhere in history — blobs, commit
+#      messages, annotated tag objects AND git notes
 #   4  every commit in history is authored by the expected identity
 #   5  gitleaks finds no secrets across full history
 #   6  no locally-excluded path is tracked
@@ -107,7 +108,7 @@ fi
 if [ ${#patterns[@]} -eq 0 ]; then
   fail "no identifiers configured — nothing was checked for"
   detail "add them with: scripts/install-hooks.sh --add-pattern <text>"
-  fail "history identifier check could not run either"
+  fail "history identifier check could not run either (blobs, messages, tags, notes)"
 else
   # Format each (pattern, file) pair as it is found. Accumulating "pat|files"
   # and splitting later mispairs as soon as one pattern matches two files: the
@@ -131,7 +132,14 @@ else
 
   # History is every blob of every commit, which is the only check that proves a
   # deleted file is actually gone rather than merely absent from HEAD.
-  revs="$(git rev-list --all 2>/dev/null)"
+  #
+  # refs/notes is excluded here and scanned on its own below. It is reachable
+  # from --all, so this grep did find note text — but only by accident, and it
+  # reported the hit as a *path*, which for a note is the annotated object's
+  # hash. A 40-hex "filename" that exists in no tree is a report that sends the
+  # reader looking for the wrong thing, and a coverage that nothing states is a
+  # coverage the next edit to this line can drop in silence.
+  revs="$(git rev-list --exclude=refs/notes/\* --all 2>/dev/null)"
   hist_hits=""
   if [ -n "$revs" ]; then
     for pat in "${patterns[@]}"; do
@@ -154,7 +162,7 @@ else
   # pays for the attribution.
   msg_hits=""
   if [ -n "$revs" ]; then
-    all_messages="$(git log --all --format=%B 2>/dev/null || true)"
+    all_messages="$(git log --exclude=refs/notes/\* --all --format=%B 2>/dev/null || true)"
     for pat in "${patterns[@]}"; do
       printf '%s\n' "$all_messages" | grep -i -q -e "$pat" 2>/dev/null || continue
       while IFS= read -r rev; do
@@ -169,13 +177,71 @@ else
     done
   fi
 
-  if [ -n "$hist_hits" ] || [ -n "$msg_hits" ]; then
+  # An ANNOTATED TAG carries free text exactly as a commit does, and nothing
+  # above can see it: rev-list peels a tag ref to the commit it points at, so
+  # the tag object itself is never visited and `git tag -a -m` sailed through a
+  # green run. There is no hook counterpart to add — git has no tag-msg hook —
+  # so this is the only place a tag can ever be caught.
+  #
+  # Only the message is read: the object's headers are stripped at the first
+  # blank line, which drops the tagger's address (check 4's business, and a
+  # pattern shaped like an address would otherwise fire here as noise) and the
+  # `tag <name>` header. A tag whose NAME carries an identifier is therefore not
+  # caught here — a ref name is check 1's shape rule and hooks.forbiddenref,
+  # tracked separately. Hits are reported by tag name, the way message hits are
+  # reported by short hash, and the message itself is never printed.
+  tag_hits=""
+  while IFS=' ' read -r otype oname rname; do
+    [ "$otype" = "tag" ] || continue
+    body="$(git cat-file tag "$oname" 2>/dev/null | sed '1,/^$/d' || true)"
+    [ -n "$body" ] || continue
+    for pat in "${patterns[@]}"; do
+      if printf '%s\n' "$body" | grep -i -q -e "$pat" 2>/dev/null; then
+        tag_hits="${tag_hits}${rname#refs/tags/}  (tag message) contains '${pat}'
+"
+      fi
+    done
+  done <<EOF
+$(git for-each-ref --format='%(objecttype) %(objectname) %(refname)' refs/tags 2>/dev/null)
+EOF
+
+  # Notes are prose a person writes that travels with the repository, and they
+  # are stored as blobs whose PATH is the hash of the object annotated. Report
+  # by that object — what `git notes show <commit>` takes — rather than by the
+  # path, and walk the notes refs' own history so an edited or removed note is
+  # read too, the same reason the blob scan walks every rev.
+  note_revs="$(git rev-list --glob=refs/notes/\* 2>/dev/null)"
+  note_hits=""
+  if [ -n "$note_revs" ]; then
+    for pat in "${patterns[@]}"; do
+      # shellcheck disable=SC2086
+      while IFS= read -r obj; do
+        [ -n "$obj" ] || continue
+        note_hits="${note_hits}$(git rev-parse --short "$obj" 2>/dev/null || printf '%s' "$obj")  (note) contains '${pat}'
+"
+      done <<< "$(git grep -I -i -l -e "$pat" $note_revs -- . 2>/dev/null \
+                  | sed 's/^[0-9a-f]*://' | tr -d '/' | sort -u || true)"
+      # The notes refs' own commit messages are git's boilerplate rather than
+      # anyone's prose, but they are messages in history and the scan above
+      # excluded them, so nothing else would read them.
+      while IFS= read -r rev; do
+        [ -n "$rev" ] || continue
+        if git log -1 --format=%B "$rev" 2>/dev/null | grep -i -q -e "$pat" 2>/dev/null; then
+          note_hits="${note_hits}$(git rev-parse --short "$rev")  (notes ref message) contains '${pat}'
+"
+        fi
+      done <<< "$note_revs"
+    done
+  fi
+
+  if [ -n "$hist_hits" ] || [ -n "$msg_hits" ] || [ -n "$tag_hits" ] || [ -n "$note_hits" ]; then
     fail "identifiers present in history"
-    printf '%s%s\n' "$hist_hits" "$msg_hits" | while IFS= read -r l; do
+    printf '%s%s%s%s\n' "$hist_hits" "$msg_hits" "$tag_hits" "$note_hits" \
+      | while IFS= read -r l; do
       [ -n "$l" ] && detail "$l"
     done
   else
-    pass "no identifiers anywhere in history, in blobs or in messages"
+    pass "no identifiers in history — blobs, messages, tag messages or notes"
   fi
 fi
 

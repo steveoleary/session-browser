@@ -315,7 +315,8 @@ scripts/preflight-public.sh --remote origin
 
 Eight checks, exit non-zero on any failure: the remote carries only ordinary
 refs; no configured identifier appears in the working tree or **anywhere in
-history, in a blob or in a commit message**; every commit is authored by the
+history — in a blob, a commit message, an annotated tag's message or a git
+note**; every commit is authored by the
 expected identity; gitleaks is clean
 over full history; nothing tracked is also ignored; no `*.log` is tracked now or
 historically; and `.git-blame-ignore-revs` names only commits that still exist.
@@ -339,19 +340,41 @@ Unset by default, exactly like the identifier patterns, and for the same reason:
 a clone with none configured is a clone with nothing to hide. Both halves report
 together, and a clone that needs the second half is expected to add it once.
 
-**"Anywhere in history" means blobs *and* commit messages.** Check 3 walks every
-version of every file, and then reads every message reachable from every ref. It
-did not always: for a while it read blobs only, and an identifier quoted in a
-commit body survived a run reporting eight passes — found by grepping `git log`
-by hand, not by this script. Message hits are reported by abbreviated commit hash
-rather than `file:line`, because a message has no line worth citing, and the
-subject is deliberately not printed: reproducing the identifier in the output of
-the tool that exists to contain it defeats the point.
+**"Anywhere in history" means every object a person can write prose into.**
+Check 3 walks every version of every file, then every commit message reachable
+from every ref, then every annotated tag's message, then every git note. It did
+not always: for a while it read blobs only, and an identifier quoted in a commit
+body survived a run reporting eight passes — found by grepping `git log` by hand,
+not by this script. Closing that hole is what put the rest on the list, because
+each is the same shape — free text in an object no blob scan visits.
+
+Each kind of hit is reported by the handle you would use to go and fix it, and
+never by quoting the text: a commit message by abbreviated hash, a tag by tag
+name, a note by the abbreviated hash of the commit it annotates (what `git notes
+show` takes). Reproducing the identifier in the output of the tool that exists to
+contain it defeats the point, and a message has no line worth citing anyway.
 
 The message scan is two-pass. One grep per pattern over all messages at once
 answers *whether* there is anything; only a hit triggers the walk that says
 *which commit*. A clean history — the normal case — never pays for the
 attribution.
+
+Two details of the tag and note scans are deliberate and easy to get wrong:
+
+- A tag object is read from its message down, headers stripped. `git rev-list`
+  peels a tag ref to the commit it points at, so the tag object is never visited
+  by anything else, and there is **no hook counterpart** — git has no tag-msg
+  hook — which makes the preflight the only place `git tag -a -m` can be caught.
+  Stripping the headers keeps the tagger's address out of the scan (check 4's
+  business) and means a tag whose **name** carries an identifier is not caught
+  here; a ref name belongs to check 1 and `hooks.forbiddenref`.
+- Notes are scanned from `refs/notes/*` explicitly, and those refs are excluded
+  from the blob walk. They are reachable from `--all`, so the blob grep did in
+  fact read note text — but it reported the hit as a *path*, and a note's path is
+  the annotated object's hash, so the report named a 40-hex "file" present in no
+  tree. Coverage nobody wrote down is coverage the next edit can drop in silence.
+  The scan walks the notes refs' own history, so an edited or removed note is
+  still read: removing a note does not unreach the blob that held it.
 
 `--remote` takes a name *or* a URL, so a new public repo can be checked before
 the working checkout is repointed at it. Omit it and check 1 is skipped.
