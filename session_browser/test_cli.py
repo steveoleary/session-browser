@@ -996,6 +996,7 @@ class TestGet:
         data = json.loads(out)
         assert data["session"]["id"] == "claude:aaa"
         assert data["entries"][0] == {
+            "entry_index": 0,
             "role": "user",
             "text": "alpha wombat message",
             "timestamp": "2026-06-01T10:00:00Z",
@@ -1153,6 +1154,11 @@ class TestSearch:
         entries = data["results"][0]["entries"]
         assert entries[0]["role"] == "user"
         assert entries[0]["text"] == "beta quokka message"
+        # Same key as the snippets sitting beside them in this very payload,
+        # and the same numbering. These are whole transcripts, so the
+        # positions start at 0.
+        assert [e["entry_index"] for e in entries] == list(range(len(entries)))
+        assert entries[0]["entry_index"] == data["results"][0]["first_match"]
 
     def test_limit_bounds_results_not_candidates(self, cli):
         # 'alpha' only appears in the *oldest* session. A pre-search candidate
@@ -1648,11 +1654,40 @@ class TestGetRoleFilter:
         assert code == 1 and out == ""
         assert json.loads(err)["error"]["code"] == "invalid_role"
 
-    def test_unfiltered_entries_carry_no_entry_index(self, mixed_cli):
+    def test_unfiltered_entries_carry_entry_index_too(self, mixed_cli):
+        """Replaces test_unfiltered_entries_carry_no_entry_index, which
+        pinned the opposite. That test was deliberate — the position is
+        derivable without --role, so omitting it was defensible — but the
+        omission is what a reader reported as "get entries carry no index
+        at all", and for a --role-less call that was literally true. The
+        key is now unconditional; this test pins the reversal so it cannot
+        drift back, and keeps the original's other half (no "roles" key
+        when no --role was given)."""
         _, out, _ = mixed_cli("get", "claude:mmm", "--format", "json")
         data = json.loads(out)
         assert "roles" not in data
-        assert all("entry_index" not in e for e in data["entries"])
+        assert [e["entry_index"] for e in data["entries"]] == [0, 1, 2, 3, 4]
+
+    def test_windowed_entries_carry_absolute_entry_index(self, mixed_cli):
+        """A window with no --role: positions are contiguous but offset,
+        and the entry_index is the absolute one, matching entry_range —
+        not the offset within the returned array."""
+        _, out, _ = mixed_cli(
+            "get", "claude:mmm", "--entries", "2:3", "--format", "json"
+        )
+        data = json.loads(out)
+        assert data["entry_range"] == {"start": 2, "end": 3}
+        assert [e["entry_index"] for e in data["entries"]] == [2, 3]
+
+    def test_text_labels_blocks_only_when_role_filtered(self, mixed_cli):
+        """The JSON key is unconditional; the "[N]" prefix in the document
+        is not. A contiguous run needs no per-block label — the header line
+        gives the range — and one on every block is noise for a reader."""
+        _, out, _ = mixed_cli("get", "claude:mmm", "--entries", "2:3")
+        assert "- Entries: 2–3 of 5" in out
+        assert "[2]" not in out
+        _, out, _ = mixed_cli("get", "claude:mmm", "--role", "assistant")
+        assert "[1] Assistant: looking at it now" in out
 
     def test_get_and_search_name_the_position_the_same_way(self, mixed_cli):
         """One name for one concept. A reader who has just seen a snippet's
