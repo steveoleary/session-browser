@@ -2027,6 +2027,7 @@ class TestRendering:
         assert d["session"]["id"] == "claude:abc"
         assert d["session"]["session_id"] == "abc"
         assert d["entries"][0] == {
+            "entry_index": 0,
             "role": "user",
             "text": "please fix",
             "timestamp": None,

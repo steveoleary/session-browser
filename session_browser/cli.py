@@ -23,9 +23,19 @@ Output contracts (stable shapes the consuming agent can rely on):
                "roles?": [...], "clip?": N}
               (--entries windows by absolute position; --head/--tail
                window the *kept* entries — with --role that means e.g.
-               the last N user turns, and entry_range is then omitted;
-               kept entries carry their absolute "entry_index" — the same
-               key, and the same numbering, as a search snippet's.
+               the last N user turns, and entry_range is then omitted.
+               **Every entry carries "entry_index"**, its absolute
+               position — the same key, and the same numbering, as a
+               search snippet's — on every call, whatever the flags.
+               It is derivable for a contiguous window (entry_range.start
+               plus the array offset) and it is emitted anyway: an int per
+               entry costs nothing next to the text beside it, whereas a
+               key that appears only under some flag combinations reads as
+               "no position recorded" to anyone who did not use those
+               flags, which is the misreading that produced this contract
+               note. get --format text still prefixes blocks with "[N]"
+               only under --role, where the kept set is sparse and the
+               header line cannot describe it.
                "clip" reports the per-entry char cap: stdout defaults to
                4000 with a "… [clipped …]" marker inside the text,
                --output defaults to complete, --clip N overrides either,
@@ -1134,11 +1144,16 @@ def _parse_roles(values: list[str] | None) -> list[str] | None:
 
 def _session_view(session: Session, args, roles):
     """Load and window one session's transcript. Returns
-    (transcript, total, window, indices); raises when unreadable."""
+    (transcript, total, window, indices); raises when unreadable.
+
+    *indices* are the absolute positions of the entries actually returned,
+    always — including the unfiltered case, where they are contiguous but
+    still offset by the window's start. They are what "entry_index" reports,
+    and a caller that wants to know whether the kept set is *sparse* should
+    ask *roles*, not whether indices are present."""
     transcript = load_transcript(session)
     total = len(transcript.entries)
     window = None
-    indices: list[int] | None = None
     if roles is not None and (args.head is not None or args.tail is not None):
         # --head/--tail bound the *kept* entries when --role is given —
         # "--role user --tail 5" means the last five user turns, not the
@@ -1179,6 +1194,8 @@ def _session_view(session: Session, args, roles):
             transcript = Transcript(
                 transcript.session, [e for _, e in kept], transcript.warnings
             )
+        else:
+            indices = list(range(start, start + len(transcript.entries)))
     return transcript, total, window, indices
 
 
@@ -1248,7 +1265,12 @@ def cmd_get(args) -> int:
                 t,
                 total_entries=total,
                 entry_range=window,
-                entry_indices=indices,
+                # Label a block with its position only when the kept set is
+                # sparse. JSON gains nothing by omitting a key, so it always
+                # carries one; a document read by a person does — an unbroken
+                # run of "[7] [8] [9]" prefixes is noise the header line
+                # already covers with an "Entries: 7 to 9 of 40" range.
+                entry_indices=indices if roles is not None else None,
                 roles=roles,
             )
             for _, t, total, window, indices in views

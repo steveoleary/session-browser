@@ -270,26 +270,35 @@ def session_to_dict(s: Session) -> dict:
 def transcript_to_dict(
     t: Transcript, *, entry_indices: list[int] | None = None
 ) -> dict:
-    """*entry_indices* (role-filtered subset) adds each entry's absolute
-    position as "entry_index" -- one name for the concept everywhere, so a
-    reader arriving from a search snippet finds the same key here.
+    """Every entry carries its absolute position as "entry_index" -- one
+    name for the concept everywhere, and present on every entry, so a
+    reader arriving from a search snippet finds the same key here without
+    having to know which flags produced the payload.
 
     It used to be "index" while search snippets said "entry_index", and a
     reader who looked for the search name in this payload, did not find it,
     and concluded get carried no positions at all. Two names for one field
     fail that way silently: the miss reads as "not recorded", not as "wrong
-    key". Same argument as last_activity/updated_at, same resolution."""
+    key". Same argument as last_activity/updated_at, same resolution. A key
+    that is present only sometimes fails the same way, so it is now always
+    present.
+
+    *entry_indices* supplies the positions when *t* is a windowed or
+    role-filtered subset, whose entries' offsets in the list are not their
+    positions in the session. Omit it for a whole transcript, whose
+    positions are 0..n-1."""
+    positions = range(len(t.entries)) if entry_indices is None else entry_indices
     entries = []
-    for pos, e in enumerate(t.entries):
-        item = {
-            "role": e.role,
-            "text": e.text,
-            "timestamp": e.timestamp or None,
-            "metadata": e.metadata,
-        }
-        if entry_indices is not None:
-            item = {"entry_index": entry_indices[pos], **item}
-        entries.append(item)
+    for pos, e in zip(positions, t.entries, strict=True):
+        entries.append(
+            {
+                "entry_index": pos,
+                "role": e.role,
+                "text": e.text,
+                "timestamp": e.timestamp or None,
+                "metadata": e.metadata,
+            }
+        )
     return {
         "session": session_to_dict(t.session),
         "entries": entries,
