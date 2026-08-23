@@ -218,9 +218,39 @@ def _scan_codex_db(db_path: Path) -> list[Session] | None:
     conn = sqlite3.connect(_readonly_uri(db_path), uri=True, timeout=_CODEX_DB_TIMEOUT)
     conn.row_factory = sqlite3.Row
     try:
+        # Normalize the optional origin while SQLite already materializes the
+        # row, keeping Python's per-session construction loop at its existing
+        # opcode budget. SQLite has no reverse(); rtrim(value,
+        # replace(value, separator, '')) removes every trailing non-separator
+        # character and therefore leaves the string through its last slash or
+        # colon. The final CASE removes the transport-only .git suffix and
+        # falls back to cwd before Python applies the usual final-segment rule.
         rows = conn.execute(
+            "WITH base AS ("
+            "  SELECT threads.*, "
+            "         rtrim(COALESCE(git_origin_url, ''), '/') AS origin "
+            "  FROM threads"
+            "), tails AS ("
+            "  SELECT base.*, "
+            "         substr(origin, length(rtrim(origin, replace(origin, '/', ''))) + 1) "
+            "           AS path_tail "
+            "  FROM base"
+            "), names AS ("
+            "  SELECT tails.*, "
+            "         substr(path_tail, "
+            "                length(rtrim(path_tail, replace(path_tail, ':', ''))) + 1) "
+            "           AS origin_name "
+            "  FROM tails"
+            ") "
             "SELECT id, rollout_path, cwd, git_branch, first_user_message, "
-            "created_at_ms, updated_at_ms, archived FROM threads"
+            "       CASE "
+            "         WHEN origin_name = '' THEN cwd "
+            "         WHEN origin_name LIKE '%.git' "
+            "           THEN substr(origin_name, 1, length(origin_name) - 4) "
+            "         ELSE origin_name "
+            "       END AS repository_source, "
+            "       created_at_ms, updated_at_ms, archived "
+            "FROM names"
         ).fetchall()
     finally:
         conn.close()
@@ -262,7 +292,7 @@ def _codex_session_from_row(r) -> Session:
         summary=(r["first_user_message"] or "")[:120].replace("\n", " "),
         cwd=r["cwd"] or "",
         branch=r["git_branch"] or "",
-        repository=_repo_name(r["cwd"] or ""),
+        repository=_repo_name(r["repository_source"] or ""),
         created_at=_epoch_ms_to_iso(r["created_at_ms"], zulu=True),
         updated_at=_epoch_ms_to_iso(r["updated_at_ms"], zulu=True)
         or _epoch_ms_to_iso(r["created_at_ms"], zulu=True),
@@ -290,6 +320,7 @@ def _scan_codex_files() -> list[Session]:
             cwd = payload.get("cwd", "")
             git = payload.get("git", {})
             branch = git.get("branch", "")
+            origin_url = git.get("repository_url", "")
             ts = payload.get("timestamp", obj.get("timestamp", ""))
             # Try to get first user message for summary
             summary = _codex_first_user_message(f)
@@ -300,7 +331,11 @@ def _scan_codex_files() -> list[Session]:
                     summary=summary,
                     cwd=cwd,
                     branch=branch,
-                    repository=_repo_name(cwd),
+                    repository=(
+                        _codex_repo_name(cwd, origin_url)
+                        if origin_url
+                        else _repo_name(cwd)
+                    ),
                     created_at=ts,
                     updated_at=(
                         _last_activity_iso(f, "codex") or ts or _file_mtime_iso(f)
@@ -377,39 +412,40 @@ def _summary_text(text: str) -> str:
 
 
 def _repo_name(cwd: str) -> str:
-    """The project name ``--repo`` matches: the final segment of *cwd*.
+    """Final path segment used when a provider exposes no better project name.
 
-    Callers decide *which* path they pass, and they do not all pass the
-    session's own directory: ``scan_opencode`` passes the project worktree
-    first, so a session run in a worktree of a project reports the project.
-    Saying "the last segment of the session's cwd" is therefore wrong at the
-    call site even though it is right about this function, which is exactly
-    how four separate descriptions of this behaviour ended up disagreeing.
-
-    A directory name, deliberately, not a git remote. Two of the three
-    providers record no remote at all — Claude's JSONL carries ``cwd`` and
-    ``gitBranch`` and nothing else — so a remote-derived value would be
-    populated for one provider and empty for the others, and a ``--repo``
-    filter that silently covers a third of the corpus is the same defect as
-    one that covers none of it.
-
-    Reading the real remote would also cost a walk up the tree per session
-    looking for ``.git``, which is I/O in discovery, for a difference that
-    almost never arises: over a 1554-session corpus, 1024 sessions ran with
-    cwd *at* a repository root and 9 ran in a subdirectory of one. The other
-    525 have a cwd that no longer exists or was never in a repository, and
-    those keep working here because this is string arithmetic and never
-    touches the filesystem.
+    Callers choose the path: OpenCode passes its recorded project worktree,
+    while Claude, Pi and origin-missing Codex sessions pass their cwd. Codex
+    origin metadata is normalized separately. This fallback is string-only on
+    purpose: deleted worktrees still retain a usable name, and discovery never
+    walks ``.git`` files or invokes Git per session.
 
     A trailing slash is trimmed first, so ``/a/b/`` and ``/a/b`` agree.
-
-    Kept as a call rather than inlined at the four construction sites, which
-    moves ``loop.codex_db_rows`` by +11.3%: at 94ns against 78ns inline, the
-    whole 1554-session corpus pays 146 microseconds for it, and four copies of
-    this reasoning is the more expensive thing to maintain.
     """
     trimmed = cwd.rstrip("/")
     return trimmed[trimmed.rfind("/") + 1 :]
+
+
+def _codex_repo_name(cwd: str, origin_url: str) -> str:
+    """Best available Codex project name, without filesystem discovery.
+
+    Codex records the Git origin in both its SQLite index and every rollout's
+    first-line metadata. Its final path segment names the parent project even
+    when *cwd* is a disposable worktree with an agent/tool name. The field is
+    optional, so old/non-Git sessions retain the cwd-derived value rather than
+    disappearing from ``--repo``. This deliberately differs from Claude and
+    Pi, whose formats expose no project root or origin; their honest fallback
+    remains the cwd name.
+
+    The common ``.git`` transport suffix is not part of the project name.
+    ``_repo_name`` handles HTTPS, SSH and scp-like remote spellings because all
+    place the repository after the last slash; the colon-only form is covered
+    for completeness.
+    """
+    remote = (
+        origin_url.rstrip("/").rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    ).removesuffix(".git")
+    return remote or _repo_name(cwd)
 
 
 def _codex_first_user_message(path: Path) -> str:

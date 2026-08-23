@@ -426,7 +426,8 @@ def build_corpus(root: Path) -> Path:
     conn.execute(
         "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, "
         "cwd TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', "
-        "git_branch TEXT, first_user_message TEXT NOT NULL DEFAULT '', "
+        "git_branch TEXT, git_origin_url TEXT, "
+        "first_user_message TEXT NOT NULL DEFAULT '', "
         "created_at_ms INTEGER, updated_at_ms INTEGER, "
         "archived INTEGER NOT NULL DEFAULT 0)"
     )
@@ -434,14 +435,15 @@ def build_corpus(root: Path) -> Path:
         sid = f"perf-codex-{i:04d}"
         rollout = codex_root / f"rollout-2026-01-05T09-00-00-{sid}.jsonl"
         conn.execute(
-            "INSERT INTO threads (id, rollout_path, cwd, git_branch, "
+            "INSERT INTO threads (id, rollout_path, cwd, git_branch, git_origin_url, "
             "first_user_message, created_at_ms, updated_at_ms, archived) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
             (
                 sid,
                 str(rollout),
                 f"/Users/perf/project{i % 3}",
                 "main",
+                f"https://example.test/perf/project{i % 3}.git",
                 f"start session {i} {_filler(i, 0)}",
                 1767603600000,
                 1767603600000,
@@ -1071,6 +1073,10 @@ def loop_probes(root: Path) -> list[LoopProbe]:
             transcript._raw_text_may_match(raw, ["kookaburra"])
 
     def codex_db_rows() -> None:
+        # Keep values that do not select a constructor branch constant. This
+        # probe includes its input-literal construction, so formatting an
+        # irrelevant varying fixture value would count fixture work rather
+        # than the per-row Session construction the guard names.
         rows = [
             {
                 "id": f"perf-codex-{i:04d}",
@@ -1080,9 +1086,10 @@ def loop_probes(root: Path) -> list[LoopProbe]:
                 ),
                 "cwd": f"/Users/perf/project{i % 3}",
                 "git_branch": "main",
+                "repository_source": "project",
                 "first_user_message": f"start session {i} {_filler(i, 0)}",
                 "created_at_ms": 1767603600000,
-                "updated_at_ms": 1767603600000 + i,
+                "updated_at_ms": 1767603600000,
             }
             for i in range(40)
         ]
