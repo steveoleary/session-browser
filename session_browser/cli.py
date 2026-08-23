@@ -465,13 +465,13 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--repo",
-        help="case-insensitive substring of the project name: the last "
-        "segment of the session's project root where the provider records "
-        "one, else of its directory. Not a git remote. Only opencode "
-        "records a root, so for claude and codex a session run in a git "
-        "worktree is named after the worktree directory rather than the "
-        "project it belongs to. Read cwd off the hits when worktrees are "
-        "in play",
+        help="case-insensitive substring of the inferred project name, not "
+        "a git remote URL. OpenCode records a project root. Codex uses the "
+        "final segment of its recorded git origin when present, then falls "
+        "back to the session directory name. Claude and Pi expose neither "
+        "a project root nor origin, so their worktree sessions -- and Codex "
+        "sessions without origin metadata -- remain named after the "
+        "worktree directory; read cwd off hits when that uncertainty matters",
     )
     p.add_argument("--cwd", help="case-insensitive substring of working directory")
     p.add_argument(

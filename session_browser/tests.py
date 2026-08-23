@@ -16,6 +16,7 @@ import pytest
 from session_browser import herdr, multiplexer, tmux
 from session_browser.discovery import (
     Session,
+    _codex_repo_name,
     _epoch_ms_to_iso,
     _file_mtime_iso,
     _last_activity_iso,
@@ -245,7 +246,10 @@ class TestScanCodex:
                 "payload": {
                     "id": "019d-abc",
                     "cwd": "/Users/test/project",
-                    "git": {"branch": "main"},
+                    "git": {
+                        "branch": "main",
+                        "repository_url": "https://example.test/org/true-project.git",
+                    },
                 },
             }
         )
@@ -259,7 +263,31 @@ class TestScanCodex:
         assert len(sessions) == 1
         assert sessions[0].id == "019d-abc"
         assert sessions[0].provider == "codex"
-        assert sessions[0].repository == "project"
+        assert sessions[0].repository == "true-project"
+
+    def test_file_fallback_uses_origin_for_a_worktree(self, tmp_path):
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        sessions_dir.mkdir(parents=True)
+        meta = {
+            "type": "session_meta",
+            "timestamp": "2026-04-10T13:00:00Z",
+            "payload": {
+                "id": "worktree-session",
+                "cwd": "/Users/test/Projects/worktrees/codex",
+                "git": {
+                    "branch": "main",
+                    "repository_url": "git@example.test:org/actual-project.git",
+                },
+            },
+        }
+        (sessions_dir / "rollout-worktree-session.jsonl").write_text(
+            json.dumps(meta) + "\n"
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert sessions[0].repository == "actual-project"
 
     def test_updated_at_uses_last_turn_not_lifecycle(self, tmp_path):
         """updated_at must reflect the last user/agent message, ignoring
@@ -311,20 +339,22 @@ class TestScanCodexDb:
         conn.execute(
             "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, "
             "cwd TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', "
-            "git_branch TEXT, first_user_message TEXT NOT NULL DEFAULT '', "
+            "git_branch TEXT, git_origin_url TEXT, "
+            "first_user_message TEXT NOT NULL DEFAULT '', "
             "created_at_ms INTEGER, updated_at_ms INTEGER, "
             "archived INTEGER NOT NULL DEFAULT 0)"
         )
         for row in rows:
             conn.execute(
-                "INSERT INTO threads (id, rollout_path, cwd, git_branch, "
+                "INSERT INTO threads (id, rollout_path, cwd, git_branch, git_origin_url, "
                 "first_user_message, created_at_ms, updated_at_ms, archived) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     row["id"],
                     row["rollout_path"],
                     row.get("cwd", ""),
                     row.get("branch"),
+                    row.get("origin_url"),
                     row.get("summary", ""),
                     row.get("created_ms"),
                     row.get("updated_ms"),
@@ -387,8 +417,7 @@ class TestScanCodexDb:
         assert s.summary == "hello world"
         assert s.cwd == "/p"
         assert s.branch == "main"
-        # Derived from cwd, so the fast path and the file scan agree on it
-        # without the index needing a column for it.
+        # No origin in this row: the fallback remains the cwd name.
         assert s.repository == "p"
         assert s.created_at == "2026-04-10T13:00:00.000Z"
         assert s.updated_at == "2026-04-10T13:00:05.000Z"
@@ -416,6 +445,26 @@ class TestScanCodexDb:
             sessions = scan_codex()
 
         assert sessions[0].summary == "line one line two " + "x" * 102
+
+    def test_db_uses_origin_for_a_worktree(self, tmp_path):
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        f = self._write_rollout(sessions_dir, "cx-worktree", summary="hello", day="10")
+        self._write_db(
+            tmp_path,
+            [
+                {
+                    "id": "cx-worktree",
+                    "rollout_path": str(f),
+                    "cwd": "/Users/test/Projects/worktrees/codex",
+                    "origin_url": "git@example.test:org/actual-project.git",
+                }
+            ],
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert sessions[0].repository == "actual-project"
 
     def test_falls_back_to_files_when_index_missing(self, tmp_path):
         """No state_*.sqlite means the file scan runs unchanged."""
@@ -522,14 +571,15 @@ class TestScanCodexDb:
         conn.execute(
             "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, "
             "cwd TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', "
-            "git_branch TEXT, first_user_message TEXT NOT NULL DEFAULT '', "
+            "git_branch TEXT, git_origin_url TEXT, "
+            "first_user_message TEXT NOT NULL DEFAULT '', "
             "created_at_ms INTEGER, updated_at_ms INTEGER, "
             "archived INTEGER NOT NULL DEFAULT 0)"
         )
         conn.execute(
-            "INSERT INTO threads (id, rollout_path, cwd, git_branch, "
+            "INSERT INTO threads (id, rollout_path, cwd, git_branch, git_origin_url, "
             "first_user_message, created_at_ms, updated_at_ms, archived) "
-            "VALUES (?, ?, '', NULL, ?, ?, ?, 0)",
+            "VALUES (?, ?, '', NULL, NULL, ?, ?, ?, 0)",
             ("cx-1", str(f), "from state_10", 1775826000000, 1775826005000),
         )
         conn.commit()
@@ -897,6 +947,21 @@ class TestRepositoryName:
         1554 real sessions have one, and an existence check would blank them
         while also putting a stat in the discovery path."""
         assert _repo_name(str(tmp_path / "deleted-months-ago")) == "deleted-months-ago"
+
+    @pytest.mark.parametrize(
+        ("origin_url", "expected"),
+        [
+            ("https://example.test/org/project.git", "project"),
+            ("ssh://git@example.test/org/project", "project"),
+            ("git@example.test:project.git", "project"),
+            ("", "worktree-name"),
+        ],
+    )
+    def test_codex_origin_name_with_cwd_fallback(self, origin_url, expected):
+        assert (
+            _codex_repo_name("/Projects/worktrees/worktree-name", origin_url)
+            == expected
+        )
 
 
 class TestScanOpencode:
