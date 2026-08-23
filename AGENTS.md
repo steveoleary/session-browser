@@ -69,9 +69,11 @@ in the normal suite. It counts **work** — transcripts parsed, corpus bytes rea
 ripgrep invocations, SQL statements, sessions routed to worker processes,
 progress callbacks — against a fixed synthetic corpus, and compares every
 counter to an exact number in `docs/perf_budgets.json`. It does not time
-anything, deliberately: within-revision spread on the real corpus exceeds 100%
-of the median, so the regressions worth catching are all far below what a
-stopwatch can resolve. Counts are identical on every machine and every run.
+anything, deliberately: a revision's own samples scatter by 1-21% of their
+median at the comparator's default sampling — measured 2026-08-23 on an M1 Pro
+against a 1,180-session, 873 MB `$HOME`, and far worse on fewer samples — while
+the regressions worth catching are nearer 0.2%. Counts are identical on every
+machine and every run.
 
 **When a budget fails, do not bless it to make the suite green.** Read the
 `Guards:` line in the failure — it says which optimisation the workload exists
@@ -169,9 +171,14 @@ Reading the result:
   matching it becomes unjudgeable.
 - **`verdict` per query is `ok`, `slower`, `unresolvable`, or `volatile`.**
   - `unresolvable` — the ratio exceeded the 5% limit by less than this machine
-    can measure. Within-revision spread on a real corpus exceeds 100% of the
-    median, so a fixed threshold on raw medians reports variance as regression.
-    Raise `--repeats`, quiet the machine, or accept the effect is unmeasurable.
+    can measure. A revision's own samples scatter by 1-21% of their median at
+    the default sampling, so a fixed threshold on raw medians reports variance
+    as regression. Raise `--repeats`, quiet the machine, or accept the effect
+    is unmeasurable — and raise it before you believe a large spread, because
+    `relative_spread` uses the interquartile range only at four samples or
+    more and falls back to the full range below that, where a single unwarmed
+    run is the entire answer. The same six sample sets measured on 2026-08-23
+    scored 0.44-0.67 at `--repeats 3 --warmup 0` and 0.03-0.21 at the defaults.
   - `volatile` — the query matched a session that was appended to mid-run, so
     the query is excluded from the aggregate. A moving session file also makes
     two identical revisions disagree, which is why each revision must reproduce

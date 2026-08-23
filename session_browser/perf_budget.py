@@ -2,15 +2,31 @@
 
 Timing cannot police performance in this repository, and that is a measured
 conclusion rather than a preference. ``benchmarks/retrieval_compare.py``
-already encodes it: within-revision spread on the real corpus exceeds 100% of
-the median, which is why that tool reports ``unresolvable`` instead of
-pretending a ratio it cannot resolve is a regression. A wall-clock threshold in
-the test suite would therefore be two bad things at once -- flaky on changes
-that cost nothing, and silent on the changes that matter most, because the
-regressions actually worth catching here are individually far below the noise
-floor. The per-row ``if progress is not None`` branch that prompted this module
-measured +0.18% against a 0.4-1.0% spread. Unmeasurable, real, and exactly the
-kind of thing that accumulates.
+already encodes it: it reports ``unresolvable`` rather than pretend a ratio it
+cannot resolve is a regression, because a revision's own samples scatter by
+more than the effects worth catching. Measured 2026-08-23 on an Apple M1 Pro
+(16 GB, macOS 25.6) against a real ``$HOME`` of 1,180 sessions and 873 MB, the
+product command run exactly as the comparator runs it and scored with the
+comparator's own ``relative_spread()``:
+
+    comparator defaults, 7 repeats, 2 discarded    1% - 21%
+    broad query while the machine reclaims memory  up to 50%
+    below four samples, where ``relative_spread``
+    falls back to the full range                   44% - 67%
+
+Spread tracks how many transcripts a query actually parses -- 42 hits give
+2-3%, 1,558 hits give 15-16% -- and, more than anything else, how many samples
+the estimator is handed. Earlier revisions of this docstring quoted "over 100%"
+with no method attached; that did not reproduce in any configuration tried, on
+this revision or on the pre-2026-08-14 code that over-read the corpus, so the
+figure is stated here as a band with the conditions that produced it.
+
+A wall-clock threshold in the test suite would therefore still be two bad
+things at once -- flaky on changes that cost nothing, and silent on the changes
+that matter most, because the regressions actually worth catching here are
+individually far below even the 1% floor. The per-row ``if progress is not
+None`` branch that prompted this module measured +0.18% against a 0.4-1.0%
+spread. Unmeasurable, real, and exactly the kind of thing that accumulates.
 
 So this module does not time anything. It counts *work*: transcripts parsed,
 bytes read off the corpus, ripgrep invocations, SQL statements, sessions handed
