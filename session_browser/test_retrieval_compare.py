@@ -638,9 +638,13 @@ def test_slowdown_inside_the_noise_floor_is_unresolvable_not_a_failure(
 ):
     """A machine too noisy to measure the effect must not convict the candidate.
 
-    Real corpus runs showed within-revision spread above 100% of the median
-    while the aggregate ratio sat on 1.00, so a fixed threshold on raw medians
-    reported regressions that were pure variance.
+    Real corpus runs measured 2026-08-23 scatter by 1-21% of the median at the
+    comparator's default sampling, and by 44-67% when given fewer than four
+    samples, while the aggregate ratio sits on 1.00 -- so a fixed threshold on
+    raw medians reports pure variance as a regression. The samples below swing
+    harder still (relative_spread 1.17) to keep the branch under test unmissable
+    on any machine this suite runs on; they are a deliberate exaggeration of the
+    measured band, not a claim about it.
     """
     baseline, candidate = tmp_path / "baseline", tmp_path / "candidate"
     baseline.mkdir()
