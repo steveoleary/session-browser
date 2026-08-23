@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Install this repository's git hooks into .git/hooks.
+# Install this repository's git hooks alongside the active hook owner.
 #
-# Git does not clone hooks, so they need an install step. This one appends a
-# MARKED SECTION to each hook it manages rather than owning the file, because
-# other tooling may manage its own section in the same hook with the same
-# technique. Owning the file, or pointing core.hooksPath at a tracked
-# directory, would silently disable anything else that installed a hook there —
-# silently being the problem.
+# Git does not clone hooks, so they need an install step. In a Beads Dolt
+# workspace, `bd hooks install --beads` owns core.hooksPath and the Beads-managed
+# sections under .beads/hooks; this installer adds the project's sections
+# outside those markers. Each installer can then regenerate its own section
+# without erasing the other. A clone with no .beads workspace keeps the normal
+# .git/hooks location and has no Beads dependency.
 #
 # Two hooks, because one cannot do both jobs:
 #   pre-commit   scripts/hooks/leak-guard      staged file contents and paths
@@ -35,10 +35,8 @@ msg_end='# --- END LEAK-GUARD-MSG ---'
 die() { printf 'install-hooks: %s\n' "$*" >&2; exit 1; }
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository."
-git_dir="$(git rev-parse --git-dir)"
+git_dir="$(git rev-parse --absolute-git-dir)"
 top="$(git rev-parse --show-toplevel)"
-pre_hook="$git_dir/hooks/pre-commit"
-msg_hook="$git_dir/hooks/commit-msg"
 guard="$top/scripts/hooks/leak-guard"
 msg_guard="$top/scripts/hooks/leak-guard-msg"
 lib="$top/scripts/hooks/leak-patterns.sh"
@@ -127,8 +125,54 @@ if [ -n "$add_pattern" ]; then
   exit 0
 fi
 
+beads_workspace=0
+hooks_dir="$git_dir/hooks"
+if [ -d "$top/.beads" ]; then
+  beads_workspace=1
+  command -v bd >/dev/null 2>&1 \
+    || die "this Beads workspace needs bd to install its hook owner."
+  hooks_dir="$top/.beads/hooks"
+fi
+pre_hook="$hooks_dir/pre-commit"
+msg_hook="$hooks_dir/commit-msg"
+
+beads_hooks_active() {
+  active_hooks="$(git config --get core.hooksPath 2>/dev/null || true)"
+  case "$active_hooks" in
+    .beads/hooks|./.beads/hooks|"$hooks_dir") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 if [ "$mode" = "check" ]; then
   status=0
+  if [ "$beads_workspace" -eq 1 ]; then
+    if beads_hooks_active; then
+      printf '%-11s %s\n' "hook path" ".beads/hooks active"
+    else
+      printf '%-11s %s\n' \
+        "hook path" ".beads/hooks NOT active — run scripts/install-hooks.sh"
+      status=1
+    fi
+
+    beads_list="$(bd hooks list 2>&1)"
+    beads_list_status=$?
+    beads_ok=1
+    [ "$beads_list_status" -eq 0 ] || beads_ok=0
+    for hook_name in \
+      pre-commit post-merge pre-push post-checkout prepare-commit-msg; do
+      printf '%s\n' "$beads_list" | grep -q "${hook_name}: installed" \
+        || beads_ok=0
+    done
+    if [ "$beads_ok" -eq 1 ]; then
+      printf '%-11s %s\n' "beads" "all managed hooks installed"
+    else
+      printf '%-11s %s\n' \
+        "beads" "managed hooks incomplete — run scripts/install-hooks.sh"
+      status=1
+    fi
+  fi
+
   report_hook() {
     if [ -f "$1" ] && grep -qF "$2" "$1"; then
       printf '%-11s %s section installed\n' "$3" "$4"
@@ -148,7 +192,14 @@ if [ "$mode" = "check" ]; then
   exit "$status"
 fi
 
-mkdir -p "$git_dir/hooks"
+if [ "$beads_workspace" -eq 1 ]; then
+  bd hooks install --beads \
+    || die "bd could not install the Beads-managed hooks."
+  beads_hooks_active \
+    || die "bd did not activate .beads/hooks through core.hooksPath."
+fi
+
+mkdir -p "$hooks_dir"
 
 install_section "$pre_hook" "$pre_begin" "$pre_end" "$pre_body"
 install_section "$msg_hook" "$msg_begin" "$msg_end" "$msg_body"

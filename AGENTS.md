@@ -215,6 +215,13 @@ scripts/install-hooks.sh          # install / refresh
 scripts/install-hooks.sh --check  # status, changes nothing
 ```
 
+In a checkout with a local Beads Dolt workspace, the installer first runs
+`bd hooks install --beads`. That makes `.beads/hooks` the active hook directory
+through `core.hooksPath`; the project hooks are added outside Beads' managed
+markers, so either installer can regenerate its own section safely. A public
+clone with no `.beads` workspace keeps Git's normal `.git/hooks` directory and
+does not need Beads.
+
 Two hooks are installed, because one cannot do both jobs:
 
 | hook | script | what it reads |
@@ -296,14 +303,14 @@ Optionally the hook also checks the commit author, when a clone sets
 inert for everyone else. It catches committing from a machine whose global git
 identity is somebody else's — the failure that no directory convention covers.
 
-The installer appends a **marked section** to `.git/hooks/pre-commit` and to
-`.git/hooks/commit-msg` rather than owning either file, because other tooling may
-manage its own section in the same hook with the same technique. Re-running
-replaces only our sections and leaves the rest intact, and says how many foreign
-lines it preserved. `--check` reports both hooks separately, so a clone that has
-one and not the other is visible rather than assumed. Do not set
-`core.hooksPath` at a tracked directory here: it would silently disable anything
-else that installed a hook there — silently being the problem.
+The installer appends a **marked section** to the active `pre-commit` and
+`commit-msg` rather than owning either file, because another hook owner may
+manage its own section in the same file. Re-running replaces only the project
+sections and leaves the rest intact, and says how many foreign lines it
+preserved. `--check` reports both hooks separately; in a Beads workspace it also
+verifies that `.beads/hooks` is active and all five Beads hooks are installed.
+Do not repoint `core.hooksPath` by hand: only one directory is active, so doing
+that can silently bypass either the project guards or the tracker hooks.
 
 Escape hatch is git's own — `git commit --no-verify`.
 
