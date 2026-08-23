@@ -332,6 +332,94 @@ def test_preflight_refuses_to_certify_when_no_patterns_exist(
 
 
 @pytest.mark.parametrize(
+    ("ref_kind", "ref_name", "label", "inspect_command"),
+    [
+        ("branch", f"topic/{MARKER}", "branch", "git branch --points-at"),
+        ("lightweight", f"light-{MARKER}", "tag", "git tag --points-at"),
+        ("annotated", f"annotated-{MARKER}", "tag", "git tag --points-at"),
+    ],
+)
+def test_preflight_refuses_local_ref_names_without_echoing_them(
+    guard_repo: GuardRepo,
+    ref_kind: str,
+    ref_name: str,
+    label: str,
+    inspect_command: str,
+) -> None:
+    guard_repo.configure_marker()
+    if ref_kind == "branch":
+        guard_repo.git("branch", ref_name)
+        ref = f"refs/heads/{ref_name}"
+    elif ref_kind == "lightweight":
+        guard_repo.git("tag", ref_name)
+        ref = f"refs/tags/{ref_name}"
+    else:
+        guard_repo.git("tag", "-a", ref_name, "-m", "Clean release notes")
+        ref = f"refs/tags/{ref_name}"
+    object_id = guard_repo.git("rev-parse", "--short", ref).stdout.strip()
+
+    result = guard_repo.script("scripts/preflight-public.sh")
+
+    assert result.returncode == 1
+    assert "FAIL  local branch or tag names contain configured identifiers" in (
+        result.stdout
+    )
+    assert f"{object_id}  (local {label} name)" in result.stdout
+    assert f"{inspect_command} {object_id}" in result.stdout
+    assert ref_name not in result.stdout + result.stderr
+    assert MARKER not in result.stdout + result.stderr
+
+
+def test_preflight_accepts_clean_local_ref_names_and_tag_body(
+    guard_repo: GuardRepo,
+) -> None:
+    guard_repo.configure_marker()
+    guard_repo.git("branch", "topic/clean-name")
+    guard_repo.git("tag", "clean-lightweight")
+    guard_repo.git("tag", "-a", "clean-annotated", "-m", "Clean release notes")
+
+    result = guard_repo.script("scripts/preflight-public.sh")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "SKIP  local branch and tag names are clean; no --remote was given"
+        in result.stdout
+    )
+    assert "local branch or tag names contain" not in result.stdout
+
+
+def test_forbiddenref_remains_a_remote_only_topology_rule(
+    guard_repo: GuardRepo, tmp_path: Path
+) -> None:
+    guard_repo.configure_marker()
+    ref_name = "generated/preview-state"
+    guard_repo.git("branch", ref_name)
+    guard_repo.git("config", "--add", "hooks.forbiddenref", ref_name)
+
+    local_only = guard_repo.script("scripts/preflight-public.sh")
+
+    assert local_only.returncode == 0, local_only.stdout + local_only.stderr
+
+    remote = tmp_path / "remote.git"
+    guard_repo.run("git", "init", "--bare", "--quiet", str(remote), check=True)
+    guard_repo.git(
+        "push",
+        "--quiet",
+        str(remote),
+        f"refs/heads/{ref_name}:refs/heads/{ref_name}",
+    )
+
+    with_remote = guard_repo.script(
+        "scripts/preflight-public.sh", "--remote", str(remote)
+    )
+
+    assert with_remote.returncode == 1
+    assert "FAIL  remote carries refs it should not" in with_remote.stdout
+    assert f"refs/heads/{ref_name}" in with_remote.stdout
+    assert f"git push {remote} --delete <ref>" in with_remote.stdout
+
+
+@pytest.mark.parametrize(
     ("script", "args", "expected_code"),
     [
         ("scripts/hooks/leak-guard", (), 1),

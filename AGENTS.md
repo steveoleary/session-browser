@@ -320,20 +320,27 @@ Escape hatch is git's own — `git commit --no-verify`.
 scripts/preflight-public.sh --remote origin
 ```
 
-Eight checks, exit non-zero on any failure: the remote carries only ordinary
-refs; no configured identifier appears in the working tree or **anywhere in
-history — in a blob, a commit message, an annotated tag's message or a git
-note**; every commit is authored by the
+Eight checks, exit non-zero on any failure: local branch and tag names contain
+no configured identifier and the remote carries only ordinary refs; no
+configured identifier appears in the working tree or **anywhere in history —
+in a blob, a commit message, an annotated tag's message or a git note**; every
+commit is authored by the
 expected identity; gitleaks is clean
 over full history; nothing tracked is also ignored; no `*.log` is tracked now or
 historically; and `.git-blame-ignore-revs` names only commits that still exist.
 
 Two of those are written by shape rather than by name, so they keep working
-against tooling this script has never heard of. Check 1 fails on any ref outside
-`refs/heads`, `refs/tags` and `refs/pull`, because anything else is something
-using the repository as a data store. Check 6 asks git for files that are both
-tracked and ignored: an ignore rule that does not actually keep a path out is
-decorative, and the file ships regardless of what it says.
+against tooling this script has never heard of. Check 1 applies the configured
+`hooks.leakpattern` list to local `refs/heads` and `refs/tags`, then fails on any
+remote ref outside `refs/heads`, `refs/tags` and `refs/pull`, because anything
+else is something using the repository as a data store. Check 6 asks git for
+files that are both tracked and ignored: an ignore rule that does not actually
+keep a path out is decorative, and the file ships regardless of what it says.
+
+A local ref-name hit is reported by abbreviated object ID, never by name: use
+the supplied `git branch --points-at` or `git tag --points-at` command to find
+it, then the rename commands to repair it. Printing the ref would reproduce the
+identifier in the output of the tool that exists to contain it.
 
 The shape rule has one hole it cannot close by itself — a tool that hides data
 in a **branch** is using a perfectly ordinary ref. So check 1 also takes a
@@ -344,8 +351,10 @@ git config --add hooks.forbiddenref 'some-generated-ref-name'
 ```
 
 Unset by default, exactly like the identifier patterns, and for the same reason:
-a clone with none configured is a clone with nothing to hide. Both halves report
-together, and a clone that needs the second half is expected to add it once.
+a clone with none configured is a clone with nothing to hide. This second list
+remains a remote-topology rule; local identifier-bearing names are owned by
+`hooks.leakpattern`, so the two configurations do not have to duplicate each
+other.
 
 **"Anywhere in history" means every object a person can write prose into.**
 Check 3 walks every version of every file, then every commit message reachable
@@ -374,7 +383,7 @@ Two details of the tag and note scans are deliberate and easy to get wrong:
   hook — which makes the preflight the only place `git tag -a -m` can be caught.
   Stripping the headers keeps the tagger's address out of the scan (check 4's
   business) and means a tag whose **name** carries an identifier is not caught
-  here; a ref name belongs to check 1 and `hooks.forbiddenref`.
+  here; a local ref name belongs to check 1 and `hooks.leakpattern`.
 - Notes are scanned from `refs/notes/*` explicitly, and those refs are excluded
   from the blob walk. They are reachable from `--all`, so the blob grep did in
   fact read note text — but it reported the hit as a *path*, and a note's path is
@@ -384,7 +393,8 @@ Two details of the tag and note scans are deliberate and easy to get wrong:
   still read: removing a note does not unreach the blob that held it.
 
 `--remote` takes a name *or* a URL, so a new public repo can be checked before
-the working checkout is repointed at it. Omit it and check 1 is skipped.
+the working checkout is repointed at it. Local branch and tag names are checked
+either way; omitting it skips only check 1's remote half.
 
 It reads the same untracked `hooks.leakpattern` config as the hook. **A run with
 no patterns configured fails.** A preflight that passes because it was asked to

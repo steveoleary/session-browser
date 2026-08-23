@@ -11,7 +11,8 @@
 # the value is on every push, not only on migration day.
 #
 # Checks, in order:
-#   1  the remote carries only ordinary refs (heads, tags, PRs)
+#   1  local branch/tag names contain no configured identifier, and the remote
+#      carries only ordinary refs (heads, tags, PRs)
 #   2  no configured identifier appears anywhere in the working tree
 #   3  no configured identifier appears anywhere in history — blobs, commit
 #      messages, annotated tag objects AND git notes
@@ -34,7 +35,8 @@
 #   scripts/preflight-public.sh [--remote NAME|URL] [--quiet]
 #
 # --remote takes a name or a URL, so the new public repo can be checked before
-# the working checkout is repointed at it. Omitted, check 1 is skipped.
+# the working checkout is repointed at it. Local ref names are always checked;
+# when this is omitted, only check 1's remote half is skipped.
 
 set -uo pipefail
 
@@ -69,18 +71,63 @@ printf 'preflight: %s' "$(basename "$(git rev-parse --show-toplevel)")"
 [ -n "$remote" ] && printf ' -> %s' "$remote"
 printf '\n\n'
 
-# --- 1. remote carries only ordinary refs --------------------------------------
+# --- 1. local names are safe; remote refs have an ordinary shape ---------------
+# A branch or tag name is publishable text even though it is not an object body.
+# This is the one owner of ref names: check 3 deliberately stays about object
+# contents. Never print a matching name — report its object ID and commands that
+# let the operator find and rename it without reproducing it here.
+local_ref_hits=""
+local_ref_count=0
+if [ ${#patterns[@]} -gt 0 ]; then
+  while IFS=' ' read -r object_id ref_name; do
+    [ -n "$ref_name" ] || continue
+    for pat in "${patterns[@]}"; do
+      if printf '%s\n' "$ref_name" | grep -i -q -e "$pat" 2>/dev/null; then
+        short_id="$(git rev-parse --short "$object_id")"
+        case "$ref_name" in
+          refs/heads/*)
+            local_ref_hits="${local_ref_hits}${short_id}  (local branch name); inspect: git branch --points-at ${short_id}
+"
+            ;;
+          refs/tags/*)
+            local_ref_hits="${local_ref_hits}${short_id}  (local tag name); inspect: git tag --points-at ${short_id}
+"
+            ;;
+        esac
+        local_ref_count=$((local_ref_count + 1))
+        break
+      fi
+    done
+  done <<EOF
+$(git for-each-ref --format='%(objectname) %(refname)' refs/heads refs/tags 2>/dev/null)
+EOF
+fi
+local_ref_hits="$(printf '%s' "$local_ref_hits" | grep -v '^$' | sort -u || true)"
+
+if [ -n "$local_ref_hits" ]; then
+  fail "local branch or tag names contain configured identifiers"
+  detail "$local_ref_count offending local ref name(s)"
+  printf '%s\n' "$local_ref_hits" | while IFS= read -r ref_hit; do
+    [ -n "$ref_hit" ] && detail "$ref_hit"
+  done
+  detail "rename a branch: git branch -m <old> <new>"
+  detail "rename a tag without changing its object:"
+  detail "git update-ref refs/tags/<new> <object-id>"
+  detail "git update-ref -d refs/tags/<old>"
+fi
+
 if [ -n "$remote" ]; then
   refs="$(git ls-remote "$remote" 2>/dev/null)"
   if [ -z "$refs" ]; then
-    skip "remote '$remote' returned no refs (empty repo, or unreachable)"
+    if [ -n "$local_ref_hits" ]; then
+      skip "remote '$remote' returned no refs; local names were checked separately"
+    else
+      skip "local branch and tag names are clean; remote '$remote' returned no refs"
+    fi
   else
-    # Two rules. The structural one: anything outside heads/tags/PRs is some
-    # tool using the repository as a data store, and checking the shape catches
-    # a tool nobody thought of. It cannot see a tool that hides data in a
-    # BRANCH, though, so the second rule is a per-clone list of ref patterns,
-    # read from the same untracked config the identifiers use. Unset by
-    # default, so this is inert for anyone else.
+    # Two remote rules. The structural one catches any namespace outside
+    # heads/tags/PRs. The separately configured forbidden-ref patterns catch
+    # tools that hide data inside an ordinary-looking remote branch.
     bad="$(printf '%s' "$refs" | grep -vE '\srefs/(heads|tags|pull)/|\sHEAD$' || true)"
     while IFS= read -r pat; do
       [ -n "$pat" ] || continue
@@ -94,14 +141,18 @@ EOF
       fail "remote carries refs it should not"
       # printf '%s\n' — without the newline the last line is an incomplete
       # read and `while read` silently drops it, under-reporting the guard.
-      printf '%s\n' "$bad" | while IFS= read -r r; do detail "$r"; done
+      printf '%s\n' "$bad" | while IFS= read -r remote_ref; do
+        detail "$remote_ref"
+      done
       detail "remove with: git push $remote --delete <ref>"
-    else
-      pass "remote carries only ordinary refs"
+    elif [ -z "$local_ref_hits" ]; then
+      pass "local ref names are safe and remote refs have an ordinary shape"
     fi
   fi
+elif [ -n "$local_ref_hits" ]; then
+  skip "no --remote was given; local names were checked separately"
 else
-  skip "no --remote given, so the remote-ref check did not run"
+  skip "local branch and tag names are clean; no --remote was given"
 fi
 
 # --- 2/3. identifiers in tree and history -------------------------------------
