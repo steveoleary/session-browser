@@ -54,16 +54,12 @@ is excluded unless you pass `--include-current`.
 
 ## Flags are not documented here
 
-Flag semantics, defaults and enum values live in `session-browser <cmd> --help`,
-next to the code that implements them. This skill deliberately does not restate
-them: a restatement is a copy, and it goes stale on the commit that changes the
-flag. This skill tells you *which* flag and *why* — run `--help` when a flag's
-exact behaviour decides your answer.
-
-Two facts are repeated here anyway, because a wrong parse costs a whole task:
-`search` returns `{"results": [...]}`, while `list` and multi-id `get` return
-`{"sessions": [...]}` (a single-id `get` returns `{"session": ..., "entries":
-[...]}`). A `KeyError` on one of those is the envelope, not an empty corpus.
+Flag semantics, defaults, enum values, and complete JSON key sets live in
+`session-browser <cmd> --help`, next to the code that implements them. This
+skill deliberately does not restate them: a restatement is a copy, and it goes
+stale on the commit that changes the flag or payload. This skill tells you
+*which* flag and *why* — run `--help` before parsing a command whose exact
+envelope or nested object shape decides your answer.
 
 If a command or flag this skill teaches comes back `invalid choice` or
 `unrecognized arguments`, suspect the binary on your PATH before you suspect

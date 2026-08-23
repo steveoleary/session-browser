@@ -1,109 +1,7 @@
-"""Non-interactive CLI for agents: list, search, get.
+"""Non-interactive CLI for agents: list, search, get, and stats.
 
-Output contracts (stable shapes the consuming agent can rely on):
-- session_dict everywhere carries "duration_seconds" (created_at →
-  updated_at span; null when a timestamp is missing) — with an entry
-  count, the triage signal that catches real sessions whose summary
-  looks like noise (summaries are often just the first user message).
-- "updated_at" is the one name for last activity, on session rows and on
-  stats' provider rows alike. Two names for it meant reading the wrong
-  one returned null rather than raising, which is unfalsifiable at the
-  call site: "no timestamp recorded" and "wrong key" look identical.
-- session_dict "branch" is null when a provider has no branch field at all,
-  and "" only when the provider supports it but recorded no active branch.
-- list:       {"sessions": [session_dict + "total_entries", ...],
-               "counts": {"returned", "readable", "empty", "unreadable"},
-               "warnings?": [...]}
-              (total_entries is null for an unreadable transcript; with
-               --around, each session also carries "offset" — signed
-               distance from the anchor like "-3h20m"/"+4d02h" — and
-               results sort nearest-first)
-- get (json): {"session": {...}, "entries": [...], "warnings": [...],
-               "total_entries": N, "entry_range?": {"start", "end"},
-               "roles?": [...], "clip?": N}
-              (--entries windows by absolute position; --head/--tail
-               window the *kept* entries — with --role that means e.g.
-               the last N user turns, and entry_range is then omitted.
-               **Every entry carries "entry_index"**, its absolute
-               position — the same key, and the same numbering, as a
-               search snippet's — on every call, whatever the flags.
-               It is derivable for a contiguous window (entry_range.start
-               plus the array offset) and it is emitted anyway: an int per
-               entry costs nothing next to the text beside it, whereas a
-               key that appears only under some flag combinations reads as
-               "no position recorded" to anyone who did not use those
-               flags, which is the misreading that produced this contract
-               note. get --format text still prefixes blocks with "[N]"
-               only under --role, where the kept set is sparse and the
-               header line cannot describe it.
-               "clip" reports the per-entry char cap: stdout defaults to
-               4000 with a "… [clipped …]" marker inside the text,
-               --output defaults to complete, --clip N overrides either,
-               0 disables.
-               Several ids batch into {"sessions": [payload, ...],
-               "skipped?": [{id, error}, ...]}; a single id keeps the
-               flat legacy shape)
-- get (text): Markdown document on stdout (or --output file); several
-              ids concatenate with "---" separators
-- search (json): {"query": "..." | [...], "mode": ..., "filters": {...},
-                   "results": [{session_dict plus match_count,
-                                total_entries, first_match?, last_match?,
-                                summary_matches?, snippets_omitted?,
-                                snippets/entries depending on mode}, ...],
-                   "skipped?": [{id, error}, ...], "warnings?": [...]}
-                  (each snippet is {"role", "entry_index", "text"} plus
-                   "query" when several phrases were given. **role is the
-                   provenance signal**: "tool" means the phrase was in
-                   something the agent read — a file, a diff, a command's
-                   output — while "user"/"assistant" mean somebody wrote it.
-                   A transcript records everything that passed through the
-                   session, so a literal hit proves the text occurred, not
-                   that anyone discussed it; --mode ids carries no roles and
-                   so nominates candidates rather than confirming them.
-                   first_match/last_match are entry indices usable directly
-                   with `get --entries`; multiple query phrases are OR'd in
-                   one scan, "query" is then a list; with --around each
-                   result also carries "offset" as in list. Matching is
-                   case-insensitive and markdown-insensitive: backticks and
-                   asterisks are stripped from both sides, so "SELECT only"
-                   finds "`SELECT` only". Summaries are scanned too — a
-                   session can match by summary alone (match_count 0,
-                   "summary_matches" lists the phrases). Snippets are
-                   capped per result (--max-snippets, default 20), with
-                   the overflow counted in "snippets_omitted". When --limit
-                   truncates matches, a warning reports how many were
-                   dropped and their date range)
-- search (text): tab-separated header lines on stdout + skipped diagnostics
-                 and advisory warnings on stderr
-- search --output-dir (json): {"output_dir": "<dir>", "manifest": "<path>",
-                                "files_written": N, "results": N}
-- search --output-dir (text): "wrote N file(s) to <dir> (manifest: <path>)"
-- stats (json):  {"total": N, "warnings?": [...],
-                  "transcript_health": "not_checked",
-                  "activity": {"days", "start", "end", "counts": [N, ...]},
-                  "providers": [{"provider", "count", "percent",
-                                 "updated_at"}, ...],
-                  "top_cwds": [{"cwd", "count"}, ...],
-                  "oldest", "newest", "filters": {...}}
-                 ("transcript_health" is always "not_checked": stats never
-                  opens a transcript, so its total counts sessions
-                  *discovered*, not sessions readable — corrupt and
-                  zero-entry records are in the number, and only `list`,
-                  which does open them, names them in its warnings.
-                  "top_cwds" decomposes the total by directory, which is
-                  also the cheapest check on a --repo/--cwd substring that
-                  matched more projects than intended.
-                  counts is one bucket per local calendar day, oldest→newest:
-                  bucket i is activity.start + i days. It renders on a single
-                  line, and the request echo in "filters" comes last, so the
-                  blocks that answer a question survive a `| head -N`)
-- stats (text):  human dashboard (provider bars, activity sparkline,
-                  top working directories)
-- output confirmation (json): {"written": "<path>", "id": "prov:id",
-                                "warnings": [...]}
-- output confirmation (text): "wrote <path>" plus warnings on stderr
-- errors:     {"error": {"code", "message", "details"?}} on stderr, exit 1
-Text formats are tab-separated one-line-per-record equivalents.
+Each subcommand's ``--help`` is the public output contract. Keep it beside the
+parser so callers can discover the runtime shape without reading source.
 """
 
 from __future__ import annotations
@@ -138,6 +36,176 @@ from .transcript import (
     session_duration_seconds,
     session_to_dict,
     transcript_to_dict,
+)
+
+_SESSION_KEYS = (
+    "id",
+    "provider",
+    "session_id",
+    "summary",
+    "cwd",
+    "branch",
+    "repository",
+    "created_at",
+    "updated_at",
+    "duration_seconds",
+)
+_ENTRY_KEYS = ("entry_index", "role", "text", "timestamp", "metadata")
+_FILTER_KEYS = (
+    "provider",
+    "repo",
+    "cwd",
+    "exclude_cwd",
+    "here",
+    "include_current",
+    "since",
+    "until",
+    "around",
+    "window",
+    "limit",
+)
+_ERROR_GROUPS = (
+    ("error_envelope", ("error",)),
+    ("error", ("code", "message", "details")),
+)
+
+
+def _json_key_contract(*groups: tuple[str, tuple[str, ...]]) -> str:
+    """Render machine-checkable key sets inside human-readable help."""
+    return "\n".join(
+        f"JSON keys [{label}]: {', '.join(keys)}" for label, keys in groups
+    )
+
+
+_LIST_EPILOG = """Output contract:
+Default format: json. Text emits one tab-separated session per line.
+{keys}
+"warnings" and session "offset" are conditional. "total_entries" is null
+when a transcript is unreadable; counts still classifies every returned row.
+""".format(
+    keys=_json_key_contract(
+        ("envelope", ("sessions", "counts", "warnings")),
+        ("session", _SESSION_KEYS + ("total_entries", "offset")),
+        ("counts", ("returned", "readable", "empty", "unreadable")),
+        *_ERROR_GROUPS,
+    )
+)
+
+_GET_EPILOG = """Output contract:
+Default format: text (Markdown). JSON must be requested with --format json.
+Single JSON example: {{"session": {{"id": "claude:abc", ...}},
+  "entries": [{{"entry_index": 0, "role": "user", ...}}], ...}}
+Batch JSON example: {{"sessions": [{{"session": {{"id": "claude:abc", ...}},
+  "entries": [...], ...}}], "skipped": [{{"id": "claude:bad", "error": "..."}}]}}
+{keys}
+"entry_range", "roles", and "clip" are conditional. Every entry always has
+all entry keys; entry_index is absolute and matches search snippets. A batch's
+"sessions" items have exactly the single payload shape, not list rows.
+With --output --format json, stdout is the output_confirmation shape.
+""".format(
+    keys=_json_key_contract(
+        (
+            "single",
+            (
+                "session",
+                "entries",
+                "warnings",
+                "total_entries",
+                "entry_range",
+                "roles",
+                "clip",
+            ),
+        ),
+        ("batch", ("sessions", "skipped")),
+        ("session", _SESSION_KEYS),
+        ("entry", _ENTRY_KEYS),
+        ("entry_range", ("start", "end")),
+        ("skipped", ("id", "error")),
+        ("output_confirmation", ("written", "id", "warnings")),
+        *_ERROR_GROUPS,
+    )
+)
+
+_SEARCH_RESULT_KEYS = _SESSION_KEYS + (
+    "match_count",
+    "total_entries",
+    "summary_matches",
+    "offset",
+    "first_match",
+    "last_match",
+    "parse_warnings",
+    "snippets",
+    "snippets_omitted",
+    "entries",
+    "file",
+)
+_SEARCH_EPILOG = """Output contract:
+Default format: json; default mode: snippets. Text emits tab-separated result
+headers. ids omits snippets/entries; snippets adds snippets; full adds entries.
+{keys}
+Result keys are the union across stdout and manifest variants: "file" exists
+only in full-mode manifests; other conditional keys depend on matches, modes,
+warnings, and --around. A multi-phrase snippet adds "query". "role" preserves
+provenance: tool hits are observed text, not necessarily agent-authored text.
+With --output-dir, stdout is artifact_confirmation and manifest.json uses the
+artifact_manifest envelope.
+""".format(
+    keys=_json_key_contract(
+        ("envelope", ("query", "mode", "filters", "results", "skipped", "warnings")),
+        ("filters", _FILTER_KEYS),
+        ("result", _SEARCH_RESULT_KEYS),
+        ("snippet", ("role", "entry_index", "query", "text")),
+        ("entry", _ENTRY_KEYS),
+        ("skipped", ("id", "error")),
+        (
+            "artifact_confirmation",
+            ("output_dir", "manifest", "files_written", "results"),
+        ),
+        (
+            "artifact_manifest",
+            (
+                "query",
+                "mode",
+                "filters",
+                "generated_at",
+                "results",
+                "skipped",
+                "warnings",
+            ),
+        ),
+        *_ERROR_GROUPS,
+    )
+)
+
+_STATS_EPILOG = """Output contract:
+Default format: text (human dashboard). JSON must be requested with --format json.
+{keys}
+"warnings" is conditional. transcript_health is always "not_checked": stats
+counts discovered sessions without opening transcripts. activity.counts has one
+bucket per local calendar day from start through end. top_cwds helps validate
+whether a --repo or --cwd substring matched more projects than intended.
+""".format(
+    keys=_json_key_contract(
+        (
+            "envelope",
+            (
+                "total",
+                "warnings",
+                "transcript_health",
+                "activity",
+                "providers",
+                "top_cwds",
+                "oldest",
+                "newest",
+                "filters",
+            ),
+        ),
+        ("filters", _FILTER_KEYS),
+        ("activity", ("days", "start", "end", "counts")),
+        ("provider", ("provider", "count", "percent", "updated_at")),
+        ("top_cwd", ("cwd", "count")),
+        *_ERROR_GROUPS,
+    )
 )
 
 
@@ -191,7 +259,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_list = sub.add_parser("list", help="discover sessions with metadata filters")
+    p_list = sub.add_parser(
+        "list",
+        help="discover sessions with metadata filters",
+        epilog=_LIST_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_filter_args(p_list)
     p_list.add_argument(
         "--sort",
@@ -201,10 +274,20 @@ def build_parser() -> argparse.ArgumentParser:
         "(for targets buried under newer sessions); ignored with "
         "--around, whose order is nearest-first",
     )
-    p_list.add_argument("--format", choices=["json", "text"], default="json")
+    p_list.add_argument(
+        "--format",
+        choices=["json", "text"],
+        default="json",
+        help="output format (default: json)",
+    )
     p_list.set_defaults(handler=cmd_list)
 
-    p_get = sub.add_parser("get", help="retrieve complete session transcripts")
+    p_get = sub.add_parser(
+        "get",
+        help="retrieve complete session transcripts",
+        epilog=_GET_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p_get.add_argument(
         "session_id",
         nargs="+",
@@ -213,7 +296,12 @@ def build_parser() -> argparse.ArgumentParser:
         "git short hashes); several ids batch into one "
         'call (JSON wraps them as {"sessions": [...]})',
     )
-    p_get.add_argument("--format", choices=["text", "json"], default="text")
+    p_get.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
     p_get.add_argument(
         "--output", help="write to this file instead of stdout (single session only)"
     )
@@ -272,6 +360,8 @@ def build_parser() -> argparse.ArgumentParser:
         "search",
         help="case-insensitive, markdown-insensitive literal "
         "search over complete transcripts and summaries",
+        epilog=_SEARCH_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_search.add_argument(
         "query",
@@ -281,7 +371,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_filter_args(p_search)
     p_search.add_argument(
-        "--mode", choices=["ids", "snippets", "full"], default="snippets"
+        "--mode",
+        choices=["ids", "snippets", "full"],
+        default="snippets",
+        help="result detail (default: snippets)",
     )
     p_search.add_argument(
         "--match-all",
@@ -310,7 +403,12 @@ def build_parser() -> argparse.ArgumentParser:
         "unlimited); omitted snippets are reported "
         "in snippets_omitted",
     )
-    p_search.add_argument("--format", choices=["json", "text"], default="json")
+    p_search.add_argument(
+        "--format",
+        choices=["json", "text"],
+        default="json",
+        help="output format (default: json)",
+    )
     p_search.add_argument(
         "--output-dir", help="write manifest.json (and full transcripts) here"
     )
@@ -325,18 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
         "stats",
         help="summarize sessions: provider breakdown, daily "
         "activity, top working directories",
-        # An epilog rather than a note in the module docstring, which no
-        # agent can reach: this exact field was documented there and a test
-        # reader still had to ask what it meant.
-        epilog=(
-            'JSON output carries "transcript_health": "not_checked", always. '
-            "stats never opens a transcript, so its total counts sessions "
-            "discovered, not sessions readable -- corrupt and zero-entry "
-            "records are inside the number. Only `list` opens them, and it "
-            'names them in its "warnings". "top_cwds" decomposes the total '
-            "by directory, which is also the cheapest check on a --repo or "
-            "--cwd substring that matched more projects than intended."
-        ),
+        epilog=_STATS_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_filter_args(p_stats)
@@ -352,7 +439,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="how many top working directories to show (default 5)",
     )
-    p_stats.add_argument("--format", choices=["text", "json"], default="text")
+    p_stats.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="output format (default: text)",
+    )
     p_stats.set_defaults(handler=cmd_stats)
 
     return parser

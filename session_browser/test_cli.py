@@ -94,6 +94,201 @@ def cli(monkeypatch, capsys, sessions):
     return run
 
 
+def _help_contract(command: str, capsys) -> tuple[dict[str, set[str]], str]:
+    """Read the key declarations from the same --help output users see."""
+    with pytest.raises(SystemExit) as exc:
+        run_cli([command, "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    groups = {}
+    for line in help_text.splitlines():
+        if not line.startswith("JSON keys ["):
+            continue
+        label, values = line.removeprefix("JSON keys [").split("]: ", 1)
+        groups[label] = set(values.split(", "))
+    return groups, help_text
+
+
+def _key_union(objects) -> set[str]:
+    return {key for item in objects for key in item}
+
+
+class TestHelpOutputContracts:
+    """The discoverable contracts must be exact unions of runtime variants.
+
+    These tests intentionally parse rendered help rather than importing the
+    constants used to build it. A key added only to help, or only to an emitted
+    object, therefore fails instead of allowing two descriptions to drift.
+    """
+
+    def test_list_contract_matches_runtime(self, cli, capsys):
+        payloads = []
+        for argv in (
+            ("list",),
+            ("list", "--around", "codex:bbb", "--window", "1w"),
+            ("list", "--cwd", "projAA"),
+        ):
+            code, out, _ = cli(*argv)
+            assert code == 0
+            payloads.append(json.loads(out))
+
+        contract, help_text = _help_contract("list", capsys)
+        assert "Default format: json." in help_text
+        assert contract["envelope"] == _key_union(payloads)
+        assert contract["session"] == _key_union(
+            row for payload in payloads for row in payload["sessions"]
+        )
+        assert contract["counts"] == _key_union(
+            payload["counts"] for payload in payloads
+        )
+
+    def test_get_contract_matches_single_batch_and_output_runtime(
+        self, cli, sessions, tmp_path, capsys
+    ):
+        sessions.append(
+            Session(
+                id="broken",
+                provider="claude",
+                content_path=str(tmp_path / "missing.jsonl"),
+            )
+        )
+        singles = []
+        for argv in (
+            ("get", "claude:aaa", "--format", "json"),
+            ("get", "claude:aaa", "--entries", "0", "--format", "json"),
+            ("get", "claude:aaa", "--role", "user", "--format", "json"),
+        ):
+            code, out, _ = cli(*argv)
+            assert code == 0
+            singles.append(json.loads(out))
+        code, out, _ = cli("get", "claude:aaa", "claude:broken", "--format", "json")
+        assert code == 0
+        batch = json.loads(out)
+        target = tmp_path / "session.json"
+        code, out, _ = cli(
+            "get",
+            "claude:aaa",
+            "--format",
+            "json",
+            "--output",
+            str(target),
+        )
+        assert code == 0
+        confirmation = json.loads(out)
+        code, _, err = cli("get", "claude:aaa", "--entries", "99", "--format", "json")
+        assert code == 1
+        error_payload = json.loads(err)
+
+        contract, help_text = _help_contract("get", capsys)
+        assert "Default format: text (Markdown)." in help_text
+        assert "Single JSON example:" in help_text
+        assert "Batch JSON example:" in help_text
+        assert contract["single"] == _key_union(singles)
+        assert contract["batch"] == set(batch)
+        assert contract["session"] == _key_union(
+            payload["session"] for payload in singles
+        )
+        assert contract["entry"] == _key_union(
+            entry for payload in singles for entry in payload["entries"]
+        )
+        assert contract["entry_range"] == set(singles[1]["entry_range"])
+        assert contract["skipped"] == set(batch["skipped"][0])
+        assert contract["output_confirmation"] == set(confirmation)
+        assert contract["error_envelope"] == set(error_payload)
+        assert contract["error"] == set(error_payload["error"])
+
+    def test_search_contract_matches_modes_and_artifacts(
+        self, cli, sessions, tmp_path, capsys
+    ):
+        path = Path(sessions[0].content_path)
+        path.write_text(path.read_text() + "{malformed\n")
+        sessions.append(
+            Session(
+                id="broken",
+                provider="claude",
+                content_path=str(tmp_path / "missing.jsonl"),
+            )
+        )
+        payloads = []
+        for argv in (
+            ("search", "wombat", "--max-snippets", "1"),
+            ("search", "wombat", "quokka"),
+            ("search", "quokka", "--mode", "full"),
+            (
+                "search",
+                "gamma",
+                "--around",
+                "codex:bbb",
+                "--window",
+                "1w",
+            ),
+            ("search", "wombat", "--cwd", "projAA"),
+        ):
+            code, out, _ = cli(*argv)
+            assert code == 0
+            payloads.append(json.loads(out))
+
+        manifests = []
+        confirmations = []
+        for name, argv in (
+            ("full", ("search", "quokka", "--mode", "full")),
+            ("warning", ("search", "wombat", "--cwd", "projAA")),
+        ):
+            out_dir = tmp_path / name
+            code, out, _ = cli(*argv, "--output-dir", str(out_dir))
+            assert code == 0
+            confirmations.append(json.loads(out))
+            manifests.append(json.loads((out_dir / "manifest.json").read_text()))
+
+        contract, help_text = _help_contract("search", capsys)
+        assert "Default format: json; default mode: snippets." in help_text
+        assert contract["envelope"] == _key_union(payloads)
+        assert contract["filters"] == _key_union(
+            payload["filters"] for payload in payloads
+        )
+        all_results = [
+            row for payload in [*payloads, *manifests] for row in payload["results"]
+        ]
+        assert contract["result"] == _key_union(all_results)
+        assert contract["snippet"] == _key_union(
+            snippet for row in all_results for snippet in row.get("snippets", [])
+        )
+        assert contract["entry"] == _key_union(
+            entry for row in all_results for entry in row.get("entries", [])
+        )
+        assert contract["skipped"] == _key_union(
+            skipped for payload in payloads for skipped in payload.get("skipped", [])
+        )
+        assert contract["artifact_confirmation"] == _key_union(confirmations)
+        assert contract["artifact_manifest"] == _key_union(manifests)
+
+    def test_stats_contract_matches_runtime(self, cli, capsys):
+        payloads = []
+        for argv in (
+            ("stats", "--format", "json"),
+            ("stats", "--cwd", "projAA", "--format", "json"),
+        ):
+            code, out, _ = cli(*argv)
+            assert code == 0
+            payloads.append(json.loads(out))
+
+        contract, help_text = _help_contract("stats", capsys)
+        assert "Default format: text (human dashboard)." in help_text
+        assert contract["envelope"] == _key_union(payloads)
+        assert contract["filters"] == _key_union(
+            payload["filters"] for payload in payloads
+        )
+        assert contract["activity"] == _key_union(
+            payload["activity"] for payload in payloads
+        )
+        assert contract["provider"] == _key_union(
+            row for payload in payloads for row in payload["providers"]
+        )
+        assert contract["top_cwd"] == _key_union(
+            row for payload in payloads for row in payload["top_cwds"]
+        )
+
+
 class TestList:
     def test_json_default_most_recent_first(self, cli):
         code, out, err = cli("list")
