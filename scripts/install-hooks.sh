@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Install this repository's git hooks into .git/hooks.
+# Install this repository's git hooks alongside the active hook owner.
 #
-# Git does not clone hooks, so they need an install step. This one appends a
-# MARKED SECTION to each hook it manages rather than owning the file, because
-# other tooling may manage its own section in the same hook with the same
-# technique. Owning the file, or pointing core.hooksPath at a tracked
-# directory, would silently disable anything else that installed a hook there —
-# silently being the problem.
+# Git does not clone hooks, so they need an install step. In a Tracker Store
+# workspace, `trk hooks install --tracker` owns core.hooksPath and the Tracker-managed
+# sections under .tracker/hooks; this installer adds the project's sections
+# outside those markers. Each installer can then regenerate its own section
+# without erasing the other. A clone with no .tracker workspace keeps the normal
+# .git/hooks location and has no Tracker dependency.
 #
 # Two hooks, because one cannot do both jobs:
 #   pre-commit   scripts/hooks/leak-guard      staged file contents and paths
@@ -35,10 +35,8 @@ msg_end='# --- END LEAK-GUARD-MSG ---'
 die() { printf 'install-hooks: %s\n' "$*" >&2; exit 1; }
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository."
-git_dir="$(git rev-parse --git-dir)"
+git_dir="$(git rev-parse --absolute-git-dir)"
 top="$(git rev-parse --show-toplevel)"
-pre_hook="$git_dir/hooks/pre-commit"
-msg_hook="$git_dir/hooks/commit-msg"
 guard="$top/scripts/hooks/leak-guard"
 msg_guard="$top/scripts/hooks/leak-guard-msg"
 lib="$top/scripts/hooks/leak-patterns.sh"
@@ -127,8 +125,54 @@ if [ -n "$add_pattern" ]; then
   exit 0
 fi
 
+tracker_workspace=0
+hooks_dir="$git_dir/hooks"
+if [ -d "$top/.tracker" ]; then
+  tracker_workspace=1
+  command -v trk >/dev/null 2>&1 \
+    || die "this Tracker workspace needs trk to install its hook owner."
+  hooks_dir="$top/.tracker/hooks"
+fi
+pre_hook="$hooks_dir/pre-commit"
+msg_hook="$hooks_dir/commit-msg"
+
+tracker_hooks_active() {
+  active_hooks="$(git config --get core.hooksPath 2>/dev/null || true)"
+  case "$active_hooks" in
+    .tracker/hooks|./.tracker/hooks|"$hooks_dir") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 if [ "$mode" = "check" ]; then
   status=0
+  if [ "$tracker_workspace" -eq 1 ]; then
+    if tracker_hooks_active; then
+      printf '%-11s %s\n' "hook path" ".tracker/hooks active"
+    else
+      printf '%-11s %s\n' \
+        "hook path" ".tracker/hooks NOT active — run scripts/install-hooks.sh"
+      status=1
+    fi
+
+    tracker_list="$(trk hooks list 2>&1)"
+    tracker_list_status=$?
+    tracker_ok=1
+    [ "$tracker_list_status" -eq 0 ] || tracker_ok=0
+    for hook_name in \
+      pre-commit post-merge pre-push post-checkout prepare-commit-msg; do
+      printf '%s\n' "$tracker_list" | grep -q "${hook_name}: installed" \
+        || tracker_ok=0
+    done
+    if [ "$tracker_ok" -eq 1 ]; then
+      printf '%-11s %s\n' "tracker" "all managed hooks installed"
+    else
+      printf '%-11s %s\n' \
+        "tracker" "managed hooks incomplete — run scripts/install-hooks.sh"
+      status=1
+    fi
+  fi
+
   report_hook() {
     if [ -f "$1" ] && grep -qF "$2" "$1"; then
       printf '%-11s %s section installed\n' "$3" "$4"
@@ -148,7 +192,14 @@ if [ "$mode" = "check" ]; then
   exit "$status"
 fi
 
-mkdir -p "$git_dir/hooks"
+if [ "$tracker_workspace" -eq 1 ]; then
+  trk hooks install --tracker \
+    || die "trk could not install the Tracker-managed hooks."
+  tracker_hooks_active \
+    || die "trk did not activate .tracker/hooks through core.hooksPath."
+fi
+
+mkdir -p "$hooks_dir"
 
 install_section "$pre_hook" "$pre_begin" "$pre_end" "$pre_body"
 install_section "$msg_hook" "$msg_begin" "$msg_end" "$msg_body"
