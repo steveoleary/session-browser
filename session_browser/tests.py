@@ -2627,27 +2627,33 @@ class TestSearchUX:
             assert search.spinner_glyph is None
 
     async def test_global_search_debounces_keystrokes(self):
-        import asyncio
-
         app, fake = _make_app_with_rows()
         async with app.run_test() as pilot:
             await _install_fake_sessions(app, pilot, fake)
             calls: list[str] = []
             orig = app._apply_filter
+            timers = []
 
             def spy(q: str) -> None:
                 calls.append(q)
                 orig(q)
 
-            app._apply_filter = spy
-            app.query_one("#global-search").focus()
-            await pilot.press("a", "b", "c")
-            # Within the debounce window, no filter has run yet.
-            assert calls == []
-            await asyncio.sleep(0.3)
-            await pilot.pause()
-            # One coalesced filter with the final value.
-            assert calls == ["abc"]
+            def set_fake_timer(_delay, callback):
+                timer = SimpleNamespace(stopped=False, callback=callback)
+                timer.stop = lambda: setattr(timer, "stopped", True)
+                timers.append(timer)
+                return timer
+
+            with patch.object(app, "set_timer", side_effect=set_fake_timer):
+                app._apply_filter = spy
+                app.query_one("#global-search").focus()
+                await pilot.press("a", "b", "c")
+
+                assert calls == []
+                assert [timer.stopped for timer in timers] == [True, True, False]
+
+                timers[-1].callback()
+                assert calls == ["abc"]
 
     async def test_content_hits_rank_conversation_above_tool_echo(self):
         """A session that merely quoted the phrase in tool output must not
