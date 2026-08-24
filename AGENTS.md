@@ -174,11 +174,12 @@ Reading the result:
     can measure. A revision's own samples scatter by 1-21% of their median at
     the default sampling, so a fixed threshold on raw medians reports variance
     as regression. Raise `--repeats`, quiet the machine, or accept the effect
-    is unmeasurable — and raise it before you believe a large spread, because
-    `relative_spread` uses the interquartile range only at four samples or
-    more and falls back to the full range below that, where a single unwarmed
-    run is the entire answer. The same six sample sets measured on 2026-08-23
-    scored 0.44-0.67 at `--repeats 3 --warmup 0` and 0.03-0.21 at the defaults.
+    is unmeasurable. Never lower `--repeats` to make a run cheaper: fewer
+    samples widen the noise floor, and a wider floor *accepts* more, so the
+    thinnest evidence buys the loosest test. Below four samples that stops
+    being a matter of degree — `relative_spread` has no quartiles there and
+    returns the full range instead, a different and much wider quantity — so
+    the comparator refuses the run rather than report a verdict resting on it.
   - `volatile` — the query matched a session that was appended to mid-run, so
     the query is excluded from the aggregate. A moving session file also makes
     two identical revisions disagree, which is why each revision must reproduce

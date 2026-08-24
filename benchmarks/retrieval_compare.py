@@ -20,6 +20,11 @@ from pathlib import Path
 DEFAULT_QUERIES = ("kookaburra", "zzzzneverpresent", "transcript")
 SLOWDOWN_LIMIT = 1.05
 DEFAULT_WARMUP = 2
+# Where quartiles start to mean anything, and therefore the fewest samples a
+# timing verdict may rest on. One constant, because the sampling floor and the
+# estimator's own branch point are the same fact stated twice: if they drifted
+# apart, a verdict would be scored against a spread of a different kind.
+MIN_REPEATS = 4
 _DISCOVERY_ENV = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
 
 
@@ -179,14 +184,24 @@ def relative_spread(samples: list[float]) -> float:
 
     This is the resolution limit of the measurement: a candidate/baseline ratio
     smaller than this cannot be distinguished from the machine's own variance.
-    Uses the interquartile range where there are enough samples for quartiles,
-    and the full range below that, which is noisier but never understates."""
+
+    Two different estimators live in here. From ``MIN_REPEATS`` samples upward
+    it is the interquartile range, which absorbs one stalled run. Below that
+    there are no quartiles to take and it is the full range instead: never an
+    understatement, but a *different quantity* -- 2x larger on the same runs on
+    the same machine in the same minute, and 8x larger once one stalled run
+    lands inside the first three. So the two are not comparable with each
+    other, and a number produced by the second one is not a noise
+    floor a verdict can rest on -- ``run_comparison`` refuses to sample that
+    thinly rather than quietly widen its own acceptance band. The fallback stays
+    for callers re-scoring recorded samples by hand, where a range is the honest
+    answer precisely because nothing is being decided on it."""
     if len(samples) < 2:
         return 0.0
     centre = trimmed_median(samples)
     if centre <= 0:
         return 0.0
-    if len(samples) >= 4:
+    if len(samples) >= MIN_REPEATS:
         quartiles = statistics.quantiles(samples, n=4, method="inclusive")
         width = quartiles[2] - quartiles[0]
     else:
@@ -262,10 +277,20 @@ def run_comparison(
     is only convicted of being slow when the ratio exceeds both the limit and
     the spread of the revisions' own samples. Measured on a real corpus
     (2026-08-23, Apple M1 Pro, 1,180 sessions, 873 MB), that spread runs 1-21%
-    of the median at these defaults and reaches 44-67% below four samples,
-    where ``relative_spread`` falls back to the full range -- either way far
-    above the 5% limit, so a fixed threshold applied to raw medians would
-    report pure machine variance as a regression.
+    of the median at these defaults -- far above the 5% limit, so a fixed
+    threshold applied to raw medians would report pure machine variance as a
+    regression.
+
+    Fewer than ``MIN_REPEATS`` samples is refused outright rather than measured
+    and reported, because below that ``relative_spread`` stops being an
+    interquartile range and becomes a full range. Re-measured 2026-08-24 on the
+    same machine, six sample sets taken with the page cache disturbed scored
+    48-96% at three samples against 5-14% at these defaults, and a synthetic 12%
+    slowdown scored against them came out ``unresolvable`` in six sets out of
+    six at three samples and in one out of six at nine. So a floor that wide
+    does not merely measure worse, it *accepts* more: thinning the evidence
+    would loosen the test. The run declines instead, exactly as it declines
+    when every query proved volatile.
     """
     baseline_repo = Path(baseline_repo)
     candidate_repo = Path(candidate_repo)
@@ -276,8 +301,16 @@ def run_comparison(
     home = Path(home)
     if not home.is_dir():
         raise ComparatorError("--home must be an existing directory")
-    if repeats < 1:
-        raise ComparatorError("--repeats must be >= 1")
+    if repeats < MIN_REPEATS:
+        raise ComparatorError(
+            f"--repeats must be >= {MIN_REPEATS}; got {repeats}. Below that "
+            "relative_spread has no quartiles and falls back to the full range "
+            "of the samples, which measured up to 8x wider on the very same "
+            "runs. That spread is the noise floor a slowdown has to clear, so "
+            "fewer samples would not just measure worse, they would widen the "
+            "band that lets a real regression through as 'unresolvable'. "
+            "Nothing here could be judged, so nothing is measured."
+        )
     if warmup < 0:
         raise ComparatorError("--warmup must be >= 0")
     query_list = list(
@@ -525,7 +558,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "replaces the built-in defaults, and combines with "
         "any --query",
     )
-    parser.add_argument("--repeats", type=int, default=7)
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=7,
+        metavar="N",
+        help=f"measured runs per revision per query (default 7, minimum {MIN_REPEATS})",
+    )
     parser.add_argument(
         "--warmup",
         type=int,
