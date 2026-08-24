@@ -238,3 +238,50 @@ class TestGateCorpusIsUntouched:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
         assert "build_corpus" not in called
+
+
+class TestCli:
+    """A corpus can be built at a chosen scale without writing a script."""
+
+    def test_prints_the_manifest_it_wrote(self, tmp_path, capsys):
+        home = tmp_path / "home"
+        assert sc.main(["--home", str(home), "--scale", "2"]) == 0
+        printed = json.loads(capsys.readouterr().out)
+        assert printed == json.loads((home / sc.MANIFEST_NAME).read_text())
+        assert printed["scale"] == 2
+        assert printed["sessions"] == 2 * sc.BASE_TOTAL
+
+    def test_seed_is_selectable_from_the_command_line(self, tmp_path, capsys):
+        sc.main(["--home", str(tmp_path / "a"), "--seed", "1"])
+        first = json.loads(capsys.readouterr().out)
+        sc.main(["--home", str(tmp_path / "b"), "--seed", "2"])
+        second = json.loads(capsys.readouterr().out)
+        assert first["turns"]["total"] != second["turns"]["total"]
+
+    def test_a_bad_scale_is_an_error_not_a_traceback(self, tmp_path, capsys):
+        assert sc.main(["--home", str(tmp_path / "home"), "--scale", "0"]) == 1
+        assert capsys.readouterr().err.startswith("error: ")
+
+    def test_a_non_empty_home_is_refused_and_says_how_to_override(
+        self, tmp_path, capsys
+    ):
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "keep-me").write_text("real data\n")
+        assert sc.main(["--home", str(home)]) == 1
+        # The message has to name the flag, not the keyword argument: this
+        # error is reached from the command line far more often than from code.
+        assert "--force" in capsys.readouterr().err
+        assert (home / "keep-me").exists()
+
+    def test_force_writes_into_a_non_empty_home(self, tmp_path, capsys):
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "stale").write_text("left over\n")
+        assert sc.main(["--home", str(home), "--force"]) == 0
+        assert json.loads(capsys.readouterr().out)["sessions"] == sc.BASE_TOTAL
+
+    def test_help_states_what_one_scale_unit_is(self, capsys):
+        with pytest.raises(SystemExit):
+            sc.parse_args(["--help"])
+        assert str(sc.BASE_TOTAL) in capsys.readouterr().out
