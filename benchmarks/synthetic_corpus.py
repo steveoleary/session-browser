@@ -52,9 +52,11 @@ exclusion a real-``$HOME`` run needs does not apply to one built here.
 
 from __future__ import annotations
 
+import argparse
 import json
 import random
 import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -586,9 +588,8 @@ def generate(
 
     *scale* multiplies each provider's session count; x1 is ``BASE_TOTAL``
     sessions in the gate corpus's proportions. *seed* fixes every length and
-    every filler
-    word, so the same arguments reproduce the same corpus — a comparator run
-    that has to be repeated later measures the same thing.
+    every filler word, so the same arguments reproduce the same corpus — a
+    comparator run that has to be repeated later measures the same thing.
 
     Refuses a non-empty directory unless *force*, because this module's callers
     hand it temporary paths and a mistyped one must not eat a real home.
@@ -599,7 +600,10 @@ def generate(
     home.mkdir(parents=True, exist_ok=True)
     if any(home.iterdir()) and not force:
         raise CorpusError(
-            f"{home} is not empty; pass force=True to write into it anyway"
+            f"{home} is not empty; pass --force (force=True) to write into it "
+            "anyway. Point --home at a directory of its own: this corpus is "
+            "throwaway and deleting the wrong tree is the one expensive mistake "
+            "here."
         )
 
     rng = random.Random(seed)
@@ -681,3 +685,77 @@ def generate(
     }
     (home / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build a scalable synthetic provider HOME for "
+            "benchmarks/retrieval_compare.py."
+        ),
+        epilog=(
+            "Prints the corpus manifest as JSON on stdout, and writes the same "
+            f"manifest to <home>/{MANIFEST_NAME}. The manifest's `queries` list "
+            "names each planted term with the exact number of sessions carrying "
+            "it, so a comparator run can pick a query by how much of the corpus "
+            "it opens rather than by guesswork. This corpus is for the "
+            "comparator only; the perf gate builds its own and is not affected "
+            "by anything here."
+        ),
+    )
+    parser.add_argument(
+        "--home",
+        required=True,
+        type=Path,
+        help="directory to write the corpus into; created if absent",
+    )
+    parser.add_argument(
+        "--scale",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            f"multiply every provider's session count (default 1 = "
+            f"{BASE_TOTAL} sessions). Larger corpora shrink the share of a "
+            "comparator sample spent on interpreter startup, which is what "
+            "limits the tool's sensitivity to a small regression."
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
+        metavar="N",
+        help=(
+            f"fix the drawn session lengths and filler text (default "
+            f"{DEFAULT_SEED}); the same seed and scale reproduce the same bytes"
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="write into a non-empty directory (refused by default)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    try:
+        manifest = generate(
+            args.home, scale=args.scale, seed=args.seed, force=args.force
+        )
+    except CorpusError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(manifest, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
