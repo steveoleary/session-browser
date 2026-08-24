@@ -16,7 +16,11 @@ comparator's own ``relative_spread()``:
 
 Spread tracks how many transcripts a query actually parses -- 42 hits give
 2-3%, 1,558 hits give 15-16% -- and, more than anything else, how many samples
-the estimator is handed. Earlier revisions of this docstring quoted "over 100%"
+the estimator is handed. That last row is no longer a configuration the
+comparator will run: re-measured the same way on 2026-08-24, six sample sets
+scored 48%-96% at three samples against 5%-14% at the defaults, and a floor
+that wide swallowed a synthetic 12% slowdown as ``unresolvable`` in every one
+of the six. Earlier revisions of this docstring quoted "over 100%"
 with no method attached; that did not reproduce in any configuration tried, on
 this revision or on the pre-2026-08-14 code that over-read the corpus, so the
 figure is stated here as a band with the conditions that produced it.

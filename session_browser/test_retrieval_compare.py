@@ -99,8 +99,8 @@ def test_comparison_alternates_measured_revisions_after_warming(tmp_path, monkey
         retrieval_compare,
         "_run_search",
         _runner(
-            {baseline: [payload] * 5, candidate: [payload] * 5},
-            {baseline: [1.0] * 5, candidate: [0.9] * 5},
+            {baseline: [payload] * 6, candidate: [payload] * 6},
+            {baseline: [1.0] * 6, candidate: [0.9] * 6},
             calls,
         ),
     )
@@ -110,7 +110,7 @@ def test_comparison_alternates_measured_revisions_after_warming(tmp_path, monkey
         candidate_repo=candidate,
         home=tmp_path / "home",
         queries=["needle"],
-        repeats=3,
+        repeats=4,
         warmup=0,
     )
 
@@ -127,9 +127,11 @@ def test_comparison_alternates_measured_revisions_after_warming(tmp_path, monkey
         "baseline",
         "baseline",
         "candidate",
+        "candidate",
+        "baseline",
     ]
-    assert report["queries"]["needle"]["baseline_samples"] == [1.0, 1.0, 1.0]
-    assert report["queries"]["needle"]["candidate_samples"] == [0.9, 0.9, 0.9]
+    assert report["queries"]["needle"]["baseline_samples"] == [1.0] * 4
+    assert report["queries"]["needle"]["candidate_samples"] == [0.9] * 4
     assert all("--limit" not in call[2] for call in calls)
 
 
@@ -160,7 +162,7 @@ def test_comparison_rejects_a_run_where_every_query_was_unstable(tmp_path, monke
             candidate_repo=candidate,
             home=tmp_path / "home",
             queries=["needle"],
-            repeats=2,
+            repeats=4,
             warmup=0,
         )
 
@@ -182,15 +184,15 @@ def test_a_volatile_query_is_excluded_without_failing_the_whole_run(
     timings = {
         (baseline, "moving"): [1.0, 1.0],
         (candidate, "moving"): [1.0, 1.0],
-        (baseline, "still"): [1.0] * 4,
-        (candidate, "still"): [1.0] * 4,
+        (baseline, "still"): [1.0] * 6,
+        (candidate, "still"): [1.0] * 6,
     }
     payloads = {
         # the moving query's baseline grows between the two probe runs
         (baseline, "moving"): [stable, grown],
         (candidate, "moving"): [stable] * 2,
-        (baseline, "still"): [stable] * 4,
-        (candidate, "still"): [stable] * 4,
+        (baseline, "still"): [stable] * 6,
+        (candidate, "still"): [stable] * 6,
     }
     positions = {key: 0 for key in timings}
 
@@ -209,7 +211,7 @@ def test_a_volatile_query_is_excluded_without_failing_the_whole_run(
         candidate_repo=candidate,
         home=tmp_path / "home",
         queries=["moving", "still"],
-        repeats=2,
+        repeats=4,
         warmup=0,
     )
 
@@ -245,7 +247,7 @@ def test_comparison_reports_strict_mismatch_diagnostics(tmp_path, monkeypatch):
             candidate_repo=candidate,
             home=tmp_path / "home",
             queries=["needle"],
-            repeats=1,
+            repeats=4,
             warmup=0,
         )
 
@@ -272,8 +274,8 @@ def test_comparison_uses_a_strict_five_percent_median_threshold(
         retrieval_compare,
         "_run_search",
         _runner(
-            {baseline: [payload] * 3, candidate: [payload] * 3},
-            {baseline: [1.0] * 3, candidate: [candidate_seconds] * 3},
+            {baseline: [payload] * 6, candidate: [payload] * 6},
+            {baseline: [1.0] * 6, candidate: [candidate_seconds] * 6},
             [],
         ),
     )
@@ -283,7 +285,7 @@ def test_comparison_uses_a_strict_five_percent_median_threshold(
         candidate_repo=candidate,
         home=tmp_path / "home",
         queries=["needle"],
-        repeats=1,
+        repeats=4,
         warmup=0,
     )
     if passes:
@@ -305,8 +307,12 @@ def test_comparison_writes_raw_samples_medians_and_aggregate_report(
         retrieval_compare,
         "_run_search",
         _runner(
-            {baseline: [payload] * 4, candidate: [payload] * 4},
-            {baseline: [1.0, 9.0, 2.0, 3.0], candidate: [0.5, 9.0, 1.5, 2.5]},
+            {baseline: [payload] * 6, candidate: [payload] * 6},
+            {
+                # the 9.0 is a probe run: probes must never reach the samples
+                baseline: [1.0, 9.0, 1.0, 2.0, 3.0, 4.0],
+                candidate: [0.5, 9.0, 0.5, 1.0, 1.5, 2.0],
+            },
             [],
         ),
     )
@@ -317,7 +323,7 @@ def test_comparison_writes_raw_samples_medians_and_aggregate_report(
         candidate_repo=candidate,
         home=tmp_path / "home",
         queries=["needle"],
-        repeats=2,
+        repeats=4,
         report_path=report_path,
         warmup=0,
     )
@@ -327,23 +333,23 @@ def test_comparison_writes_raw_samples_medians_and_aggregate_report(
     assert written["queries"]["needle"] == {
         "baseline_signature": retrieval_compare.canonical_signature(payload),
         "candidate_signature": retrieval_compare.canonical_signature(payload),
-        "baseline_samples": [2.0, 3.0],
-        "candidate_samples": [1.5, 2.5],
+        "baseline_samples": [1.0, 2.0, 3.0, 4.0],
+        "candidate_samples": [0.5, 1.0, 1.5, 2.0],
         "baseline_median": 2.5,
-        "candidate_median": 2.0,
+        "candidate_median": 1.25,
         "baseline_trimmed_median": 2.5,
-        "candidate_trimmed_median": 2.0,
-        "baseline_relative_spread": 0.4,
-        "candidate_relative_spread": 0.5,
-        "noise_floor": 0.5,
-        "ratio": 0.8,
+        "candidate_trimmed_median": 1.25,
+        "baseline_relative_spread": 0.6,
+        "candidate_relative_spread": 0.6,
+        "noise_floor": 0.6,
+        "ratio": 0.5,
         "verdict": "ok",
     }
     assert written["aggregate"] == {
         "statistic": "median_per_query_trimmed_ratio",
-        "per_query_ratios": [0.8],
-        "ratio": 0.8,
-        "noise_floor": 0.5,
+        "per_query_ratios": [0.5],
+        "ratio": 0.5,
+        "noise_floor": 0.6,
         "verdict": "ok",
     }
     assert written["equivalent"] is True
@@ -359,10 +365,10 @@ def test_aggregate_uses_per_query_ratios_not_pooled_raw_samples(tmp_path, monkey
     (tmp_path / "home").mkdir()
     payload = _payload()
     timings = {
-        (baseline, "small"): [0.0, 0.0, 1.0, 1.0, 1.0],
-        (candidate, "small"): [0.0, 0.0, 0.0, 1.0, 100.0],
-        (baseline, "large"): [0.0, 0.0, 100.0, 100.0, 100.0],
-        (candidate, "large"): [0.0, 0.0, 100.0, 100.0, 1_000.0],
+        (baseline, "small"): [0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        (candidate, "small"): [0.0, 0.0, 0.0, 1.0, 1.0, 100.0],
+        (baseline, "large"): [0.0, 0.0, 100.0, 100.0, 100.0, 100.0],
+        (candidate, "large"): [0.0, 0.0, 100.0, 100.0, 100.0, 1_000.0],
     }
     positions = {key: 0 for key in timings}
 
@@ -381,7 +387,7 @@ def test_aggregate_uses_per_query_ratios_not_pooled_raw_samples(tmp_path, monkey
         candidate_repo=candidate,
         home=tmp_path / "home",
         queries=["small", "large"],
-        repeats=3,
+        repeats=4,
         warmup=0,
     )
 
@@ -391,7 +397,7 @@ def test_aggregate_uses_per_query_ratios_not_pooled_raw_samples(tmp_path, monkey
         "statistic": "median_per_query_trimmed_ratio",
         "per_query_ratios": [1.0, 1.0],
         "ratio": 1.0,
-        "noise_floor": 54.5,
+        "noise_floor": 13.625,
         "verdict": "ok",
     }
     assert report["passed"] is True
@@ -443,7 +449,7 @@ def test_comparison_rejects_missing_home_before_product(tmp_path, monkeypatch):
             candidate_repo=candidate,
             home=tmp_path / "missing-home",
             queries=["needle"],
-            repeats=1,
+            repeats=4,
             warmup=0,
         )
 
@@ -473,7 +479,7 @@ def test_comparison_rejects_non_discovery_environment_override(tmp_path, monkeyp
             candidate_repo=candidate,
             home=home,
             queries=["needle"],
-            repeats=1,
+            repeats=4,
             warmup=0,
             current_session_env=["HOME=/not-the-source-home"],
         )
@@ -503,7 +509,7 @@ def test_comparison_preserves_known_current_session_overrides(tmp_path, monkeypa
         candidate_repo=candidate,
         home=home,
         queries=["needle"],
-        repeats=1,
+        repeats=4,
         warmup=0,
         current_session_env=[
             "CLAUDE_CODE_SESSION_ID=claude-caller",
@@ -511,7 +517,7 @@ def test_comparison_preserves_known_current_session_overrides(tmp_path, monkeypa
         ],
     )
 
-    assert len(environments) == 6
+    assert len(environments) == 12
     assert all(env["HOME"] == str(home) for env in environments)
     assert all(env["CLAUDE_CODE_SESSION_ID"] == "claude-caller" for env in environments)
     assert all(env["CODEX_THREAD_ID"] == "codex-caller" for env in environments)
@@ -541,11 +547,11 @@ def test_comparator_runs_only_product_commands_and_never_git(tmp_path, monkeypat
         candidate_repo=candidate,
         home=tmp_path / "home",
         queries=["needle"],
-        repeats=1,
+        repeats=4,
         warmup=0,
     )
 
-    assert len(commands) == 6
+    assert len(commands) == 12
     assert all(
         command
         == [
@@ -578,11 +584,12 @@ def test_warmup_runs_are_discarded_before_measuring(tmp_path, monkeypatch):
         retrieval_compare,
         "_run_search",
         _runner(
-            # first entry is the signature run, next two are warmup, then measured
-            {baseline: [payload] * 7, candidate: [payload] * 7},
+            # first two entries are the signature probes, next two are warmup,
+            # then measured
+            {baseline: [payload] * 8, candidate: [payload] * 8},
             {
-                baseline: [99.0] * 4 + [1.0, 1.0, 1.0],
-                candidate: [99.0] * 4 + [1.0, 1.0, 1.0],
+                baseline: [99.0] * 4 + [1.0] * 4,
+                candidate: [99.0] * 4 + [1.0] * 4,
             },
             [],
         ),
@@ -593,13 +600,65 @@ def test_warmup_runs_are_discarded_before_measuring(tmp_path, monkeypatch):
         candidate_repo=candidate,
         home=tmp_path / "home",
         queries=["needle"],
-        repeats=3,
+        repeats=4,
         warmup=2,
     )
 
-    assert report["queries"]["needle"]["baseline_samples"] == [1.0, 1.0, 1.0]
-    assert report["queries"]["needle"]["candidate_samples"] == [1.0, 1.0, 1.0]
+    assert report["queries"]["needle"]["baseline_samples"] == [1.0] * 4
+    assert report["queries"]["needle"]["candidate_samples"] == [1.0] * 4
     assert report["warmup"] == 2
+
+
+def test_comparison_refuses_to_sample_fewer_than_four_runs(tmp_path, monkeypatch):
+    """A run too thin to estimate its own noise must not report a verdict.
+
+    Below four samples ``relative_spread`` has no quartiles and returns the full
+    range instead, which is a different and much wider quantity. Since the
+    spread is the floor a slowdown has to clear, sampling more thinly would
+    widen the band that lets a regression through as ``unresolvable`` -- the
+    run would accept more, not merely measure less. The sample count is fixed
+    by the arguments, so every query is equally unjudgeable and that is knowable
+    before any product run: refuse up front rather than spend the time first.
+    """
+    baseline, candidate = tmp_path / "baseline", tmp_path / "candidate"
+    baseline.mkdir()
+    candidate.mkdir()
+    (tmp_path / "home").mkdir()
+    monkeypatch.setattr(
+        retrieval_compare,
+        "_run_search",
+        lambda *_args, **_kwargs: pytest.fail("product invoked"),
+    )
+
+    with pytest.raises(
+        retrieval_compare.ComparatorError, match=r"--repeats must be >= 4; got 3"
+    ) as exc:
+        retrieval_compare.run_comparison(
+            baseline_repo=baseline,
+            candidate_repo=candidate,
+            home=tmp_path / "home",
+            queries=["needle"],
+            repeats=3,
+            warmup=0,
+        )
+
+    assert "unresolvable" in str(exc.value)
+
+
+def test_relative_spread_swaps_estimator_below_the_sampling_floor():
+    """The two branches are different quantities, one of which cannot gate.
+
+    Pinned because the gap is the whole reason ``run_comparison`` refuses below
+    ``MIN_REPEATS``. Widening the default path to make the branches agree would
+    be the wrong repair: the interquartile range is what absorbs a single
+    stalled run, and losing it would cost the defaults their resolution.
+    """
+    stalled_then_steady = [9.0, 1.0, 1.0, 1.0]
+
+    assert retrieval_compare.MIN_REPEATS == 4
+    # the full range carries the stall whole; the interquartile range absorbs it
+    assert retrieval_compare.relative_spread(stalled_then_steady[:3]) == 8.0
+    assert retrieval_compare.relative_spread(stalled_then_steady) == 2.0
 
 
 def test_a_single_stalled_run_does_not_move_the_ratio(tmp_path, monkeypatch):
@@ -639,9 +698,10 @@ def test_slowdown_inside_the_noise_floor_is_unresolvable_not_a_failure(
     """A machine too noisy to measure the effect must not convict the candidate.
 
     Real corpus runs measured 2026-08-23 scatter by 1-21% of the median at the
-    comparator's default sampling, and by 44-67% when given fewer than four
-    samples, while the aggregate ratio sits on 1.00 -- so a fixed threshold on
-    raw medians reports pure variance as a regression. The samples below swing
+    comparator's default sampling while the aggregate ratio sits on 1.00 -- so a
+    fixed threshold on raw medians reports pure variance as a regression. The
+    band below four samples was worse again, which is why the comparator now
+    refuses to sample that thinly at all. The samples below swing
     harder still (relative_spread 1.17) to keep the branch under test unmissable
     on any machine this suite runs on; they are a deliberate exaggeration of the
     measured band, not a claim about it.
