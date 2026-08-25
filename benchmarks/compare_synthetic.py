@@ -175,12 +175,17 @@ def _warn_if_unresolvable(report: dict) -> bool:
     the limit still reports ``ok`` overall while being unable to convict
     anything smaller than its own jitter.
 
-    Measured 2026-08-25, the obvious lever does not work: across 15 null runs
-    the floor at a fixed scale varied more (0.019-0.081 at x16) than it did
-    between scales, and the parse-sensitive share of a sample stayed flat near
-    47% from x1 to x32 because discovery scales with the corpus too. So this
-    warns rather than prescribing a bigger corpus, and points at the levers
-    that do move: more samples, and a quieter machine.
+    Measured 2026-08-25, only one lever moves this, and it is not one the tool
+    can pull. A bigger corpus does nothing: across 15 null runs the floor at a
+    fixed scale varied more (0.019-0.081 at x16) than it did between scales,
+    and the parse-sensitive share of a sample stayed flat near 47% from x1 to
+    x32 because discovery scales with the corpus too. More samples do nothing
+    either, and may hurt -- 9 repeats measured 0.008-0.013 on an idle machine
+    where 25 measured 0.024, a longer sampling window admitting more drift.
+
+    What moved it was an idle machine: the same null comparison scored
+    0.020-0.031 while an agent worked and 0.008-0.013 with nothing else
+    running. So the warning names that, and only that.
     """
     limit = retrieval_compare.SLOWDOWN_LIMIT - 1.0
     floor = report["aggregate"]["noise_floor"]
@@ -189,9 +194,10 @@ def _warn_if_unresolvable(report: dict) -> bool:
     print(
         f"warning: this run's noise floor is {floor:.1%}, at or above the "
         f"{limit:.0%} the comparator judges against. A verdict of 'ok' here "
-        "means no regression was resolvable, not that none exists. Raise "
-        "--repeats and quiet the machine; a larger --scale is measurably not "
-        "the lever it looks like.",
+        "means no regression was resolvable, not that none exists. Quiet the "
+        "machine and run it again -- measurably, that is the only lever: "
+        "neither a larger --scale nor more --repeats moves this floor, and "
+        "an agent working the machine is usually what raised it.",
         file=sys.stderr,
     )
     return False
