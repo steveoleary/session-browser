@@ -190,6 +190,61 @@ Reading the result:
 - A change that does not alter what search reads cannot show a speed
   difference. Pick queries and a workload that actually exercise the change.
 
+### One command instead of three: `compare_synthetic.py`
+
+Preparing a `--home` by hand is how a comparator ends up pointed at a real
+`$HOME` again, so `benchmarks/compare_synthetic.py` builds a throwaway
+synthetic corpus, runs both revisions against it, and deletes it — even when
+the comparison raises, which is exactly when a forgotten corpus would survive:
+
+```bash
+git worktree add /tmp/baseline-main main
+python benchmarks/compare_synthetic.py \
+  --baseline-repo /tmp/baseline-main --candidate-repo . \
+  --repeats 9 --report /tmp/ab.json
+git worktree remove /tmp/baseline-main
+```
+
+Queries are chosen by *selectivity* rather than by name — a term in no session
+at all, one in ten, one in every session — so the default set spans the cost
+curve and a parser change is loud in the last and invisible in the first. The
+corpus manifest is merged into the report, so a ratio read back next month
+still carries the scale, seed and session count behind every query, long after
+the corpus is gone. A synthetic `$HOME` holds no live session, so
+`--current-session-env` does not apply and `volatile` cannot arise.
+
+**`--scale` is not a sensitivity knob, however much it looks like one.** It was
+built on the expectation that a bigger corpus would quiet the measurement and
+dilute a regression less. Measured 2026-08-25 over fifteen null runs — a
+revision against a worktree of itself, so every ratio should be 1.0 and only
+the noise floor is interesting — neither holds:
+
+| corpus | runs | noise floor, lowest to highest |
+| --- | --- | --- |
+| synthetic x1 | 4 | 0.027, 0.035, 0.062, 0.095 |
+| synthetic x8 | 3 | 0.035, 0.051, 0.063 |
+| synthetic x16 | 4 | 0.019, 0.061, 0.065, 0.081 |
+| synthetic x32 | 2 | 0.033, 0.047 |
+| real `$HOME` | 2 | 0.020, 0.031 |
+
+There is no ordering by size: run-to-run variation at *one* size exceeds the
+difference between sizes, and the real `$HOME` is the quietest corpus measured.
+The parse-sensitive share of a sample is flat near 47% from x1 to x32 as well,
+because discovery grows with the corpus rather than being a fixed startup cost
+— bare interpreter and imports are only 76ms of it. So do not raise `--scale`
+to resolve a smaller effect; raise `--repeats` and quiet the machine, as above.
+What `--scale` does control is how much work a query does, deterministically,
+on any machine, and that is worth having on its own.
+
+The trap that produced the opposite conclusion first is worth naming: one run
+per size looked cleanly monotonic and did not survive replication. A noise
+floor is itself a noisy quantity, so a single sample of one cannot rank two.
+
+Because of all that, the wrapper **warns when its own noise floor sits at or
+above the 5% the comparator judges against**, and records `resolved_the_limit`
+in the report. `ok` from such a run means nothing was *resolvable*, not that
+nothing is wrong — a distinction the word `ok` cannot carry by itself.
+
 `benchmarks/` holds two smaller scripts as well, and neither judges anything —
 they print timings for you to read, against your own corpus, with no baseline
 and no verdict. `search_end_to_end.py` times whole-corpus search per query;
