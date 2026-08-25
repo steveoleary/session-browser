@@ -202,7 +202,9 @@ class TestResolution:
         assert report["resolved_the_limit"] is False
         warning = capsys.readouterr().err
         assert "noise floor" in warning
-        assert "--repeats" in warning
+        # Measured 2026-08-25: quieting the machine is the only lever that
+        # moved this floor, so it is the one the warning must name.
+        assert "Quiet the machine" in warning
 
     def test_the_weaker_claim_is_persisted_not_only_printed(self, tmp_path, comparator):
         comparator.set_floor(0.9)

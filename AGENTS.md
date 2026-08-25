@@ -232,13 +232,33 @@ difference between sizes, and the real `$HOME` is the quietest corpus measured.
 The parse-sensitive share of a sample is flat near 47% from x1 to x32 as well,
 because discovery grows with the corpus rather than being a fixed startup cost
 — bare interpreter and imports are only 76ms of it. So do not raise `--scale`
-to resolve a smaller effect; raise `--repeats` and quiet the machine, as above.
-What `--scale` does control is how much work a query does, deterministically,
-on any machine, and that is worth having on its own.
+to resolve a smaller effect. What `--scale` does control is how much work a
+query does, deterministically, on any machine, and that is worth having on its
+own.
 
 The trap that produced the opposite conclusion first is worth naming: one run
 per size looked cleanly monotonic and did not survive replication. A noise
 floor is itself a noisy quantity, so a single sample of one cannot rank two.
+
+**The one lever that does work is an idle machine, and no flag can pull it.**
+Measured 2026-08-25, the same null comparison against the real `$HOME`:
+
+| machine state | noise floor, null runs | old-vs-new run |
+| --- | --- | --- |
+| an agent session working | 0.020, 0.031 | 0.071, 0.072 |
+| nothing else running | 0.008, 0.011, 0.013 | 0.042 |
+
+More samples do not substitute for it and can cost you: on the idle machine
+9 repeats scored 0.008-0.013 where 25 scored 0.024, a longer sampling window
+admitting more drift. So `--repeats` is a floor on credibility, not a dial for
+resolution — the comparator's four-sample minimum is the part that matters.
+
+**Practically: an agent cannot take this measurement while it is the thing
+making the noise.** A timing verdict wanted from this repo is a job for a human
+on an otherwise-idle machine, or for an agent that has been handed a script to
+be run after it stops. What an agent relies on instead is the counting gate and
+the loop opcode probes, which are exact and identical on any machine, however
+busy.
 
 Because of all that, the wrapper **warns when its own noise floor sits at or
 above the 5% the comparator judges against**, and records `resolved_the_limit`
