@@ -18,18 +18,41 @@ from benchmarks import compare_synthetic, retrieval_compare, synthetic_corpus
 
 @pytest.fixture
 def comparator(monkeypatch):
-    """Record how the comparator was called; write a plausible report."""
-    calls = []
+    """Record how the comparator was called; write a plausible report.
+
+    The noise floor is part of "plausible": the wrapper reads it to decide
+    whether the run could have resolved a regression at all, so a fake report
+    without one is not the shape the comparator actually produces.
+    """
+
+    class Calls(list):
+        """A list of calls that also lets a test dictate the noise floor."""
+
+        def set_floor(self, value):
+            nonlocal floor
+            floor = value
+
+    calls = Calls()
+    floor = 0.01
 
     def fake(**kwargs):
         calls.append(kwargs)
-        report = {"passed": True, "aggregate": {"ratio": 1.0, "verdict": "ok"}}
+        report = {
+            "passed": True,
+            "aggregate": {"ratio": 1.0, "verdict": "ok", "noise_floor": floor},
+        }
         path = kwargs["report_path"]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(report))
         return report
 
     monkeypatch.setattr(retrieval_compare, "run_comparison", fake)
+
+    def set_floor(value):
+        nonlocal floor
+        floor = value
+
+    calls.set_floor = set_floor
     return calls
 
 
@@ -158,6 +181,35 @@ class TestReport:
         written = json.loads((tmp_path / "report.json").read_text())
         assert written["passed"] is False
         assert written["corpus"]["sessions"] == synthetic_corpus.BASE_TOTAL
+
+
+class TestResolution:
+    """A run that could not have failed must not read like one that passed."""
+
+    def test_a_quiet_run_claims_it_resolved_the_limit(self, tmp_path, comparator):
+        report = _run(tmp_path, scale=1)
+        assert report["resolved_the_limit"] is True
+
+    def test_a_floor_above_the_limit_is_not_a_clean_bill(
+        self, tmp_path, comparator, capsys
+    ):
+        # Above the 5% the comparator judges against, "ok" only means nothing
+        # was resolvable. Measured 2026-08-25, this is a real state and not a
+        # corner case: null runs on a working machine landed there repeatedly.
+        comparator.set_floor(retrieval_compare.SLOWDOWN_LIMIT - 1.0 + 0.01)
+        report = _run(tmp_path, scale=1)
+        assert report["passed"] is True
+        assert report["resolved_the_limit"] is False
+        warning = capsys.readouterr().err
+        assert "noise floor" in warning
+        assert "--repeats" in warning
+
+    def test_the_weaker_claim_is_persisted_not_only_printed(self, tmp_path, comparator):
+        comparator.set_floor(0.9)
+        _run(tmp_path, scale=1)
+        # Read from disk: a report outlives the terminal that printed it.
+        written = json.loads((tmp_path / "report.json").read_text())
+        assert written["resolved_the_limit"] is False
 
 
 class TestCli:
