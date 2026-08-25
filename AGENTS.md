@@ -75,6 +75,11 @@ against a 1,180-session, 873 MB `$HOME`, and far worse on fewer samples — whil
 the regressions worth catching are nearer 0.2%. Counts are identical on every
 machine and every run.
 
+Which end of that 1-21% band you land on is mostly whether anything else was
+running: the bottom of it needs an idle machine, and an agent cannot give
+itself one. That is the whole reason the primary gate counts instead of
+timing — see the comparator section below for the measurements.
+
 **When a budget fails, do not bless it to make the suite green.** Read the
 `Guards:` line in the failure — it says which optimisation the workload exists
 to defend. Then either fix the change, or, if the extra work is genuinely
@@ -173,8 +178,10 @@ Reading the result:
   - `unresolvable` — the ratio exceeded the 5% limit by less than this machine
     can measure. A revision's own samples scatter by 1-21% of their median at
     the default sampling, so a fixed threshold on raw medians reports variance
-    as regression. Raise `--repeats`, quiet the machine, or accept the effect
-    is unmeasurable. Never lower `--repeats` to make a run cheaper: fewer
+    as regression. Quiet the machine and run it again — measured 2026-08-25,
+    that is the only lever, and where in the 1-21% band you land is mostly
+    which machine state you were in. Raising `--repeats` above the minimum
+    buys nothing here. Never lower `--repeats` to make a run cheaper: fewer
     samples widen the noise floor, and a wider floor *accepts* more, so the
     thinnest evidence buys the loosest test. Below four samples that stops
     being a matter of degree — `relative_spread` has no quartiles there and
