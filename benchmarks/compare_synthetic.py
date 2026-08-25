@@ -25,6 +25,10 @@ What this wrapper adds beyond convenience:
   nothing parsed), one in ten, and one in every session (the parser reads the
   whole corpus). A change that only touches parsing is invisible to the first
   and loudest in the last.
+* **A run that could not have failed says so.** ``ok`` from a run whose noise
+  floor sits above the limit means "no regression was resolvable", which is a
+  different claim from "no regression exists". Both are recorded and the weaker
+  one is warned about, under ``resolved_the_limit``.
 * **No ``--current-session-env``.** A synthetic ``$HOME`` contains no live
   session, so the exclusion step a real-corpus run needs does not apply, and
   the ``volatile`` verdict it exists to prevent cannot arise.
@@ -154,7 +158,43 @@ def run(
     # A kept corpus is a temporary directory with a generated name, so the
     # caller cannot reconstruct where it went. --keep-corpus promises to say.
     report["corpus"]["home"] = str(home)
+    report["resolved_the_limit"] = _warn_if_unresolvable(report)
+    # Persist it: a report read back months later should carry whether the run
+    # could have convicted anything, not just what it happened to conclude.
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return report
+
+
+def _warn_if_unresolvable(report: dict) -> bool:
+    """Say so when the run could not have seen a regression at the limit.
+
+    A passing run and a run that could not have failed look identical from the
+    outside: both print ``ok``. They are not the same claim. The comparator
+    already refuses a *verdict* it cannot support, per query -- but the
+    aggregate is a median of per-query floors, so a run whose floor sits above
+    the limit still reports ``ok`` overall while being unable to convict
+    anything smaller than its own jitter.
+
+    Measured 2026-08-25, the obvious lever does not work: across 15 null runs
+    the floor at a fixed scale varied more (0.019-0.081 at x16) than it did
+    between scales, and the parse-sensitive share of a sample stayed flat near
+    47% from x1 to x32 because discovery scales with the corpus too. So this
+    warns rather than prescribing a bigger corpus, and points at the levers
+    that do move: more samples, and a quieter machine.
+    """
+    limit = retrieval_compare.SLOWDOWN_LIMIT - 1.0
+    floor = report["aggregate"]["noise_floor"]
+    if floor < limit:
+        return True
+    print(
+        f"warning: this run's noise floor is {floor:.1%}, at or above the "
+        f"{limit:.0%} the comparator judges against. A verdict of 'ok' here "
+        "means no regression was resolvable, not that none exists. Raise "
+        "--repeats and quiet the machine; a larger --scale is measurably not "
+        "the lever it looks like.",
+        file=sys.stderr,
+    )
+    return False
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -278,6 +318,7 @@ def main(argv: list[str] | None = None) -> int:
         "scale": report["corpus"]["scale"],
         "sessions": report["corpus"]["sessions"],
         "aggregate": report["aggregate"],
+        "resolved_the_limit": report["resolved_the_limit"],
     }
     if args.corpus is not None or args.keep_corpus:
         summary["corpus"] = report["corpus"]["home"]
