@@ -17,9 +17,12 @@ quiet and ``test_cli_search_fires_no_progress_callbacks`` does not.
 
 from __future__ import annotations
 
+import inspect
+import json
+
 import pytest
 
-from session_browser import perf_budget, transcript
+from session_browser import discovery, perf_budget, transcript
 from session_browser.perf_budget import (
     compare,
     format_report,
@@ -360,3 +363,72 @@ class TestProcessRouting:
     def test_entry_retaining_shape_stays_in_process(self, measured):
         """Whole transcripts must not be pickled back from worker processes."""
         assert measured["lib.search.keep_entries"]["process_pool_sessions"] == 0
+
+
+class TestTheCorpusCoversEveryCodexEra:
+    """The workloads can only guard shapes the corpus actually contains.
+
+    A budget cannot tell "discovery stopped recognising paginated rollouts"
+    from "the corpus never had one". Every rollout here used to be written in
+    Codex's legacy vocabulary, which left two of its three eras unexercised --
+    and left ``cli.list``'s guard, that read volume stays bounded by the
+    discovery window rather than by session length, unfalsifiable as well:
+    every rollout was smaller than that window, so a scan that recognised
+    nothing and widened to the whole file read exactly the same bytes as one
+    that stopped at the first turn it found.
+    """
+
+    @pytest.fixture(scope="class")
+    def rollouts(self, tmp_path_factory) -> list:
+        home = perf_budget.build_corpus(tmp_path_factory.mktemp("perf-corpus"))
+        return sorted((home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
+
+    @staticmethod
+    def _era(path) -> str:
+        """The era a rollout is written in, read back off disk.
+
+        Detected from the file rather than recomputed from the index, so this
+        checks the corpus builder instead of restating it.
+        """
+        record = json.loads(path.read_text().split("\n")[1])
+        payload = record["payload"]
+        if record["type"] == "response_item":
+            return "response_item"
+        return "legacy" if payload["type"] == "user_message" else "paginated"
+
+    # Named here rather than read from ``perf_budget.CODEX_ERAS``: comparing
+    # the corpus against the constant that shapes it passes whatever the
+    # constant says, including a constant narrowed back to one era.
+    ERAS = frozenset({"legacy", "paginated", "response_item"})
+
+    def test_all_three_eras_are_present(self, rollouts):
+        assert {self._era(p) for p in rollouts} == self.ERAS
+
+    def test_both_scans_recognise_a_turn_in_every_rollout(self, rollouts):
+        """The failure that hid in the real corpus, asserted directly.
+
+        An unrecognised vocabulary costs a blank summary and a blank last
+        activity, and costs them expensively: the head scan runs to the end of
+        the file looking for a user record, and the tail scan quadruples its
+        window until the whole file is read. 106 MB and 93 MB respectively on
+        the real corpus, both to return "".
+        """
+        blank = [
+            (p.name, self._era(p))
+            for p in rollouts
+            if not discovery._codex_first_user_message(p)
+            or not discovery._last_activity_iso(p, "codex")
+        ]
+        assert not blank, f"a scan found no turn in {blank}"
+
+    def test_every_era_has_a_rollout_larger_than_the_tail_window(self, rollouts):
+        """Otherwise the window bound is pinned by nothing.
+
+        Below the initial window a file is read whole either way, so the
+        widening a lost turn causes never reaches a counter.
+        """
+        window = (
+            inspect.signature(discovery._last_activity_iso).parameters["window"].default
+        )
+        deep = {self._era(p) for p in rollouts if p.stat().st_size > window}
+        assert deep == self.ERAS

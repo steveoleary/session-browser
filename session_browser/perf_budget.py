@@ -334,6 +334,26 @@ OPENCODE_SESSIONS = 40
 PI_SESSIONS = 40
 RARE_EVERY = 60  # one session in sixty carries the rare term
 
+# Codex records a turn under three vocabularies, and which one a rollout uses
+# is decided by the history mode it was written in -- the era note above the
+# Codex parser in transcript.py has the corpus counts. All forty rollouts used
+# to be Legacy, which left discovery's recognition of the other two unguarded:
+# a rollout whose vocabulary nothing recognises yields no turn and no summary,
+# and neither miss is free. The head scan reads on to the end of the file
+# looking for a user record it will not find, and the tail scan quadruples its
+# window until it has read the file whole -- 93 MB and 106 MB respectively on
+# the real corpus, both to return "".
+CODEX_ERAS = ("legacy", "paginated", "response_item")
+
+# The tail widening only reaches a counter when a file is larger than the
+# window the scan starts with (16 KiB). Anything below it is read whole either
+# way, so a corpus of uniformly small rollouts pins which vocabularies are
+# understood but not the bound the guard claims. These three -- one per era --
+# are the ones that pin the bound.
+CODEX_DEEP = frozenset({3, 4, 5})
+CODEX_TURNS = 19
+CODEX_DEEP_TURNS = 120
+
 
 def _filler(index: int, line: int) -> str:
     """Deterministic prose with no incidental hits for any pinned query.
@@ -351,6 +371,133 @@ def _filler(index: int, line: int) -> str:
 
 def _has_rare(index: int) -> bool:
     return index % RARE_EVERY == 0
+
+
+def _codex_ts(turn: int) -> str:
+    """The per-record timestamp a real rollout carries and both scans need.
+
+    ``_last_activity_iso`` returns the timestamp of the last *recognised*
+    turn, so a record without one is not a turn as far as it is concerned.
+    Leaving these out made every rollout here widen its window to the whole
+    file whatever vocabulary it was written in, which would have hidden the
+    difference the era split exists to expose.
+    """
+    return f"2026-01-05T09:{turn // 60:02d}:{turn % 60:02d}.000Z"
+
+
+def _codex_rollout(index: int, sid: str) -> list[str]:
+    """One Codex rollout's JSONL lines, in the era this index is assigned.
+
+    The eras differ in how the *user* turn is recorded -- which is what the
+    head scan behind every summary looks for -- and in what record sits at the
+    tail, which is what the last-activity scan reads backwards to find.
+    """
+    era = CODEX_ERAS[index % 3]
+    turns = CODEX_DEEP_TURNS if index in CODEX_DEEP else CODEX_TURNS
+    cwd = f"/Users/perf/project{index % 3}"
+    opening = f"start session {index} {_filler(index, 0)}"
+    lines = [
+        json.dumps(
+            {
+                "type": "session_meta",
+                "timestamp": _codex_ts(0),
+                "payload": {
+                    "id": sid,
+                    "cwd": cwd,
+                    "git": {"branch": "main"},
+                    "timestamp": "2026-01-05T09:00:00.000Z",
+                },
+            }
+        ),
+        json.dumps(_codex_user_record(era, opening)),
+    ]
+    for turn in range(1, turns + 1):
+        text = _filler(index, turn)
+        if _has_rare(index) and turn == 7:
+            text = f"{text} {QUERY_RARE} sighted"
+        ts = _codex_ts(turn)
+        if era == "legacy":
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": ts,
+                        "payload": {"type": "agent_message", "message": text},
+                    }
+                )
+            )
+            continue
+        lines.append(
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "timestamp": ts,
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                    },
+                }
+            )
+        )
+        if era == "paginated":
+            # Paginated mode records the same answer twice, milliseconds
+            # apart: the response item above and the TurnItem here. The parser
+            # keeps one of them; the tail scan reads whichever comes last, so
+            # putting the item second is what exercises the ``AgentMessage``
+            # half of its item vocabulary.
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": ts,
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "AgentMessage",
+                                "content": [{"type": "text", "text": text}],
+                            },
+                        },
+                    }
+                )
+            )
+    return lines
+
+
+def _codex_user_record(era: str, text: str) -> dict:
+    """The opening user turn, spelled the way *era* spells it.
+
+    Three eras, three field names for the same prose: ``message`` on a legacy
+    event, ``text`` inside a paginated TurnItem, ``input_text`` inside the raw
+    response item that survives both.
+    """
+    if era == "legacy":
+        return {
+            "type": "event_msg",
+            "timestamp": _codex_ts(0),
+            "payload": {"type": "user_message", "message": text},
+        }
+    if era == "paginated":
+        return {
+            "type": "event_msg",
+            "timestamp": _codex_ts(0),
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "UserMessage",
+                    "content": [{"type": "text", "text": text}],
+                },
+            },
+        }
+    return {
+        "type": "response_item",
+        "timestamp": _codex_ts(0),
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}],
+        },
+    }
 
 
 def build_corpus(root: Path) -> Path:
@@ -403,42 +550,8 @@ def build_corpus(root: Path) -> Path:
     codex_root.mkdir(parents=True, exist_ok=True)
     for i in range(CODEX_SESSIONS):
         sid = f"perf-codex-{i:04d}"
-        lines = [
-            json.dumps(
-                {
-                    "type": "session_meta",
-                    "payload": {
-                        "id": sid,
-                        "cwd": f"/Users/perf/project{i % 3}",
-                        "git": {"branch": "main"},
-                        "timestamp": "2026-01-05T09:00:00.000Z",
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "type": "event_msg",
-                    "payload": {
-                        "type": "user_message",
-                        "message": f"start session {i} {_filler(i, 0)}",
-                    },
-                }
-            ),
-        ]
-        for line in range(1, 20):
-            text = _filler(i, line)
-            if _has_rare(i) and line == 7:
-                text = f"{text} {QUERY_RARE} sighted"
-            lines.append(
-                json.dumps(
-                    {
-                        "type": "event_msg",
-                        "payload": {"type": "agent_message", "message": text},
-                    }
-                )
-            )
         (codex_root / f"rollout-2026-01-05T09-00-00-{sid}.jsonl").write_text(
-            "\n".join(lines) + "\n"
+            "\n".join(_codex_rollout(i, sid)) + "\n"
         )
 
     codex_db = home / ".codex" / "state_5.sqlite"
@@ -799,7 +912,10 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "cli.list.no_codex_db",
             "The file-scan fallback is the safety net for a missing or stale "
             "Codex index. It must stay budgeted so a regression in it cannot "
-            "hide behind the DB fast path.",
+            "hide behind the DB fast path. It is also the only workload that "
+            "reads rollout files, so it is where a Codex vocabulary the head "
+            "or tail scan no longer recognises shows up -- as a rise, since "
+            "finding no turn means reading the whole file to discover it.",
             lambda: _without_codex_db(lambda: _cli("list", "--limit", "50")),
         ),
         Workload(
