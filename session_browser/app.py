@@ -311,6 +311,12 @@ SearchInput:focus {
     border-left: solid $secondary;
     color: $text-muted;
 }
+.transcript-gap {
+    height: auto;
+    margin: 0 1 1 1;
+    padding: 0 1;
+    color: $text-muted;
+}
 #match-counter {
     height: 0;
     text-align: right;
@@ -923,6 +929,23 @@ class TranscriptEntryWidget(Static):
         self.update(f"{self._header_markup()}\n{prefix}{body}{suffix}")
 
 
+class TranscriptGapWidget(Static):
+    """A run of blocks the matching-only projection left out.
+
+    It exists to stop the projection lying by omission. Two entries an hour
+    apart, rendered adjacent with nothing between them, read as consecutive
+    conversation; a marker saying how many blocks are missing is the
+    difference between a filtered transcript and a misleading one.
+    """
+
+    def __init__(self, hidden: int) -> None:
+        blocks = "block" if hidden == 1 else "blocks"
+        super().__init__(
+            f"[dim]⋯ {hidden:,} non-matching {blocks} hidden[/]",
+            classes="transcript-gap",
+        )
+
+
 class ShortcutHelp(ModalScreen[None]):
     """Small, responsive key map kept out of the everyday footer."""
 
@@ -934,7 +957,7 @@ class ShortcutHelp(ModalScreen[None]):
     #shortcut-help {
         width: 72;
         max-width: 94%;
-        height: 22;
+        height: 23;
         max-height: 94%;
         padding: 1 2;
         background: $surface;
@@ -956,6 +979,7 @@ class ShortcutHelp(ModalScreen[None]):
            [cyan]\\[ / ][/] previous / next tool output
 
 [bold]Find[/]       [cyan]/[/] search active pane    [cyan]n / N[/] next / previous match
+           [cyan]s[/] find in session       [cyan]m[/] matching blocks only
            [cyan]p[/] this-project scope
 
 [bold]Layout[/]     [cyan]z[/] focus current pane    [cyan]Esc[/] step back
@@ -1096,6 +1120,7 @@ class SessionBrowser(App):
         Binding("t", "open_terminal", "Open in terminal", show=False),
         Binding("e", "export_chat_clipboard", "Copy chat", show=False),
         Binding("E", "export_chat_file", "Export chat", show=False),
+        Binding("m", "toggle_matches_only", "Matching blocks", show=False),
         Binding("n", "next_match", "Next match", show=False),
         Binding("N", "prev_match", "Prev match", show=False),
         Binding("J", "next_entry", "Next entry", show=False),
@@ -1131,6 +1156,15 @@ class SessionBrowser(App):
         self._matches: list[tuple[int, int]] = []
         self._match_idx: int = -1
         self._search_query: str = ""
+        # Matching-blocks-only projection: a display mode over the match state
+        # that already exists, holding no transcript of its own.
+        self._matches_only: bool = False
+        self._transcript_title: str = "TRANSCRIPT"
+        # What the pane last mounted, entries and gaps in order, so a re-render
+        # that would rebuild the same rows reuses them instead.
+        self._rendered_plan: list[tuple[str, int]] = []
+        self._projected_blocks: int = 0
+        self._window_blocks: int = 0
         self._filter_query: str = ""
         self._content_hits: dict[str, ContentHit] = {}
         # (normalized query, hit ids) of the last *completed* content
@@ -1712,16 +1746,18 @@ class SessionBrowser(App):
         self._transcript = None
         self._entry_spans = []
         self._entry_widgets = []
+        self._rendered_plan = []
         self._highlighted_entry_indices = set()
         self._detail_text = ""
         self._detail_norm = None
         self._entry_norms = None
         self._matches = []
         self._match_idx = -1
-        self.query_one("#transcript-title", Static).update("TRANSCRIPT")
+        self._transcript_title = "TRANSCRIPT"
+        self._update_transcript_title()
         self.query_one("#detail-header", Static).update("")
         self._set_match_counter()
-        self.query("TranscriptEntryWidget").remove()
+        self._clear_transcript_widgets()
         self.query_one("#detail-content", Static).update(
             "No sessions match your search"
         )
@@ -1806,6 +1842,7 @@ class SessionBrowser(App):
         self._transcript = None
         self._entry_spans = []
         self._entry_widgets = []
+        self._rendered_plan = []
         self._highlighted_entry_indices = set()
         self._detail_text = ""
         self._detail_norm = None
@@ -1815,7 +1852,7 @@ class SessionBrowser(App):
         self._update_detail_header(session)
         # Load content in worker, tagged with its session so a slow read that
         # lands after the selection moved on can be discarded.
-        self.query("TranscriptEntryWidget").remove()
+        self._clear_transcript_widgets()
         self.query_one("#detail-content", Static).update("Loading…")
         self.run_worker(
             lambda s=session: (s, self._load_transcript_safe(s)),
@@ -1875,6 +1912,7 @@ class SessionBrowser(App):
         self._transcript = None
         self._entry_spans = []
         self._entry_widgets = []
+        self._rendered_plan = []
         self._highlighted_entry_indices = set()
         self._detail_text = content
         self._detail_norm = None
@@ -1904,22 +1942,33 @@ class SessionBrowser(App):
         if self.size.height >= 28 and width >= 56 and s.cwd:
             lines.append(f"[dim]{_escape_markup(_ellipsize(s.cwd, width - 2))}[/]")
         header_text = "\n".join(lines)
-        self.query_one("#transcript-title", Static).update(
-            f"TRANSCRIPT  ·  {s.provider.upper()}"
-        )
+        self._transcript_title = f"TRANSCRIPT  ·  {s.provider.upper()}"
+        self._update_transcript_title()
         header.update(header_text)
 
     def _render_detail(self) -> None:
-        """Render the visible window of the detail content."""
+        """Render the visible window of the detail content.
+
+        The match counter is refreshed here, at the end, rather than by each
+        caller before it: in the projected view the counter reports how many
+        blocks are on screen, which is not known until they have been chosen.
+        Updating it first showed the previous render's count. The title is
+        refreshed here for the same reason: the projection lapses whenever
+        the query goes away, and a pane still announcing MATCHING BLOCKS
+        while showing all of them is the one thing the label must never do.
+        """
         if not self._detail_text:
             self.query_one("#detail-content", Static).update("(no content)")
-            return
-        if self._transcript is not None:
+        elif self._transcript is not None:
             self._render_structured_entries()
             self._scroll_to_match()
-            return
-        self.query_one("#detail-content", Static).update(self._compose_visible_text())
-        self._scroll_to_match()
+        else:
+            self.query_one("#detail-content", Static).update(
+                self._compose_visible_text()
+            )
+            self._scroll_to_match()
+        self._update_match_counter()
+        self._update_transcript_title()
 
     def _render_structured_entries(self):
         scroll = self.query_one("#detail-scroll", VerticalScroll)
@@ -1936,9 +1985,15 @@ class SessionBrowser(App):
             )
             if span[1] >= self._window_start and span[0] <= window_end
         ]
+        rows = self._project(visible)
+        self._projected_blocks = sum(1 for kind, _ in rows if kind == "entry")
+        self._window_blocks = len(visible)
         # A query changes highlighting, not structure. Reuse mounted widgets
-        # so fast typing never pays a remove/remount cost per keystroke.
-        if [w.entry_index for w in self._entry_widgets] == [i for i, _, _ in visible]:
+        # so fast typing never pays a remove/remount cost per keystroke. The
+        # plan carries the gap rows as well as the entries, because in the
+        # projected view a run of hidden blocks is part of what is on screen
+        # and two different runs must not reuse each other's marker.
+        if rows == self._rendered_plan:
             widgets_by_index = {w.entry_index: w for w in self._entry_widgets}
             matches_by_index: dict[int, list[tuple[int, int]]] = {}
             for index, _, (start, end) in visible:
@@ -1958,25 +2013,85 @@ class SessionBrowser(App):
             self._highlighted_entry_indices = set(matches_by_index)
             return None
 
-        self.query(TranscriptEntryWidget).remove()
+        self._clear_transcript_widgets()
         self.query_one("#detail-content", Static).update("")
+        by_index = {index: (entry, span) for index, entry, span in visible}
+        mounted: list[Static] = []
         widgets: list[TranscriptEntryWidget] = []
-        for index, entry, (start, end) in visible:
-            widget = TranscriptEntryWidget(entry, index, start)
+        for kind, value in rows:
+            if kind == "gap":
+                mounted.append(TranscriptGapWidget(value))
+                continue
+            entry, (start, end) = by_index[value]
+            widget = TranscriptEntryWidget(entry, value, start)
             left = bisect_left(self._matches, (start,))
             right = bisect_left(self._matches, (end,))
-            spans = self._matches[left:right]
-            widget.set_matches(self._search_query, spans, active_span)
+            widget.set_matches(
+                self._search_query, self._matches[left:right], active_span
+            )
             widgets.append(widget)
+            mounted.append(widget)
         self._entry_widgets = widgets
+        self._rendered_plan = rows
         self._highlighted_entry_indices = {
             widget.entry_index for widget in widgets if widget._match_spans
         }
         if widgets:
-            return scroll.mount(*widgets)
-        else:
-            self.query_one("#detail-content", Static).update("(empty session)")
+            return scroll.mount(*mounted)
+        self.query_one("#detail-content", Static).update(
+            "(no matching blocks)" if self._projecting else "(empty session)"
+        )
         return None
+
+    @property
+    def _projecting(self) -> bool:
+        """Whether the matching-only view is in force right now.
+
+        The mode is a view *of a query*. With no query there is nothing to
+        project, so the preference is held and simply not applied -- which is
+        also what keeps it stable across the moment a session loads, when the
+        query is briefly cleared before being re-seeded.
+        """
+        return self._matches_only and bool(self._search_query)
+
+    def _project(
+        self, visible: list[tuple[int, TranscriptEntry, tuple[int, int]]]
+    ) -> list[tuple[str, int]]:
+        """The rows to render: ``("entry", index)`` and ``("gap", hidden)``.
+
+        Built from the match spans already computed for the flat buffer -- a
+        bisect per entry, no parse, no fold, and no second copy of the
+        transcript. The full view is the identity case, so a toggle in either
+        direction costs one re-render of what is already in memory.
+        """
+        if not self._projecting:
+            return [("entry", index) for index, _, _ in visible]
+        rows: list[tuple[str, int]] = []
+        hidden = 0
+        for index, _, (start, end) in visible:
+            if bisect_left(self._matches, (start,)) == bisect_left(
+                self._matches, (end,)
+            ):
+                hidden += 1
+                continue
+            if hidden:
+                rows.append(("gap", hidden))
+                hidden = 0
+            rows.append(("entry", index))
+        if hidden:
+            rows.append(("gap", hidden))
+        return rows
+
+    def _clear_transcript_widgets(self) -> None:
+        """Remove both kinds of mounted row.
+
+        Gaps are not entries, so a query for TranscriptEntryWidget leaves them
+        behind -- and a stale marker claiming blocks are hidden that are not
+        is worse than no marker at all.
+        """
+        self.query(TranscriptEntryWidget).remove()
+        self.query(TranscriptGapWidget).remove()
+        self._rendered_plan = []
 
     def _compose_visible_text(self) -> str:
         """Bounded display window with omission markers, markup-ready."""
@@ -2103,7 +2218,6 @@ class SessionBrowser(App):
                 self._match_idx = 0
         self._window_start = 0
         self._ensure_match_visible()
-        self._update_match_counter()
         self._render_detail()
 
     def _entry_matches(
@@ -2135,10 +2249,25 @@ class SessionBrowser(App):
         counter.set_class(bool(text), "-visible")
 
     def _update_match_counter(self) -> None:
-        if self._matches:
-            self._set_match_counter(f" {self._match_idx + 1} / {len(self._matches)} ")
-        else:
-            self._set_match_counter()
+        """Occurrence position, plus the block count when blocks are hidden.
+
+        Both numbers, because in the projected view they answer different
+        questions: how far through the hits you are, and how much of the
+        session you are being shown at all.
+        """
+        position = (
+            f" {self._match_idx + 1} / {len(self._matches)}" if self._matches else ""
+        )
+        if self._projecting:
+            # Against the blocks the *window* holds, not the whole transcript.
+            # The gap markers account for exactly the blocks this number
+            # leaves out, so the two have to be drawn from the same set --
+            # counting against every entry in the session would leave a
+            # remainder the markers never mention.
+            blocks = f" · {self._projected_blocks} of {self._window_blocks} blocks "
+            self._set_match_counter(f"{position or ' no matches'}{blocks}")
+            return
+        self._set_match_counter(f"{position} " if position else "")
 
     def _scroll_to_match(self) -> None:
         """Scroll the detail pane so the current match is visible."""
@@ -2407,12 +2536,39 @@ class SessionBrowser(App):
             return
         self._status.update(f"Exported chat: {path}")
 
+    def _update_transcript_title(self) -> None:
+        """Name the projection in the pane title.
+
+        The match counter carries the numbers, but it is one line high and
+        hidden when there is nothing to count. A reader who cannot see why
+        half the transcript is missing has been given a broken pane rather
+        than a filtered one, so the mode is stated where the pane is named.
+        """
+        suffix = "  ·  MATCHING BLOCKS" if self._projecting else ""
+        self.query_one("#transcript-title", Static).update(
+            f"{self._transcript_title}{suffix}"
+        )
+
+    def action_toggle_matches_only(self) -> None:
+        """Show only the blocks the in-session query hit, or everything.
+
+        Refused without a query rather than silently doing nothing: the mode
+        is a view of a search, and a key that appears inert is a worse answer
+        than one that says what it needs.
+        """
+        if self._transcript is None:
+            return
+        if not self._search_query:
+            self._flash_status("Find in session first (s or /) — then m", ok=False)
+            return
+        self._matches_only = not self._matches_only
+        self._render_detail()
+
     def action_next_match(self) -> None:
         if not self._matches:
             return
         self._match_idx = (self._match_idx + 1) % len(self._matches)
         self._ensure_match_visible()
-        self._update_match_counter()
         self._render_detail()
 
     def action_prev_match(self) -> None:
@@ -2420,7 +2576,6 @@ class SessionBrowser(App):
             return
         self._match_idx = (self._match_idx - 1) % len(self._matches)
         self._ensure_match_visible()
-        self._update_match_counter()
         self._render_detail()
 
     def _move_entry_focus(self, delta: int, *, tools_only: bool = False) -> None:
