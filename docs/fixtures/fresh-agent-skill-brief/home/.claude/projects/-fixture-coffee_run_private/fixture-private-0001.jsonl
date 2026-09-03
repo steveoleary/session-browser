@@ -1,0 +1,2 @@
+{"type": "user", "cwd": "/fixture/coffee_run_private", "gitBranch": "main", "timestamp": "2026-04-03T10:00:00.000Z", "message": {"role": "user", "content": "budget for the private coffee run"}}
+{"type": "assistant", "cwd": "/fixture/coffee_run_private", "gitBranch": "main", "timestamp": "2026-04-03T10:01:00.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Twelve pounds a head."}]}}

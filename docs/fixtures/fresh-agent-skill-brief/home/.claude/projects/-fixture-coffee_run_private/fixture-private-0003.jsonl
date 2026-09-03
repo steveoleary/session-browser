@@ -1,0 +1,2 @@
+{"type": "user", "cwd": "/fixture/coffee_run_private", "gitBranch": "main", "timestamp": "2026-04-05T10:00:00.000Z", "message": {"role": "user", "content": "cancel one of the private orders"}}
+{"type": "assistant", "cwd": "/fixture/coffee_run_private", "gitBranch": "main", "timestamp": "2026-04-05T10:01:00.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Cancelled."}]}}

@@ -123,6 +123,7 @@ def test_module_cli_lists_committed_cases_with_accepted_states():
     assert result.stdout.splitlines() == [
         "claude-queued-command-fidelity\taccepted=candidate",
         "conversation-first-overlooked-session\taccepted=baseline",
+        "fresh-agent-skill-brief\taccepted=candidate",
     ]
 
 
@@ -177,24 +178,29 @@ def test_module_cli_run_aggregates_synthetic_candidate_results(tmp_path):
 
 
 def test_committed_fixture_cases_have_independent_accepted_baselines():
-    """The parser and ordering regressions must be green without coupling phases.
+    """Every committed case must be green in its own accepted state.
 
     The parser case is accepted at ``candidate`` since the queued-command fix
     landed, while the ordering case stays at ``baseline`` until Phase 3. Both
-    being green in different states is the point of splitting them.
+    being green in different states is the point of splitting them. The set is
+    spelled out rather than counted so that adding a fixture is a deliberate
+    act with a stated accepted state, not something that arrives unnoticed.
     """
     cases = {case.name: case for case in case_runner.discover_committed_cases()}
 
     assert set(cases) == {
         "claude-queued-command-fidelity",
         "conversation-first-overlooked-session",
+        "fresh-agent-skill-brief",
     }
     assert cases["conversation-first-overlooked-session"].accepted_state == "baseline"
     assert cases["claude-queued-command-fidelity"].accepted_state == "candidate"
+    assert cases["fresh-agent-skill-brief"].accepted_state == "candidate"
 
     results = case_runner.run_committed_cases(state="accepted")
 
     assert [(item.name, item.state, item.returncode) for item in results] == [
         ("claude-queued-command-fidelity", "candidate", 0),
         ("conversation-first-overlooked-session", "baseline", 0),
+        ("fresh-agent-skill-brief", "candidate", 0),
     ]

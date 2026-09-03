@@ -1,0 +1,5 @@
+{
+  "name": "fresh-agent-skill-brief",
+  "accepted_state": "candidate",
+  "verifier": "verify_case.py"
+}

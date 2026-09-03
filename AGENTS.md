@@ -8,7 +8,10 @@ live alongside the code in `session_browser/`: `tests.py`, `test_cli.py`,
 
 Committed regression fixtures live in `docs/fixtures/`. Each has a
 `verify_case.py` and a declared accepted state; run them with
-`python -m session_browser.case_runner run`.
+`python -m session_browser.case_runner run`. One of them,
+`fresh-agent-skill-brief`, checks the documented retrieval workflow rather than
+the code — run it after changing `skills/using-session-browser/SKILL.md` or the
+argparse help, and see its README for the hand-run half.
 
 `CLAUDE.md` is a symlink to this file. There is one set of instructions on
 purpose — nothing here is Claude-specific, and a second copy is a copy that
