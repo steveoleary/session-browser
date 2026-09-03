@@ -105,6 +105,13 @@ prints the same thing. You do not write that block and you cannot omit it, so a
 regression blessed quietly still arrives in the diff with its size attached.
 That is the whole mechanism: read the block, not the assurance.
 
+The movement is measured against the file's **committed** version, not against
+whatever a previous `bless` left on disk, so the block describes the diff a
+reviewer is about to read. Blessing twice — which is what happens whenever
+anything else in that generated file is adjusted and re-recorded — therefore
+says the same thing twice instead of replacing a movement record with an empty
+one.
+
 One hook backs this up, and it asks nothing: a confirm modal interrupts a human
 who has not yet seen the evidence, and fires on benign blesses too, which
 teaches them to approve it unread.

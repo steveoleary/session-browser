@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import subprocess
 
 import pytest
 
@@ -436,3 +437,104 @@ class TestTheCorpusCoversEveryCodexEra:
         )
         deep = {self._era(p) for p in rollouts if p.stat().st_size > window}
         assert deep == self.ERAS
+
+
+class TestTheRecordSurvivesReBlessing:
+    """The ``_blessed`` block must describe the diff, not the last bless.
+
+    It used to be computed against the working copy, so a second bless
+    compared the measurement against numbers the first bless had already
+    written and recorded an empty movement. The commit then carried the new
+    counts with a block asserting that nothing moved — no hand-edit, no flag,
+    no warning, and the one mechanism standing between a quiet regression and
+    review said the regression had not happened. Reached by accident, by
+    adjusting a guard string (they live in the same generated file) and
+    re-recording.
+    """
+
+    @staticmethod
+    def _repo(tmp_path, budgets: dict):
+        root = tmp_path / "repo"
+        (root / "docs").mkdir(parents=True)
+        path = root / "docs" / "perf_budgets.json"
+        path.write_text(json.dumps(budgets, indent=2) + "\n")
+        for command in (
+            ["git", "init", "--quiet", "-b", "main"],
+            ["git", "config", "user.email", "t@example.test"],
+            ["git", "config", "user.name", "T"],
+            ["git", "add", "-A"],
+            ["git", "commit", "--quiet", "-m", "baseline"],
+        ):
+            subprocess.run(command, cwd=root, check=True, capture_output=True)
+        return path
+
+    def test_a_committed_file_is_read_from_head_not_the_working_copy(
+        self, tmp_path, monkeypatch
+    ):
+        path = self._repo(tmp_path, {"workloads": {"w": {"transcripts_parsed": 400}}})
+        path.write_text(json.dumps({"workloads": {"w": {"transcripts_parsed": 1}}}))
+        monkeypatch.setattr(perf_budget, "BUDGETS_PATH", path)
+        workloads, _ = perf_budget.committed_baseline()
+        assert workloads == {"w": {"transcripts_parsed": 400}}
+
+    def test_no_committed_version_falls_back_rather_than_failing(
+        self, tmp_path, monkeypatch
+    ):
+        """First bless in a fresh checkout, or outside git entirely."""
+        loose = tmp_path / "loose.json"
+        loose.write_text("{}")
+        monkeypatch.setattr(perf_budget, "BUDGETS_PATH", loose)
+        assert perf_budget.committed_baseline() is None
+
+    def test_blessing_twice_records_the_movement_both_times(
+        self, tmp_path, monkeypatch
+    ):
+        """The regression this class exists for.
+
+        Two blesses of the same measurement against one commit. The second
+        must say exactly what the first said, because the diff it describes is
+        the same diff.
+        """
+        path = self._repo(tmp_path, {"workloads": {"w": {"transcripts_parsed": 400}}})
+        monkeypatch.setattr(perf_budget, "BUDGETS_PATH", path)
+        measured = {"w": dict.fromkeys(perf_budget.COUNTERS, 0)}
+        measured["w"]["transcripts_parsed"] = 500
+
+        first = perf_budget.save_budgets(measured, {}, loops={}, loop_guards={})
+        second = perf_budget.save_budgets(measured, {}, loops={}, loop_guards={})
+
+        assert first["moved"] == {"w.transcripts_parsed": "400 -> 500 (+25.0%)"}
+        assert second["moved"] == first["moved"]
+        written = json.loads(path.read_text())
+        assert written["_blessed"]["moved"] == first["moved"]
+
+    def test_the_merge_still_uses_the_working_copy(self, tmp_path, monkeypatch):
+        """Only the *record* moved to HEAD; the merge must not.
+
+        Blessing on a machine without ripgrep measures a subset, and the
+        unmeasured workloads are preserved from the file on disk. Taking them
+        from HEAD instead would resurrect numbers a previous bless had already
+        superseded.
+        """
+        path = self._repo(tmp_path, {"workloads": {"kept": {"transcripts_parsed": 7}}})
+        monkeypatch.setattr(perf_budget, "BUDGETS_PATH", path)
+        perf_budget.save_budgets(
+            {
+                "kept": dict(
+                    dict.fromkeys(perf_budget.COUNTERS, 0), transcripts_parsed=9
+                )
+            },
+            {},
+            loops={},
+            loop_guards={},
+        )
+        # A second bless that measures a different workload entirely must carry
+        # the 9 forward, not fall back to the committed 7.
+        perf_budget.save_budgets(
+            {"other": dict.fromkeys(perf_budget.COUNTERS, 0)},
+            {},
+            loops={},
+            loop_guards={},
+        )
+        written = json.loads(path.read_text())
+        assert written["workloads"]["kept"]["transcripts_parsed"] == 9
