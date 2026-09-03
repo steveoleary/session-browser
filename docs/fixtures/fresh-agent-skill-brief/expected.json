@@ -1,0 +1,34 @@
+{
+  "tasks": {
+    "coffee_run_sessions": {
+      "question": "How many sessions is work recorded in under the project coffee_run itself?",
+      "answer": 3,
+      "readable_answer": 2,
+      "naive_command": ["list", "--repo", "coffee_run"],
+      "naive_answer": 6,
+      "shadow_cwd": "/fixture/coffee_run_private",
+      "cwd": "/fixture/coffee_run"
+    },
+    "readable_total": {
+      "question": "stats reports a total; how many of those can actually be read?",
+      "stats_total": 8,
+      "readable": 7,
+      "empty": 1,
+      "warned_session": "claude:fixture-coffee-0003"
+    },
+    "loyalty_tier_provenance": {
+      "question": "Did anyone propose sunsetting the loyalty tier, or was it only read?",
+      "phrase": "sunset the loyalty tier",
+      "session": "claude:fixture-tea-0001",
+      "match_count": 5,
+      "roles": {"tool": 4, "user": 1},
+      "proposed_by_role": "user"
+    },
+    "espresso_decision": {
+      "question": "Which espresso machine is being ordered?",
+      "session": "claude:fixture-tea-0002",
+      "answer": "Lelit Bianca",
+      "superseded_answer": "Rocket R58"
+    }
+  }
+}

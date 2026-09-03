@@ -1,0 +1,2 @@
+{"type": "user", "cwd": "/fixture/coffee_run", "gitBranch": "main", "timestamp": "2026-04-02T10:00:00.000Z", "message": {"role": "user", "content": "who is on the rota this week"}}
+{"type": "assistant", "cwd": "/fixture/coffee_run", "gitBranch": "main", "timestamp": "2026-04-02T10:01:00.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Priya, then Sam."}]}}
