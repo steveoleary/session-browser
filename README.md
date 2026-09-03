@@ -108,7 +108,10 @@ leaving the UI.
 ### Read the part that matters
 
 Press `z` to give the transcript the full terminal, then use `n` and `N` to move
-between matches inside the conversation.
+between matches inside the conversation. On a long session, `m` collapses the
+transcript to just the blocks that matched, marking how many it left out
+between them; long tool calls and outputs stay folded to a preview of the match
+until you open one with `Enter`.
 
 ![Focused transcript with an in-session search for WAL](docs/screenshots/03-detail-focus-wal-120x40.svg)
 
@@ -166,6 +169,7 @@ Press `?` in the app for the complete key map.
 | `Enter`, `Esc` | Open a transcript / step back |
 | `z` | Focus the active pane |
 | `n` / `N` | Next / previous match |
+| `m` | Show only the blocks that matched |
 | `c` | Copy a resume command |
 | `i` | Copy the canonical session id |
 | `e` / `E` | Copy / export the conversation |
