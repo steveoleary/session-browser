@@ -379,7 +379,11 @@ class TestTheCorpusCoversEveryCodexEra:
     """
 
     @pytest.fixture(scope="class")
-    def rollouts(self, tmp_path_factory) -> list:
+    @classmethod
+    def rollouts(cls, tmp_path_factory) -> list:
+        # classmethod because the fixture is class-scoped: pytest 9.1 warns
+        # that an instance-method fixture runs once per class while each test
+        # gets a fresh instance, and pytest 10 removes it.
         home = perf_budget.build_corpus(tmp_path_factory.mktemp("perf-corpus"))
         return sorted((home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
 

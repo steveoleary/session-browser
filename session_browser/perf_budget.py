@@ -1290,14 +1290,24 @@ def loop_probes(root: Path) -> list[LoopProbe]:
 def measure_loops(root: Path) -> dict[str, int]:
     """Opcode counts for every loop probe.
 
-    Warmed once before counting. First execution of a code path can differ --
-    an import resolved, a cache filled, a regex compiled -- and the budget
-    should pin the steady state the corpus actually runs in, not the setup
-    that happens once per process.
+    Warmed twice, and the second warm-up is *traced*. The first execution of a
+    code path can differ -- an import resolved, a cache filled, a regex
+    compiled -- and the budget should pin the steady state, not the setup. But
+    installing a tracer is itself a first execution: CPython de-optimizes
+    specialized bytecode when tracing turns on, and on 3.12 the first traced
+    call of an already-specialized code object reports **zero** opcodes before
+    settling on the right number from the second call onwards. Measured
+    2026-09-03: `loop.parse_jsonl` scored 0, then 36053, then 36053. One
+    untraced warm-up cannot cover that, because the thing being warmed is the
+    tracing.
+
+    A discarded traced run costs one extra pass over a fixed input and makes
+    the count the same on every interpreter that can produce one.
     """
     counts: dict[str, int] = {}
     for probe in loop_probes(root):
         probe.run()
+        count_opcodes(probe.run)
         counts[probe.name] = count_opcodes(probe.run)
     return counts
 

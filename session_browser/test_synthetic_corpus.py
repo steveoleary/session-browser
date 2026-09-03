@@ -91,7 +91,10 @@ class TestSelectivity:
     """The manifest's promise, checked against the product's own search."""
 
     @pytest.fixture(scope="class")
-    def built(self, tmp_path_factory):
+    @classmethod
+    def built(cls, tmp_path_factory):
+        # classmethod because the fixture is class-scoped; pytest 10 removes
+        # the instance-method form.
         home = tmp_path_factory.mktemp("selectivity") / "home"
         return sc.generate(home, scale=1), home
 
