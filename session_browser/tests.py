@@ -3564,6 +3564,315 @@ class TestStructuredTranscript:
                 # And the scroll target is measured over the preview too.
                 assert widget.active_match_row() is not None
 
+    def _mixed_transcript(self, session: Session) -> Transcript:
+        """Matching blocks separated by runs of non-matching ones."""
+        entries = [TranscriptEntry("user", "start of the session")]
+        for index in range(3):
+            entries += [
+                TranscriptEntry("assistant", f"filler answer {index}"),
+                TranscriptEntry(
+                    "tool",
+                    f'Bash({{"cmd": "echo {index}"}})',
+                    metadata={"kind": "call", "tool": "Bash"},
+                ),
+                TranscriptEntry(
+                    "tool",
+                    f"unremarkable output {index}\n" + "w" * 600,
+                    metadata={"kind": "output", "tool": "Bash"},
+                ),
+            ]
+            entries.append(
+                TranscriptEntry("user", f"and now the bandicoot question {index}")
+            )
+        return Transcript(session, entries)
+
+    async def test_matching_only_keeps_whole_blocks_and_marks_the_gaps(self):
+        """The projection is blocks, in order, with the omissions named."""
+        from session_browser.app import TranscriptEntryWidget, TranscriptGapWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._mixed_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("bandicoot")
+            await pilot.pause()
+            assert len(list(app.query(TranscriptEntryWidget))) == 13
+
+            app.action_toggle_matches_only()
+            await pilot.pause()
+
+            widgets = list(app.query(TranscriptEntryWidget))
+            assert [w.entry_index for w in widgets] == [4, 8, 12]
+            # Whole blocks, not snippets: the entry text is the entry's own.
+            assert all("bandicoot question" in w.entry.text for w in widgets)
+            gaps = [str(g.render()) for g in app.query(TranscriptGapWidget)]
+            assert len(gaps) == 3
+            assert "4 non-matching blocks hidden" in gaps[0]
+            assert all("3 non-matching blocks hidden" in g for g in gaps[1:])
+
+            # The counter and the markers are drawn from one set: what is
+            # shown plus what the gaps account for is what the full view had.
+            counter = str(app.query_one("#match-counter").render())
+            assert "3 of 13 blocks" in counter
+            hidden = sum(int(g.split()[1]) for g in gaps)
+            assert 3 + hidden == 13
+
+            app.action_toggle_matches_only()
+            await pilot.pause()
+            assert len(list(app.query(TranscriptEntryWidget))) == 13
+            assert not list(app.query(TranscriptGapWidget))
+
+    async def test_matching_only_reports_its_state_and_its_counts(self):
+        from textual.widgets import Label, Static
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._mixed_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("bandicoot")
+            await pilot.pause()
+            title = app.query_one("#transcript-title", Static)
+            assert "MATCHING BLOCKS" not in str(title.render())
+
+            app.action_toggle_matches_only()
+            await pilot.pause()
+            assert "MATCHING BLOCKS" in str(title.render())
+            counter = str(app.query_one("#match-counter", Label).render())
+            assert "1 / 3" in counter
+            assert "3 of 13 blocks" in counter
+
+            app.action_toggle_matches_only()
+            await pilot.pause()
+            assert "MATCHING BLOCKS" not in str(title.render())
+            assert "blocks" not in str(app.query_one("#match-counter", Label).render())
+
+    async def test_matches_only_needs_a_query_and_says_so(self):
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._mixed_transcript(fake[0]))
+            await pilot.pause()
+
+            app.action_toggle_matches_only()
+            await pilot.pause()
+            assert app._matches_only is False
+            status = str(app.query_one("#status-bar").render())
+            assert "Find in session first" in status
+            assert "MATCHING BLOCKS" not in str(
+                app.query_one("#transcript-title").render()
+            )
+
+    async def test_a_query_with_no_hits_projects_to_an_explicit_empty_state(self):
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._mixed_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("bandicoot")
+            await pilot.pause()
+            app.action_toggle_matches_only()
+            await pilot.pause()
+
+            app._do_session_search("nothing-in-here-at-all")
+            await pilot.pause()
+            assert not list(app.query(TranscriptEntryWidget))
+            content = str(app.query_one("#detail-content").render())
+            assert "no matching blocks" in content
+
+    async def test_clearing_the_query_restores_the_full_transcript(self):
+        """The mode is a view of a query, so it lapses when the query does."""
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._mixed_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("bandicoot")
+            await pilot.pause()
+            app.action_toggle_matches_only()
+            await pilot.pause()
+            assert len(list(app.query(TranscriptEntryWidget))) == 3
+
+            app._do_session_search("")
+            await pilot.pause()
+            assert app._matches_only is True
+            assert app._projecting is False
+            assert len(list(app.query(TranscriptEntryWidget))) == 13
+            assert "MATCHING BLOCKS" not in str(
+                app.query_one("#transcript-title").render()
+            )
+
+            app._do_session_search("bandicoot")
+            await pilot.pause()
+            assert len(list(app.query(TranscriptEntryWidget))) == 3
+
+    async def test_navigation_and_identity_survive_the_projection(self):
+        """n/N, J/K, tool jumps and entry indices all still mean the same."""
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._mixed_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("bandicoot")
+            await pilot.pause()
+            app.action_toggle_matches_only()
+            await pilot.pause()
+
+            widgets = list(app.query(TranscriptEntryWidget))
+            # Absolute identity: the second retained block is still entry 8.
+            assert widgets[1].entry_index == 8
+            assert app._entry_spans[8][0] == widgets[1].text_start
+
+            app.action_next_match()
+            await pilot.pause()
+            assert app._match_idx == 1
+            app.action_prev_match()
+            await pilot.pause()
+            assert app._match_idx == 0
+
+            app.action_next_entry()
+            await pilot.pause()
+            assert app.focused is widgets[0]
+            app.action_next_entry()
+            await pilot.pause()
+            assert app.focused is widgets[1]
+            # No tool block survived this projection, so ] is a no-op rather
+            # than a jump into something the reader cannot see.
+            app.action_next_tool()
+            await pilot.pause()
+            assert app.focused is widgets[1]
+
+    async def test_the_projection_copies_and_exports_the_whole_session(self):
+        """Display-only: the canonical buffer is untouched by the view."""
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._mixed_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("bandicoot")
+            await pilot.pause()
+            before = app._detail_text
+
+            app.action_toggle_matches_only()
+            await pilot.pause()
+            assert app._detail_text == before
+            assert len(app._transcript.entries) == 13
+            assert len(app._matches) == 3
+            assert app._entry_spans == app._build_entry_spans(app._transcript)
+
+    async def test_the_projection_is_bounded_on_a_big_noisy_transcript(self):
+        """Many matches and a megabyte block: rows stay windowed, not mounted
+        one per match."""
+        from session_browser.app import (
+            _DISPLAY_WINDOW,
+            TranscriptEntryWidget,
+            TranscriptGapWidget,
+        )
+
+        app, fake = _make_app_with_rows(1)
+        entries = [
+            TranscriptEntry("assistant", f"potoroo mention {index}\n" + "p" * 400)
+            for index in range(400)
+        ]
+        entries.insert(
+            200,
+            TranscriptEntry(
+                "tool",
+                "potoroo " + ("v" * 2_000_000),
+                metadata={"kind": "output", "tool": "Bash"},
+            ),
+        )
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(Transcript(fake[0], entries))
+            await pilot.pause()
+            app._do_session_search("potoroo")
+            await pilot.pause()
+            app.action_toggle_matches_only()
+            await pilot.pause()
+
+            widgets = list(app.query(TranscriptEntryWidget))
+            assert widgets, "the projection mounted nothing at all"
+            # The display window still governs. Every match is in a matching
+            # block here, so an unwindowed projection would mount all 401 of
+            # them; what is mounted is the windowful the full view would show.
+            assert len(widgets) < len(entries)
+            assert all(
+                app._entry_spans[widget.entry_index][0]
+                <= app._window_start + _DISPLAY_WINDOW
+                for widget in widgets
+            )
+            # And the megabyte block inside it is still folded to a preview.
+            megabyte = [w for w in widgets if len(w.entry.text) > 1_000_000]
+            assert len(megabyte) == 1
+            assert megabyte[0].collapsed is True
+            assert len(str(megabyte[0].render())) < 1000
+            for gap in app.query(TranscriptGapWidget):
+                assert "hidden" in str(gap.render())
+
+    async def test_the_projection_follows_a_session_switch(self):
+        """The mode is a preference; the query is re-seeded per session."""
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(2)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._mixed_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("bandicoot")
+            await pilot.pause()
+            app.action_toggle_matches_only()
+            await pilot.pause()
+            assert len(list(app.query(TranscriptEntryWidget))) == 3
+
+            # A second session, loaded the way the worker delivers one.
+            app._on_transcript_loaded(
+                Transcript(
+                    fake[1],
+                    [
+                        TranscriptEntry("user", "a bandicoot again"),
+                        TranscriptEntry("assistant", "nothing to see"),
+                        TranscriptEntry("assistant", "still nothing"),
+                    ],
+                )
+            )
+            await pilot.pause()
+            app._do_session_search("bandicoot")
+            await pilot.pause()
+
+            assert app._matches_only is True
+            widgets = list(app.query(TranscriptEntryWidget))
+            assert [w.entry_index for w in widgets] == [0]
+            assert "1 of 3 blocks" in str(app.query_one("#match-counter").render())
+
+    async def test_the_projection_survives_focus_mode_and_a_narrow_screen(self):
+        from session_browser.app import TranscriptEntryWidget, TranscriptGapWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(88, 28)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            assert app.screen.has_class("-compact")
+            app._on_transcript_loaded(self._mixed_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("bandicoot")
+            await pilot.pause()
+            app.action_toggle_matches_only()
+            await pilot.pause()
+            assert len(list(app.query(TranscriptEntryWidget))) == 3
+            assert len(list(app.query(TranscriptGapWidget))) == 3
+
+            app.action_toggle_focus_mode()
+            await pilot.pause()
+            assert len(list(app.query(TranscriptEntryWidget))) == 3
+            assert "MATCHING BLOCKS" in str(app.query_one("#transcript-title").render())
+
     async def test_structural_navigation_jumps_entries_and_tools(self):
         from session_browser.app import TranscriptEntryWidget
 
