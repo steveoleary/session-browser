@@ -716,11 +716,17 @@ class TranscriptEntryWidget(Static):
         self._query = ""
         self._match_spans: list[tuple[int, int]] = []
         self._active_match_span: tuple[int, int] | None = None
-        self.collapsible = (
-            entry.role == "tool"
-            and (entry.metadata or {}).get("kind") == "output"
-            and len(entry.text) > self.COLLAPSE_AT
-        )
+        self._active_index: int | None = None
+        # Calls as well as outputs. Both are unbounded -- measured over the
+        # file-backed corpus on 2026-08-25, 10,513 of 30,689 tool calls run
+        # past this threshold, 202 past 10,000 characters and the largest to
+        # 92,248 -- and a call that arrives already expanded floods the pane
+        # exactly as an output would.
+        self.collapsible = entry.role == "tool" and len(entry.text) > self.COLLAPSE_AT
+        # Nothing but ``action_toggle_collapsed`` ever writes this again, which
+        # is what keeps an explicit choice explicit: navigation moves the
+        # preview inside a collapsed block instead of unfolding it, so a block
+        # the reader expanded stays expanded and one they folded stays folded.
         self.collapsed = self.collapsible
         classes = ["transcript-entry", f"-{entry.role}"]
         if entry.role == "tool":
@@ -750,6 +756,18 @@ class TranscriptEntryWidget(Static):
             if active_absolute_span is not None
             else None
         )
+        # The active match belongs to at most one widget, and the span alone
+        # cannot say which: every widget is handed the same one. Resolving it
+        # to a position in this entry's own spans answers both questions at
+        # once -- whether it is here, and which of the matches here it is.
+        self._active_index = None
+        if self._active_match_span is not None:
+            at = bisect_left(self._match_spans, self._active_match_span)
+            if (
+                at < len(self._match_spans)
+                and self._match_spans[at] == self._active_match_span
+            ):
+                self._active_index = at
         self._refresh_content()
 
     def action_toggle_collapsed(self) -> None:
@@ -770,43 +788,50 @@ class TranscriptEntryWidget(Static):
     def _visible_text(self) -> tuple[str, int, str]:
         """Displayed slice of the entry, its offset into it, and a footer.
 
-        A collapsed entry that *contains matches* previews the first one
-        rather than its opening line: a match hidden behind the fold renders
-        nothing at all, which reads as "search missed it" even though the
-        counter includes it and n/N reaches it. Slicing around the match
-        keeps the preview the same size, so collapsing still costs one short
-        string per entry however large the tool output is.
+        A collapsed entry that *contains matches* previews one of them rather
+        than its opening line: a match hidden behind the fold renders nothing
+        at all, which reads as "search missed it" even though the counter
+        includes it and n/N reaches it. Slicing around the match keeps the
+        preview the same size, so collapsing still costs one short string per
+        entry however large the tool block is.
+
+        The footer says which match is on screen and how much is not, because
+        a preview that silently showed the first of eight would be a smaller
+        lie than the opening line but a lie of the same kind.
         """
         text = self.entry.text
         if not self.collapsed:
             return text, 0, ""
         start, end = self._preview_bounds(text)
         hidden = max(0, len(text) - (end - start))
-        matches = (
-            f" · {len(self._match_spans)} match"
-            f"{'' if len(self._match_spans) == 1 else 'es'} here"
+        showing = (
+            f" · showing match {(self._active_index or 0) + 1}"
+            f" of {len(self._match_spans)}"
             if self._match_spans
             else ""
         )
         return (
             text[start:end],
             start,
-            f"\n[dim]… {hidden:,} chars hidden{matches} · Enter/click to expand[/]",
+            f"\n[dim]… {hidden:,} chars hidden{showing} · Enter/click to expand[/]",
         )
 
     def _preview_bounds(self, text: str) -> tuple[int, int]:
-        """Bounds of the collapsed preview: the first match, else line one.
+        """Bounds of the collapsed preview: the active match, else the first.
 
-        Both branches are pure C-level string work — no scan over the entry
-        in Python — so a collapsed megabyte of tool output costs the same
-        here whether or not the query hit it.
+        Following the active match is what lets n/N traverse a block without
+        unfolding it. The spans are already known, so choosing between them
+        is an index; both branches below are then pure C-level string work --
+        no scan over the entry in Python -- so a collapsed megabyte of tool
+        output costs the same per navigation step whether or not the query hit
+        it, and the same however many times it did.
         """
         if not self._match_spans:
             line_end = text.find("\n")
             if line_end == -1:
                 line_end = len(text)
             return 0, min(line_end, self.PREVIEW_CHARS)
-        match_start, match_end = self._match_spans[0]
+        match_start, match_end = self._match_spans[self._active_index or 0]
         # Stay inside the match's own line: a preview that ran on through
         # newlines would grow the collapsed widget by an unbounded number of
         # rendered rows.
@@ -832,7 +857,15 @@ class TranscriptEntryWidget(Static):
             active = (active[0] - offset, active[1] - offset)
         parts: list[str] = []
         previous = 0
-        for start, end in self._match_spans:
+        # Walk only the spans that can land inside the slice. Collapsed, that
+        # is a handful out of however many the entry holds; a Python loop over
+        # every match of a common term in a multi-megabyte block would be the
+        # per-navigation cost the preview exists to avoid. Indices rather than
+        # a slice of the list, so the spans are not copied either.
+        first = bisect_left(self._match_spans, (offset, 0))
+        last = bisect_left(self._match_spans, (offset + len(text), 0))
+        for index in range(first, last):
+            start, end = self._match_spans[index]
             start -= offset
             end -= offset
             if start < previous or end > len(text) or end <= start:
@@ -856,14 +889,28 @@ class TranscriptEntryWidget(Static):
         tool = (self.entry.metadata or {}).get("tool")
         if tool and self.entry.role == "tool":
             label = f"{label}: {tool}"
-        return f"[bold]{_escape_markup(label)}[/]{timestamp}"
+        count = len(self._match_spans)
+        matches = (
+            f"  [dim]· {count} match{'' if count == 1 else 'es'}[/]" if count else ""
+        )
+        return f"[bold]{_escape_markup(label)}[/]{matches}{timestamp}"
 
     def active_match_row(self) -> int | None:
-        """Rendered row containing the active match within this widget."""
+        """Rendered row containing the active match within this widget.
+
+        Measured against what is actually on screen. Collapsed, that is the
+        preview -- so the height is computed over a bounded string rather than
+        over the megabyte behind it, and the answer describes the rows the
+        reader can see rather than the ones they cannot.
+        """
         if self._active_match_span is None or self.size.width <= 0:
             return None
-        start, _ = self._active_match_span
-        prefix = f"{self._header_markup()}\n{_escape_markup(self.entry.text[:start])}"
+        text, offset, _ = self._visible_text()
+        start = self._active_match_span[0] - offset
+        if not 0 <= start <= len(text):
+            return None
+        elision = "[dim]…[/] " if offset else ""
+        prefix = f"{self._header_markup()}\n{elision}{_escape_markup(text[:start])}"
         return max(
             0,
             Content.from_markup(prefix).get_height(self.styles, self.size.width) - 1,
@@ -2102,11 +2149,16 @@ class SessionBrowser(App):
             for widget in self._entry_widgets:
                 start, end = self._entry_spans[widget.entry_index]
                 if start <= offset < end:
-                    if widget.collapsed:
-                        widget.collapsed = False
-                        widget._refresh_content()
-                    # Updating or expanding a Static can change both its
-                    # wrapped height and every following widget's position.
+                    # Deliberately no expansion here. Unfolding the entry to
+                    # reach a match inside it put the whole block on screen --
+                    # up to millions of characters -- to show one line of it,
+                    # and it undid an explicit collapse to do that. The widget
+                    # has already been handed the new active span and has
+                    # moved its preview onto it, so the match is on screen
+                    # either way; all that is left is to scroll to it.
+                    #
+                    # Updating a Static can still change both its wrapped
+                    # height and every following widget's position.
                     # Resolve the exact rendered row only after that layout
                     # has settled; scrolling merely to the entry's top leaves
                     # matches deep inside a long entry off-screen.

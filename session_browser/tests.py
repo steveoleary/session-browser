@@ -3285,7 +3285,8 @@ class TestStructuredTranscript:
             assert output.collapsed is True
             rendered = str(output.render())
             assert "then ran /goal on it" in rendered
-            assert "1 match here" in rendered
+            assert "1 match" in rendered
+            assert "showing match 1 of 1" in rendered
             assert "first line" not in rendered
 
     async def test_collapsed_entry_without_matches_previews_first_line(self):
@@ -3305,7 +3306,7 @@ class TestStructuredTranscript:
             assert output.collapsed is True
             rendered = str(output.render())
             assert "first line" in rendered
-            assert "match here" not in rendered
+            assert "showing match" not in rendered
 
     async def test_search_keeps_flat_buffer_and_reuses_widgets(self):
         from session_browser.app import TranscriptEntryWidget
@@ -3326,7 +3327,10 @@ class TestStructuredTranscript:
             # Typing a query updates existing widgets; it does not rebuild the
             # structured transcript or rescan each entry independently.
             assert list(app.query(TranscriptEntryWidget)) == original_widgets
-            assert original_widgets[-1].collapsed is False
+            # And the match being the active one is not a reason to unfold the
+            # block it sits in: the preview moves onto it instead.
+            assert original_widgets[-1].collapsed is True
+            assert "searchable-tail" in str(original_widgets[-1].render())
 
     async def test_match_navigation_scrolls_to_match_inside_long_entry(self):
         """n/N target the rendered match row, not merely its entry widget."""
@@ -3379,6 +3383,186 @@ class TestStructuredTranscript:
             await pilot.pause()
             assert app._match_idx == 0
             assert active_match_is_visible()
+
+    def _tool_block_transcript(
+        self, session: Session, kind: str = "output", copies: int = 3
+    ) -> Transcript:
+        """A tool block far past the fold with *copies* matches spread through it."""
+        chunk = "\n".join(f"line {index} " + "z" * 90 for index in range(12))
+        body = chunk.join(
+            f"\noccurrence {number} of quokka here\n" for number in range(copies)
+        )
+        return Transcript(
+            session,
+            [
+                TranscriptEntry("user", "look for quokka"),
+                TranscriptEntry(
+                    "tool",
+                    f"opening line of the block\n{chunk}{body}{chunk}",
+                    metadata={"kind": kind, "tool": "Bash"},
+                ),
+            ],
+        )
+
+    async def test_long_tool_calls_collapse_like_long_outputs(self):
+        """A call is as unbounded as an output, and used not to collapse.
+
+        Only ``kind == "output"`` was collapsible, so a 90,000-character
+        command arrived fully expanded however little of it anyone wanted.
+        """
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test() as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._tool_block_transcript(fake[0], kind="call"))
+            await pilot.pause()
+
+            call = list(app.query(TranscriptEntryWidget))[-1]
+            assert call.collapsible is True
+            assert call.collapsed is True
+            assert "chars hidden" in str(call.render())
+
+            call.action_toggle_collapsed()
+            assert call.collapsed is False
+            assert "occurrence 2 of quokka here" in str(call.render())
+
+    async def test_navigating_matches_in_a_tool_block_moves_the_preview(self):
+        """n/N inside one collapsed block: the preview follows, the fold holds.
+
+        The old behaviour expanded the entry the moment its match became
+        active, which put the entire block on screen to show one line of it --
+        and did so by discarding a collapse the reader had not asked to undo.
+        """
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._tool_block_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("quokka")
+            await pilot.pause()
+
+            block = list(app.query(TranscriptEntryWidget))[-1]
+            # Four matches: the user entry's, then three in the block.
+            assert len(app._matches) == 4
+            assert app._match_idx == 0
+
+            def preview() -> str:
+                assert block.collapsed is True, "navigation unfolded the block"
+                return str(block.render())
+
+            for occurrence in (0, 1, 2):
+                app.action_next_match()
+                await pilot.pause()
+                rendered = preview()
+                assert f"showing match {occurrence + 1} of 3" in rendered
+                assert f"occurrence {occurrence} of quokka here" in rendered
+
+            for occurrence in (1, 0):
+                app.action_prev_match()
+                await pilot.pause()
+                rendered = preview()
+                assert f"showing match {occurrence + 1} of 3" in rendered
+                assert f"occurrence {occurrence} of quokka here" in rendered
+
+            # Wrapping back past the block, onto the match in the user entry:
+            # no active match here any more, so the preview falls back to the
+            # first one rather than to the opening line.
+            app.action_prev_match()
+            await pilot.pause()
+            assert app._match_idx == 0
+            rendered = preview()
+            assert "showing match 1 of 3" in rendered
+            assert "opening line of the block" not in rendered
+
+    async def test_an_explicit_expansion_survives_navigation(self):
+        """Enter is a decision; n/N must not overrule it in either direction."""
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._tool_block_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("quokka")
+            await pilot.pause()
+
+            block = list(app.query(TranscriptEntryWidget))[-1]
+            block.action_toggle_collapsed()
+            assert block.collapsed is False
+            for _ in range(4):
+                app.action_next_match()
+                await pilot.pause()
+                assert block.collapsed is False
+
+            block.action_toggle_collapsed()
+            assert block.collapsed is True
+            for _ in range(4):
+                app.action_prev_match()
+                await pilot.pause()
+                assert block.collapsed is True
+
+    async def test_the_header_names_the_block_and_counts_its_matches(self):
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test() as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._tool_block_transcript(fake[0]))
+            await pilot.pause()
+            app._do_session_search("quokka")
+            await pilot.pause()
+
+            rendered = str(list(app.query(TranscriptEntryWidget))[-1].render())
+            assert "Tool output: Bash" in rendered
+            assert "3 matches" in rendered
+            assert "chars hidden" in rendered
+            assert "Enter/click to expand" in rendered
+
+    async def test_navigating_a_megabyte_block_builds_only_the_preview(self):
+        """The bound the whole feature rests on, asserted on a real one.
+
+        Rendered length is the proxy that matters: the widget builds the
+        markup it is about to display, so a step that stayed proportional to
+        the block would show up here as megabytes of it. The block below holds
+        a thousand matches, which is also the number the highlighter would
+        walk per step if it walked all of them.
+        """
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        filler = "q" * 2000
+        block = "".join(f"{filler}\nnumbat sighting {index}\n" for index in range(1000))
+        assert len(block) > 2_000_000
+        async with app.run_test(size=(120, 30)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(
+                Transcript(
+                    fake[0],
+                    [
+                        TranscriptEntry("user", "count the numbat sightings"),
+                        TranscriptEntry(
+                            "tool",
+                            block,
+                            metadata={"kind": "output", "tool": "Bash"},
+                        ),
+                    ],
+                )
+            )
+            await pilot.pause()
+            app._do_session_search("numbat")
+            await pilot.pause()
+
+            widget = list(app.query(TranscriptEntryWidget))[-1]
+            for _ in range(5):
+                app.action_next_match()
+                await pilot.pause()
+                assert widget.collapsed is True
+                assert len(str(widget.render())) < 1000
+                # And the scroll target is measured over the preview too.
+                assert widget.active_match_row() is not None
 
     async def test_structural_navigation_jumps_entries_and_tools(self):
         from session_browser.app import TranscriptEntryWidget
