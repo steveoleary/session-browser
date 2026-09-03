@@ -447,24 +447,34 @@ those refs' history rather than their tips.
 
 ## Bundled skill: `using-session-browser`
 
-`skills/using-session-browser/` is the **source of truth**. It is copy-managed
-by the skills repo's `scripts/install.sh` (listed in its
-`scripts/external-skills.txt`), which places real copies — not symlinks — in
-`~/.agents/skills/` (Codex + OpenCode) and `~/.claude/skills/` (Claude Code).
-**Never edit either copy.**
+`skills/using-session-browser/` is the **source of truth**. Runtime copies live
+in `~/.agents/skills/` (Codex + OpenCode) and `~/.claude/skills/` (Claude Code),
+and are overwritten wholesale by the installer. **Never edit either copy.**
 
 ### After changing the skill, sync it
 
-`install.sh` copies the skill's git-tracked files straight from this checkout,
-and assumes the standard layout (this repo at `~/Projects/session-browser`, the
-skills repo at `~/Projects/skills`):
+This skill rides `npx skills`, and did not always: it was copy-managed out of
+`~/Projects/skills` until `steveoleary/session-browser` went public, at which
+point the skills repo migrated it to the npx lane — that repo's lane rule is
+*whether npx can clone the source*, so a public home repo means npx. Its row is
+gone from `scripts/external-skills.txt`, and `install.sh` now refuses it.
 
 ```bash
-git commit -am "skill: <message>" && git push        # persist + reach other machines (topgrade)
-~/Projects/skills/scripts/install.sh using-session-browser   # copy into both stores + verify
+git commit -am "skill: <message>" && git push   # npx reads GitHub, so push FIRST
+npx skills update --global                      # or: npx skills add \
+                                                #   steveoleary/session-browser \
+                                                #   -s using-session-browser -g -y
 ```
 
-It byte-verifies each store; re-check any time with `--check
-using-session-browser`. This is the **only** way to sync — never `npx skills
-add`. Start a fresh agent session afterward so stale injected skill text isn't
-reused.
+**The push is not optional any more.** The old copy path read this working
+tree, so an uncommitted edit installed fine; npx reads GitHub, so an unpushed
+change simply does not reach either store. That trade was accepted knowingly
+when the repo went public — the other half of it is that
+`install.sh --check` no longer byte-verifies this skill, so verify by hand:
+
+```bash
+diff -r skills/using-session-browser ~/.claude/skills/using-session-browser
+diff -r skills/using-session-browser ~/.agents/skills/using-session-browser
+```
+
+Start a fresh agent session afterward so stale injected skill text isn't reused.
