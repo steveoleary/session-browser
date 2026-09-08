@@ -112,7 +112,9 @@ where they disagree, `--help` describes the binary you are actually running.
    Check each snippet's `role` (trap 2) and use `first_match`/`last_match` as
    entry indices for step 5.
 5. **Retrieve only what you need.** Read a window with `get ID --entries A:B`,
-   `--tail N` or `--head N`. To read one voice, filter by role: `--role user`
+   `--tail N` or `--head N`, or `--brief` for the usual pair — what it was
+   asked to do and where it got to — in one read. To read one voice, filter by
+   role: `--role user`
    is the intent trail, `--role assistant` gives conclusions without tool noise,
    `--role error` the failed calls. `--role user` is *human speech only*;
    interrupt markers, task notifications and the auto-written summary at the top
@@ -135,8 +137,8 @@ where they disagree, `--help` describes the binary you are actually running.
 | Inspect matches | `session-browser search "rare phrase" --mode snippets --context 120 --limit 5` |
 | Rank by hit count, not recency | add `--sort matches` |
 | Read the matched region | `session-browser get ID --entries 38:60` |
-| How a session ended | `session-browser get ID --role assistant --tail 20` |
-| What the user asked for | `session-browser get ID --role user` |
+| What was asked for, and how it ended | `session-browser get ID --brief` |
+| Either half on its own | `--role user`, or `--role assistant --tail 20` |
 | Original intent in a compacted session | `session-browser get ID --role system --head 3` |
 | Triage several candidates at once | `session-browser get ID1 ID2 ID3 --role user --head 3` |
 | Whole transcript | `session-browser get ID --output build/session.md` |

@@ -185,6 +185,7 @@ def render_markdown(
     entry_range: tuple[int, int] | None = None,
     entry_indices: list[int] | None = None,
     roles: list[str] | None = None,
+    brief: tuple[int, int] | None = None,
 ) -> str:
     """Markdown document: metadata header + transcript body.
 
@@ -193,10 +194,19 @@ def render_markdown(
     *roles*/*entry_indices* describe a role-filtered transcript (get
     --role): the header names the roles and each block carries its
     absolute entry index.
+    *brief* is the two windows get --brief asked for. It is stated even when
+    a session had fewer turns than that to give: "the first 6 user turns"
+    and "every user turn there was" look identical in the body, and only the
+    header can tell them apart.
     """
     s = transcript.session
     total = total_entries if total_entries is not None else len(transcript.entries)
-    if roles is not None:
+    if brief is not None:
+        entries_line = (
+            f"- Entries: {len(transcript.entries)} of {total} "
+            f"(brief: first {brief[0]} user, last {brief[1]} assistant)"
+        )
+    elif roles is not None:
         entries_line = (
             f"- Entries: {len(transcript.entries)} of {total} "
             f"(roles: {', '.join(roles)})"
@@ -221,7 +231,9 @@ def render_markdown(
     ]
     if transcript.warnings:
         lines.append(f"- Parse warnings: {len(transcript.warnings)}")
-    if roles is not None and not transcript.entries:
+    if brief is not None and not transcript.entries:
+        body = "(no user or assistant turns in this session)"
+    elif roles is not None and not transcript.entries:
         body = f"(no entries with roles: {', '.join(roles)})"
     else:
         body = render_text(transcript, entry_indices=entry_indices)

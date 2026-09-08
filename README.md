@@ -134,6 +134,9 @@ session-browser search --here --mode snippets "pytest fixture"
 # Retrieve a session by canonical id, raw id, or unique prefix
 session-browser get claude:7645 --output handoff.md
 
+# What a session was asked to do and where it got to, in one read
+session-browser get claude:7645 --brief
+
 # Summarise providers, activity, and working directories
 session-browser stats --here
 ```

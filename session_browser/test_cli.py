@@ -160,6 +160,7 @@ class TestHelpOutputContracts:
             ("get", "claude:aaa", "--format", "json"),
             ("get", "claude:aaa", "--entries", "0", "--format", "json"),
             ("get", "claude:aaa", "--role", "user", "--format", "json"),
+            ("get", "claude:aaa", "--brief", "1:1", "--format", "json"),
         ):
             code, out, _ = cli(*argv)
             assert code == 0
@@ -190,6 +191,9 @@ class TestHelpOutputContracts:
         assert contract["batch"] == set(batch)
         assert contract["session"] == _key_union(
             payload["session"] for payload in singles
+        )
+        assert contract["brief"] == _key_union(
+            payload["brief"] for payload in singles if "brief" in payload
         )
         assert contract["entry"] == _key_union(
             entry for payload in singles for entry in payload["entries"]
@@ -1716,6 +1720,196 @@ class TestGetEntryWindow:
         body = target.read_text()
         assert "- Entries: 1–1 of 2" in body
         assert "alpha wombat message" not in body
+
+
+class TestGetBrief:
+    """`get --brief` answers "what was asked for and how did it end" in one
+    call — the two-invocation pattern that dominates real usage."""
+
+    @pytest.fixture
+    def talky_cli(self, monkeypatch, capsys, tmp_path):
+        """Eight turns each way, plus tool noise between them."""
+        f = tmp_path / "talky.jsonl"
+        lines = []
+        for i in range(8):
+            lines.append(
+                {
+                    "type": "user",
+                    "message": {"content": f"ask {i}"},
+                    "timestamp": "2026-06-01T10:00:00Z",
+                }
+            )
+            lines.append(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": f"answer {i}"},
+                            {
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": f"echo {i}"},
+                            },
+                        ]
+                    },
+                }
+            )
+        f.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+        sessions = [
+            Session(
+                id="talky",
+                provider="claude",
+                summary="talky",
+                updated_at="2026-06-01T10:00:00+00:00",
+                content_path=str(f),
+            )
+        ]
+
+        def run(*argv: str):
+            monkeypatch.setattr(
+                "session_browser.cli.discover_all", lambda *a, **k: sessions
+            )
+            code = run_cli(list(argv))
+            captured = capsys.readouterr()
+            return code, captured.out, captured.err
+
+        return run
+
+    def test_brief_returns_the_first_users_and_the_last_assistants(self, talky_cli):
+        code, out, _ = talky_cli(
+            "get", "claude:talky", "--brief", "2:3", "--format", "json"
+        )
+        assert code == 0
+        data = json.loads(out)
+        assert data["brief"] == {"intent": 2, "ending": 3}
+        assert [(e["role"], e["text"]) for e in data["entries"]] == [
+            ("user", "ask 0"),
+            ("user", "ask 1"),
+            ("assistant", "answer 5"),
+            ("assistant", "answer 6"),
+            ("assistant", "answer 7"),
+        ]
+
+    def test_brief_is_exactly_the_two_calls_it_replaces(self, talky_cli):
+        """The whole claim of the flag, asserted rather than assumed."""
+        _, one, _ = talky_cli(
+            "get", "claude:talky", "--role", "user", "--head", "2", "--format", "json"
+        )
+        _, two, _ = talky_cli(
+            "get",
+            "claude:talky",
+            "--role",
+            "assistant",
+            "--tail",
+            "3",
+            "--format",
+            "json",
+        )
+        _, brief, _ = talky_cli(
+            "get", "claude:talky", "--brief", "2:3", "--format", "json"
+        )
+        separate = [
+            (e["entry_index"], e["role"], e["text"])
+            for payload in (json.loads(one), json.loads(two))
+            for e in payload["entries"]
+        ]
+        combined = [
+            (e["entry_index"], e["role"], e["text"])
+            for e in json.loads(brief)["entries"]
+        ]
+        assert combined == sorted(separate)
+
+    def test_entries_come_back_in_transcript_order_with_absolute_indices(
+        self, talky_cli
+    ):
+        code, out, _ = talky_cli(
+            "get", "claude:talky", "--brief", "3:2", "--format", "json"
+        )
+        assert code == 0
+        indices = [e["entry_index"] for e in json.loads(out)["entries"]]
+        assert indices == sorted(indices)
+        # Absolute: each turn is user + assistant + tool call, so the kept
+        # blocks are three apart and the tool entries between them are
+        # counted rather than renumbered away.
+        assert indices == [0, 3, 6, 19, 22]
+
+    def test_a_short_session_returns_every_turn_it_has(self, talky_cli):
+        """Asking for more than exists must not wrap the slice round.
+
+        A computed start of len - N goes negative below N and silently
+        returns the last few instead of all of them; a real 7-assistant
+        session asked for 8 came back with 1.
+        """
+        code, out, _ = talky_cli(
+            "get", "claude:talky", "--brief", "99:99", "--format", "json"
+        )
+        assert code == 0
+        roles = [e["role"] for e in json.loads(out)["entries"]]
+        assert roles.count("user") == 8
+        assert roles.count("assistant") == 8
+
+    def test_one_sided_briefs_are_allowed(self, talky_cli):
+        _, ending_only, _ = talky_cli(
+            "get", "claude:talky", "--brief", "0:1", "--format", "json"
+        )
+        assert [e["role"] for e in json.loads(ending_only)["entries"]] == ["assistant"]
+        _, intent_only, _ = talky_cli(
+            "get", "claude:talky", "--brief", "1:0", "--format", "json"
+        )
+        assert [e["role"] for e in json.loads(intent_only)["entries"]] == ["user"]
+
+    def test_bare_brief_uses_the_measured_default(self, talky_cli):
+        code, out, _ = talky_cli("get", "claude:talky", "--brief", "--format", "json")
+        assert code == 0
+        assert json.loads(out)["brief"] == {"intent": 6, "ending": 8}
+
+    def test_text_header_states_both_windows(self, talky_cli):
+        code, out, _ = talky_cli("get", "claude:talky", "--brief", "2:3")
+        assert code == 0
+        # Stated even though the body cannot show it: "the first 2 user turns"
+        # and "every user turn there was" render identically.
+        assert "- Entries: 5 of 24 (brief: first 2 user, last 3 assistant)" in out
+        assert "[0] User: ask 0" in out
+        assert "[22] Assistant: answer 7" in out
+        assert "echo 3" not in out
+
+    def test_brief_refuses_to_share_a_call_with_role(self, talky_cli):
+        code, _, err = talky_cli("get", "claude:talky", "--brief", "--role", "user")
+        assert code != 0
+        assert "--brief chooses its own roles" in err
+
+    def test_brief_refuses_to_share_a_call_with_another_window(self, talky_cli):
+        """argparse owns this one: --brief joins the existing window group."""
+        with pytest.raises(SystemExit) as exc:
+            talky_cli("get", "claude:talky", "--brief", "--tail", "3")
+        assert exc.value.code == 2
+
+    def test_a_malformed_spec_says_what_it_wanted(self, talky_cli):
+        for spec in ("6", "a:b", "6:", ":8"):
+            code, _, err = talky_cli("get", "claude:talky", "--brief", spec)
+            assert code != 0, spec
+            assert "invalid --brief" in err, spec
+
+    def test_asking_for_nothing_is_refused_rather_than_answered_empty(self, talky_cli):
+        code, _, err = talky_cli("get", "claude:talky", "--brief", "0:0")
+        assert code != 0
+        assert "asks for nothing" in err
+
+    def test_brief_reads_the_transcript_once(self, talky_cli, monkeypatch):
+        """The point of the flag: one parse where the pattern costs two."""
+        import session_browser.cli as cli_mod
+
+        real = cli_mod.load_transcript
+        calls = []
+
+        def counted(session):
+            calls.append(session.id)
+            return real(session)
+
+        monkeypatch.setattr(cli_mod, "load_transcript", counted)
+        code, _, _ = talky_cli("get", "claude:talky", "--brief", "2:3")
+        assert code == 0
+        assert len(calls) == 1
 
 
 class TestGetRoleFilter:
