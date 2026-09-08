@@ -359,6 +359,110 @@ class TestHelpOutputContracts:
         assert contract["top_cwd"] == _key_union(
             row for payload in payloads for row in payload["top_cwds"]
         )
+        assert contract["subagents"] == _key_union(
+            payload["subagents"] for payload in payloads
+        )
+
+    def test_stats_counts_subagents_and_declares_their_shape(
+        self, monkeypatch, capsys, sessions, tmp_path
+    ):
+        """The kinds group needs a corpus that actually has one.
+
+        Declared-but-never-produced is exactly what the contract tests exist
+        to catch, so this runs stats over a corpus carrying a linked child,
+        an unlinked one, and a provider that exposes no link at all.
+        """
+        f = tmp_path / "sub.jsonl"
+        write_claude(f, ["some work"])
+        corpus = [
+            Session(
+                id="root",
+                provider="codex",
+                content_path=str(f),
+                updated_at="2026-06-01T10:00:00+00:00",
+                parent_id="",
+                subagent_kind="",
+            ),
+            Session(
+                id="child",
+                provider="codex",
+                content_path=str(f),
+                updated_at="2026-06-01T10:01:00+00:00",
+                parent_id="root",
+                subagent_kind="thread_spawn",
+            ),
+            Session(
+                id="loner",
+                provider="codex",
+                content_path=str(f),
+                updated_at="2026-06-01T10:02:00+00:00",
+                parent_id="",
+                subagent_kind="guardian",
+            ),
+            # Claude exposes no link at all: neither known to be a subagent
+            # nor known not to be, and it must not be counted as either.
+            Session(
+                id="opaque",
+                provider="claude",
+                content_path=str(f),
+                updated_at="2026-06-01T10:03:00+00:00",
+            ),
+        ]
+        monkeypatch.setattr("session_browser.cli.discover_all", lambda *a, **k: corpus)
+        assert run_cli(["stats", "--format", "json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+
+        block = payload["subagents"]
+        assert block["total"] == 2
+        assert block["linked"] == 1
+        assert block["unlinked"] == 1
+        assert block["unknown"] == 1
+        assert block["kinds"] == [
+            {"kind": "guardian", "count": 1},
+            {"kind": "thread_spawn", "count": 1},
+        ]
+        # total is not double counted: linked + unlinked are subagents, and
+        # unknown is a separate class, so neither is a share of the other.
+        assert block["linked"] + block["unlinked"] == block["total"]
+
+        contract, _ = _help_contract("stats", capsys)
+        assert contract["subagents"] == set(block)
+        assert contract["subagent_kind"] == _key_union(block["kinds"])
+
+    def test_the_text_dashboard_names_the_subagents(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        f = tmp_path / "sub.jsonl"
+        write_claude(f, ["some work"])
+        corpus = [
+            Session(
+                id="root",
+                provider="codex",
+                content_path=str(f),
+                updated_at="2026-06-01T10:00:00+00:00",
+                parent_id="",
+                subagent_kind="",
+            ),
+            Session(
+                id="child",
+                provider="codex",
+                content_path=str(f),
+                updated_at="2026-06-01T10:01:00+00:00",
+                parent_id="root",
+                subagent_kind="thread_spawn",
+            ),
+        ]
+        monkeypatch.setattr("session_browser.cli.discover_all", lambda *a, **k: corpus)
+        assert run_cli(["stats"]) == 0
+        out = capsys.readouterr().out
+        assert "subagents · 1 of 2" in out
+        assert "1 linked to a parent" in out
+        assert "1 thread_spawn" in out
+
+    def test_no_subagents_means_no_dashboard_section(self, cli):
+        code, out, _ = cli("stats")
+        assert code == 0
+        assert "subagents" not in out
 
 
 class TestList:
@@ -1785,6 +1889,99 @@ class TestGetEntryWindow:
         body = target.read_text()
         assert "- Entries: 1–1 of 2" in body
         assert "alpha wombat message" not in body
+
+
+class TestSubagentKeys:
+    """parent_id and subagent_kind reach every command that emits a session."""
+
+    @pytest.fixture
+    def linked_cli(self, monkeypatch, capsys, tmp_path):
+        # Codex-format, because the sessions below are Codex and the parser
+        # dispatches on provider — a Claude file under a codex provider
+        # parses to nothing and search silently finds no results.
+        f = tmp_path / "linked.jsonl"
+        write_codex(f, ["a wombat brief"])
+        corpus = [
+            Session(
+                id="root",
+                provider="codex",
+                summary="the orchestrator",
+                content_path=str(f),
+                updated_at="2026-06-01T10:00:00+00:00",
+                parent_id="",
+                subagent_kind="",
+            ),
+            Session(
+                id="child",
+                provider="codex",
+                summary="the explorer",
+                content_path=str(f),
+                updated_at="2026-06-01T10:01:00+00:00",
+                parent_id="root",
+                subagent_kind="thread_spawn",
+            ),
+            Session(
+                id="opaque",
+                provider="claude",
+                summary="a provider with no link",
+                content_path=str(f),
+                updated_at="2026-06-01T10:02:00+00:00",
+            ),
+        ]
+
+        def run(*argv: str):
+            monkeypatch.setattr(
+                "session_browser.cli.discover_all", lambda *a, **k: corpus
+            )
+            code = run_cli(list(argv))
+            captured = capsys.readouterr()
+            return code, captured.out, captured.err
+
+        return run
+
+    def test_list_names_the_parent_and_the_kind(self, linked_cli):
+        code, out, _ = linked_cli("list", "--format", "json")
+        assert code == 0
+        rows = {r["session_id"]: r for r in json.loads(out)["sessions"]}
+        assert rows["child"]["parent_id"] == "root"
+        assert rows["child"]["subagent_kind"] == "thread_spawn"
+
+    def test_null_means_the_provider_cannot_say_not_that_there_is_no_parent(
+        self, linked_cli
+    ):
+        """The distinction the three-state shape exists to protect.
+
+        Claude's subagent transcripts are not discovered at all, so reporting
+        "" — the provider looked and there is no parent — would be a claim we
+        cannot make. An agent filtering for roots on `parent_id == ""` must
+        not silently exclude every Claude and Pi session.
+        """
+        code, out, _ = linked_cli("list", "--format", "json")
+        assert code == 0
+        rows = {r["session_id"]: r for r in json.loads(out)["sessions"]}
+        assert rows["opaque"]["parent_id"] is None
+        assert rows["opaque"]["subagent_kind"] is None
+        # And "" is the other thing entirely: asked, and the answer is no.
+        assert rows["root"]["parent_id"] == ""
+        assert rows["root"]["subagent_kind"] == ""
+
+    def test_search_and_get_carry_them_too(self, linked_cli):
+        code, out, _ = linked_cli("search", "wombat", "--format", "json")
+        assert code == 0
+        results = {r["session_id"]: r for r in json.loads(out)["results"]}
+        assert results["child"]["parent_id"] == "root"
+
+        code, out, _ = linked_cli("get", "codex:child", "--format", "json")
+        assert code == 0
+        assert json.loads(out)["session"]["subagent_kind"] == "thread_spawn"
+
+    def test_the_contract_says_what_the_three_states_mean(self, linked_cli, capsys):
+        for command in ("list", "search", "get"):
+            with pytest.raises(SystemExit):
+                run_cli([command, "--help"])
+            help_text = " ".join(capsys.readouterr().out.split())
+            assert "three-state" in help_text, command
+            assert "null when the provider exposes no parent-child link" in help_text
 
 
 class TestGetBrief:

@@ -50,6 +50,8 @@ _SESSION_KEYS = (
     "created_at",
     "updated_at",
     "duration_seconds",
+    "parent_id",
+    "subagent_kind",
 )
 _ENTRY_KEYS = ("entry_index", "role", "text", "timestamp", "metadata")
 
@@ -99,6 +101,16 @@ _LIST_TEXT_COLUMNS = ("id", "updated", "entries", "duration", "cwd", "summary")
 _SEARCH_TEXT_COLUMNS = ("id", "match_count", "updated", "summary")
 
 
+# One sentence, in all three commands that emit a session, because the
+# distinction is exactly the one a reader gets wrong: null is not "no parent".
+_SUBAGENT_CONTRACT = (
+    '"parent_id"/"subagent_kind" are three-state: null when the provider '
+    'exposes\nno parent-child link at all (Claude, Pi), "" when it does and '
+    "this session\nis not a subagent, otherwise the spawning session's id and "
+    "the kind."
+)
+
+
 def _text_column_contract(label: str, columns: tuple[str, ...], extra: str) -> str:
     return (
         f"Text columns [{label}]: {', '.join(columns)}\n"
@@ -112,7 +124,9 @@ Default format: json. Text emits one tab-separated session per line.
 {text}
 "warnings" and session "offset" are conditional. "total_entries" is null
 when a transcript is unreadable; counts still classifies every returned row.
+{subagents}
 """.format(
+    subagents=_SUBAGENT_CONTRACT,
     text=_text_column_contract(
         "list",
         _LIST_TEXT_COLUMNS,
@@ -134,11 +148,13 @@ Single JSON example: {{"session": {{"id": "claude:abc", ...}},
 Batch JSON example: {{"sessions": [{{"session": {{"id": "claude:abc", ...}},
   "entries": [...], ...}}], "skipped": [{{"id": "claude:bad", "error": "..."}}]}}
 {keys}
+{subagents}
 "entry_range", "roles", "brief" and "clip" are conditional. Every entry has
 all entry keys; entry_index is absolute and matches search snippets. A batch's
 "sessions" items have exactly the single payload shape, not list rows.
 With --output --format json, stdout is the output_confirmation shape.
 """.format(
+    subagents=_SUBAGENT_CONTRACT,
     keys=_json_key_contract(
         (
             "single",
@@ -161,7 +177,7 @@ With --output --format json, stdout is the output_confirmation shape.
         ("skipped", ("id", "error")),
         ("output_confirmation", ("written", "id", "warnings")),
         *_ERROR_GROUPS,
-    )
+    ),
 )
 
 _SEARCH_RESULT_KEYS = _SESSION_KEYS + (
@@ -182,6 +198,7 @@ Default format: json; default mode: snippets. Text emits tab-separated result
 headers. ids omits snippets/entries; snippets adds snippets; full adds entries.
 {keys}
 {text}
+{subagents}
 Result keys are the union across stdout and manifest variants: "file" exists
 only in full-mode manifests; other conditional keys depend on matches, modes,
 warnings, and --around. A multi-phrase snippet adds "query". "role" preserves
@@ -189,6 +206,7 @@ provenance: tool hits are observed text, not necessarily agent-authored text.
 With --output-dir, stdout is artifact_confirmation and manifest.json uses the
 artifact_manifest envelope.
 """.format(
+    subagents=_SUBAGENT_CONTRACT,
     text=_text_column_contract(
         "search",
         _SEARCH_TEXT_COLUMNS,
@@ -232,6 +250,9 @@ Default format: text (human dashboard). JSON must be requested with --format jso
 counts discovered sessions without opening transcripts. activity.counts has one
 bucket per local calendar day from start through end. top_cwds helps validate
 whether a --repo or --cwd substring matched more projects than intended.
+subagents decomposes total: "linked" name a parent, "unlinked" are subagents
+whose provider recorded none, and "unknown" are sessions from a provider that
+exposes no link, so they are neither known to be subagents nor known not to be.
 """.format(
     keys=_json_key_contract(
         (
@@ -242,6 +263,7 @@ whether a --repo or --cwd substring matched more projects than intended.
                 "transcript_health",
                 "activity",
                 "providers",
+                "subagents",
                 "top_cwds",
                 "oldest",
                 "newest",
@@ -251,6 +273,8 @@ whether a --repo or --cwd substring matched more projects than intended.
         ("filters", _FILTER_KEYS),
         ("activity", ("days", "start", "end", "counts")),
         ("provider", ("provider", "count", "percent", "updated_at")),
+        ("subagents", ("total", "linked", "unlinked", "unknown", "kinds")),
+        ("subagent_kind", ("kind", "count")),
         ("top_cwd", ("cwd", "count")),
         *_ERROR_GROUPS,
     )
@@ -1965,8 +1989,23 @@ def cmd_stats(args) -> int:
     provider_last: dict[str, datetime] = {}
     cwd_counts: dict[str, int] = {}
     times: list[datetime] = []
+    # Subagents are 9.3% of a real corpus and share their parent's cwd
+    # exactly, so no other filter separates them and nothing here would
+    # otherwise say they exist. Counted rather than hidden: sampling
+    # parent/child pairs, a median 49% of a child's vocabulary is absent
+    # from its parent, so they are real work and not duplicates of it.
+    subagent_kinds: dict[str, int] = {}
+    linked = unlinked = unknown = 0
     for s in sessions:
         provider_counts[s.provider] = provider_counts.get(s.provider, 0) + 1
+        if s.subagent_kind is None:
+            unknown += 1
+        elif s.subagent_kind:
+            subagent_kinds[s.subagent_kind] = subagent_kinds.get(s.subagent_kind, 0) + 1
+            if s.parent_id:
+                linked += 1
+            else:
+                unlinked += 1
         cwd = (s.cwd or "").strip()
         if cwd:
             cwd_counts[cwd] = cwd_counts.get(cwd, 0) + 1
@@ -2019,6 +2058,22 @@ def cmd_stats(args) -> int:
         "counts": counts,
     }
     payload["providers"] = providers
+    payload["subagents"] = {
+        "total": linked + unlinked,
+        # Of those, how many name the session that spawned them. The rest
+        # are subagents whose provider recorded no parent -- Codex "review"
+        # and "guardian" threads carry none anywhere, so "is a subagent" and
+        # "has a known parent" have to stay separate numbers.
+        "linked": linked,
+        "unlinked": unlinked,
+        # Sessions from a provider that exposes no link at all, so they are
+        # neither known to be subagents nor known not to be.
+        "unknown": unknown,
+        "kinds": [
+            {"kind": k, "count": n}
+            for k, n in sorted(subagent_kinds.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
+    }
     payload["top_cwds"] = [{"cwd": c, "count": n} for c, n in top_cwds[: args.top]]
     payload["oldest"] = min(times).isoformat() if times else None
     payload["newest"] = max(times).isoformat() if times else None
@@ -2054,6 +2109,20 @@ def _print_stats_text(payload: dict, *, distinct_cwds: int) -> None:
             f"  {p['provider']:<{name_w}}  {bar:<{_BAR_WIDTH}}  "
             f"{p['count']:>5}  {pct:>3}%  last {last}"
         )
+
+    sub = payload["subagents"]
+    if sub["total"]:
+        print()
+        kinds = ", ".join(f"{k['count']} {k['kind']}" for k in sub["kinds"][:4])
+        print(f"subagents · {sub['total']} of {total}")
+        line = f"  {sub['linked']} linked to a parent"
+        if sub["unlinked"]:
+            line += f" · {sub['unlinked']} with none recorded"
+        print(line)
+        if kinds:
+            print(f"  {kinds}")
+        if sub["unknown"]:
+            print(f"  {sub['unknown']} from providers that expose no link")
 
     act = payload["activity"]
     day_peak = max(act["counts"], default=0)
