@@ -9,6 +9,7 @@ import subprocess
 import sys
 from bisect import bisect_left
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from functools import wraps
 from typing import ClassVar, NamedTuple
 
@@ -80,6 +81,135 @@ _FILTER_DEBOUNCE = 0.15
 _DISPLAY_WINDOW = 200_000
 
 
+class RowMeta(NamedTuple):
+    """Where one row sits in the session tree."""
+
+    #: 0 for a top-level row, 1 for a subagent of one, 2+ for deeper nesting.
+    depth: int
+    #: Whether this row has children *in the current result set*.
+    has_children: bool
+    #: How many, counting only direct children.
+    child_count: int
+    #: A subagent whose parent is not on screen. It still must not render as
+    #: an ordinary session: 11 of the 74 Codex subagents on this machine have
+    #: no parent recorded anywhere, and a filter can hide the parent of any
+    #: of the rest. Indentation cannot say this -- there is nothing to indent
+    #: under -- so the row says it in words instead.
+    orphaned: bool
+
+
+def _mark_seen(kids, children: dict[str, list[Session]], seen: set[str]) -> None:
+    """Record a collapsed subtree as accounted for, emitting nothing."""
+    stack = list(kids)
+    while stack:
+        node = stack.pop()
+        if node.id in seen:
+            continue
+        seen.add(node.id)
+        stack.extend(children.get(node.id, ()))
+
+
+def _tree_prefix(meta: RowMeta, collapsed: bool) -> str:
+    """The tree affordance for one row, ahead of the provider tag.
+
+    Indentation is applied to every nested row rather than only to leaves: a
+    subagent can spawn subagents, and a nested row that is also a parent
+    would otherwise render flush left and read as top-level. (agent-sessions
+    has the same note beside the same decision, having hit it.)
+
+    A parent shows a disclosure marker and its child count. An orphan -- a
+    subagent with no parent on screen -- gets a word instead, because there
+    is nothing to indent it under and an unmarked row would read as an
+    ordinary session.
+    """
+    pad = "  " * meta.depth
+    if meta.has_children:
+        return f"{pad}[dim]{'▸' if collapsed else '▾'}{meta.child_count}[/] "
+    if meta.orphaned:
+        return f"{pad}[dim]sub[/] "
+    return f"{pad}  " if meta.depth else pad
+
+
+def build_hierarchy(
+    sessions: Sequence[Session],
+    collapsed: AbstractSet[str] = frozenset(),
+    *,
+    enabled: bool = True,
+) -> tuple[list[Session], dict[str, RowMeta]]:
+    """Flatten *sessions* to parent-first order, with per-row metadata.
+
+    A flattened list rather than a nested structure, because that is what a
+    DataTable can render and because the tree is shallow: rows in order, each
+    carrying its depth. Prior art (agent-sessions' SubagentHierarchyBuilder)
+    reaches the same shape from a real GUI outline view, which is some
+    evidence it is the tree's natural flat form rather than a workaround.
+
+    Only sessions present in *sessions* can be parents. A child whose parent
+    was filtered out therefore stays at depth 0 and is marked ``orphaned``
+    rather than being hidden or silently promoted -- the alternative is a
+    subagent that reads as an ordinary session, which is exactly the
+    duplicate-looking-row confusion this exists to remove.
+
+    Parents keep their incoming order, so whatever sort produced *sessions*
+    still decides the top level; children follow their parent in that same
+    order.
+    """
+    if not enabled:
+        return list(sessions), {
+            s.id: RowMeta(0, False, 0, bool(s.subagent_kind)) for s in sessions
+        }
+    by_id = {s.id: s for s in sessions}
+    children: dict[str, list[Session]] = {}
+    roots: list[Session] = []
+    for s in sessions:
+        parent = s.parent_id or ""
+        if parent and parent in by_id and parent != s.id:
+            children.setdefault(parent, []).append(s)
+        else:
+            roots.append(s)
+    ordered: list[Session] = []
+    meta: dict[str, RowMeta] = {}
+    # Iterative, with an explicit seen-set: the parent link comes from another
+    # tool's metadata, so a cycle is a thing that can arrive on disk rather
+    # than a thing we can rule out. A cycle must cost a missing nesting, not
+    # a hung TUI.
+    seen: set[str] = set()
+
+    def walk(session: Session, depth: int) -> None:
+        if session.id in seen:
+            return
+        seen.add(session.id)
+        kids = children.get(session.id, ())
+        ordered.append(session)
+        meta[session.id] = RowMeta(
+            depth,
+            bool(kids),
+            len(kids),
+            depth == 0 and bool(session.subagent_kind),
+        )
+        if session.id in collapsed:
+            # Mark the hidden subtree seen without emitting it. Skipping this
+            # leaves those rows unvisited, and the cycle sweep below then
+            # re-adds every collapsed child at the bottom of the list --
+            # collapsing a parent would *move* its children rather than hide
+            # them, which is worse than not collapsing at all.
+            _mark_seen(kids, children, seen)
+            return
+        for kid in kids:
+            walk(kid, depth + 1)
+
+    for root in roots:
+        walk(root, 0)
+    # A cycle leaves its members unvisited; show them flat rather than lose
+    # them, since a session missing from the list is the one failure a
+    # browser must never have.
+    for s in sessions:
+        if s.id not in seen:
+            ordered.append(s)
+            meta[s.id] = RowMeta(0, False, 0, bool(s.subagent_kind))
+    return ordered, meta
+
+
 class _FilterPreset(NamedTuple):
     """One named reading of a transcript.
 
@@ -139,6 +269,8 @@ _EDIT_BLOCKED_ACTIONS = frozenset(
         "toggle_focus_mode",
         "toggle_matches_only",
         "cycle_entry_filter",
+        "toggle_children",
+        "toggle_tree",
         "show_help",
     }
 )
@@ -1025,6 +1157,7 @@ class ShortcutHelp(ModalScreen[None]):
 [bold]Find[/]       [cyan]/[/] search active pane    [cyan]n / N[/] next / previous match
            [cyan]s[/] find in session       [cyan]m[/] matching blocks only
            [cyan]p[/] this-project scope     [cyan]f[/] filter entries
+           [cyan]space[/] expand subagents   [cyan]T[/] flat / tree
 
 [bold]Layout[/]     [cyan]z[/] focus current pane    [cyan]Esc[/] step back
 
@@ -1166,6 +1299,8 @@ class SessionBrowser(App):
         Binding("E", "export_chat_file", "Export chat", show=False),
         Binding("m", "toggle_matches_only", "Matching blocks", show=False),
         Binding("f", "cycle_entry_filter", "Filter entries", show=False),
+        Binding("space", "toggle_children", "Expand/collapse", show=False),
+        Binding("T", "toggle_tree", "Tree view", show=False),
         Binding("n", "next_match", "Next match", show=False),
         Binding("N", "prev_match", "Prev match", show=False),
         Binding("J", "next_entry", "Next entry", show=False),
@@ -1222,6 +1357,13 @@ class SessionBrowser(App):
         self._projected_blocks: int = 0
         self._window_blocks: int = 0
         self._filter_query: str = ""
+        # Session ids whose subagents are hidden, and the global tree switch.
+        # Collapsing is per-parent; the switch is one control for the whole
+        # view, because "show me a flat list" is a thing people want as a
+        # mode, not something to reach row by row.
+        self._collapsed: set[str] = set()
+        self._tree: bool = True
+        self._row_meta: dict[str, RowMeta] = {}
         self._content_hits: dict[str, ContentHit] = {}
         # (normalized query, hit ids) of the last *completed* content
         # search. Extending a query can only shrink its hit set (any text
@@ -1738,9 +1880,15 @@ class SessionBrowser(App):
         rebuild_generation = self._table_rebuild_generation
         self._suppress_table_highlights = True
         table.clear()
+        ordered, self._row_meta = build_hierarchy(
+            self._filtered, self._collapsed, enabled=self._tree
+        )
         target_row = 0
-        for idx, s in enumerate(self._filtered):
-            provider_label = PROVIDER_COLOURS.get(s.provider, s.provider)
+        for idx, s in enumerate(ordered):
+            meta = self._row_meta[s.id]
+            provider_label = _tree_prefix(meta, s.id in self._collapsed) + (
+                PROVIDER_COLOURS.get(s.provider, s.provider)
+            )
             project = f"[dim]{_escape_markup(_project_name(s.cwd))}[/]"
             hit = self._content_hits.get(s.id) if self._filter_query else None
             if hit is not None:
@@ -1760,7 +1908,7 @@ class SessionBrowser(App):
             table.add_row(*values, key=str(idx))
             if s.id == preserve_id:
                 target_row = idx
-        self._table_sessions = list(self._filtered)
+        self._table_sessions = ordered
         if self._filtered and target_row:
             table.move_cursor(row=target_row)
         # The detail pane always represents the highlighted row. In particular,
@@ -1889,9 +2037,13 @@ class SessionBrowser(App):
             idx = int(row_key)
         except (TypeError, ValueError):
             return
-        if idx < 0 or idx >= len(self._filtered):
+        # Indexes the rows on screen. Once the tree can hide a collapsed
+        # subagent, that is no longer the same list as _filtered, and the
+        # difference is the gap between "the row you highlighted" and "some
+        # other session".
+        if idx < 0 or idx >= len(self._table_sessions):
             return
-        session = self._filtered[idx]
+        session = self._table_sessions[idx]
         if session == self._selected:
             return
         self._selected = session
@@ -2684,6 +2836,44 @@ class SessionBrowser(App):
             return
         self._matches_only = not self._matches_only
         self._render_detail()
+
+    def action_toggle_children(self) -> None:
+        """Hide or show the subagents of the highlighted session."""
+        table = self.query_one("#session-table", DataTable)
+        row = table.cursor_row
+        if not (0 <= row < len(self._table_sessions)):
+            return
+        session = self._table_sessions[row]
+        meta = self._row_meta.get(session.id)
+        if meta is None or not meta.has_children:
+            self._flash_status("No subagents under this session", ok=False)
+            return
+        if session.id in self._collapsed:
+            self._collapsed.discard(session.id)
+        else:
+            self._collapsed.add(session.id)
+        self._rebuild_table(preserve_id=session.id, snapshot_cursor=False)
+
+    def action_toggle_tree(self) -> None:
+        """Nest subagents under the session that spawned them, or list flat.
+
+        Flat is a real answer, not a degraded one: a search across a whole
+        corpus is often about the children themselves, and nesting then puts
+        the rows you asked for underneath rows you did not. Subagents shown
+        flat still carry their marker.
+        """
+        preserve = (
+            self._table_sessions[self.query_one("#session-table", DataTable).cursor_row]
+            if self._table_sessions
+            else None
+        )
+        self._tree = not self._tree
+        self._rebuild_table(
+            preserve_id=preserve.id if preserve else None, snapshot_cursor=False
+        )
+        self._flash_status(
+            "Subagents nested under their parent" if self._tree else "Flat session list"
+        )
 
     def action_cycle_entry_filter(self) -> None:
         """Step to the next reading preset, wrapping back to the whole thing.

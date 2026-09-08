@@ -265,6 +265,43 @@ class TestScanCodex:
         assert sessions[0].provider == "codex"
         assert sessions[0].repository == "true-project"
 
+    def test_a_subagent_keeps_its_own_id_not_its_parents(self, tmp_path):
+        """payload.session_id names the PARENT on a subagent rollout.
+
+        Measured 2026-09-08: of 74 Codex subagent rollouts on this machine,
+        71 carried session_id != id, and every one of those named the parent.
+        Deriving the session id from it would file the child under its
+        parent's identity — `codex resume` on the child would resume the
+        parent, and one session would be reported twice. agent-sessions
+        shipped exactly that bug; this test is why we cannot.
+        """
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        sessions_dir.mkdir(parents=True)
+        meta = json.dumps(
+            {
+                "type": "session_meta",
+                "timestamp": "2026-04-10T13:00:00Z",
+                "payload": {
+                    "id": "child-own-id",
+                    "session_id": "parent-uuid",
+                    "cwd": "/Users/test/project",
+                    "source": {
+                        "subagent": {
+                            "thread_spawn": {"parent_thread_id": "parent-uuid"}
+                        }
+                    },
+                },
+            }
+        )
+        (sessions_dir / "rollout-2026-04-10T13-00-00-child-own-id.jsonl").write_text(
+            meta + "\n"
+        )
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert [s.id for s in sessions] == ["child-own-id"]
+
     def test_file_fallback_uses_origin_for_a_worktree(self, tmp_path):
         sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
         sessions_dir.mkdir(parents=True)
@@ -339,7 +376,7 @@ class TestScanCodexDb:
         conn.execute(
             "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, "
             "cwd TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', "
-            "git_branch TEXT, git_origin_url TEXT, "
+            "git_branch TEXT, git_origin_url TEXT, source TEXT, "
             "first_user_message TEXT NOT NULL DEFAULT '', "
             "created_at_ms INTEGER, updated_at_ms INTEGER, "
             "archived INTEGER NOT NULL DEFAULT 0)"
@@ -571,7 +608,7 @@ class TestScanCodexDb:
         conn.execute(
             "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, "
             "cwd TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', "
-            "git_branch TEXT, git_origin_url TEXT, "
+            "git_branch TEXT, git_origin_url TEXT, source TEXT, "
             "first_user_message TEXT NOT NULL DEFAULT '', "
             "created_at_ms INTEGER, updated_at_ms INTEGER, "
             "archived INTEGER NOT NULL DEFAULT 0)"
@@ -979,7 +1016,8 @@ class TestScanOpencode:
             id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
             slug TEXT NOT NULL DEFAULT '', directory TEXT NOT NULL,
             title TEXT NOT NULL DEFAULT '', version TEXT NOT NULL DEFAULT '1',
-            time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL
+            time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
+            parent_id TEXT, agent TEXT
         )""")
         conn.execute("""CREATE TABLE message (
             id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
@@ -1641,12 +1679,15 @@ class TestInSessionSearch:
 # ---------------------------------------------------------------------------
 
 try:
+    from textual.widgets import DataTable
+
     from session_browser.app import (
         MultiplexerChoice,
         SearchInput,
         SessionBrowser,
         SessionTable,
         ShortcutHelp,
+        build_hierarchy,
     )
 
     _HAS_TEXTUAL = True
@@ -4027,6 +4068,226 @@ class TestStructuredTranscript:
                 await app.workers.wait_for_complete()
                 await pilot.pause()
                 assert app._window_start == 0
+
+
+@pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
+class TestBuildHierarchy:
+    """The flattening: parents first, children under them, nothing lost."""
+
+    def _s(self, sid, parent=None, kind=None):
+        return Session(id=sid, provider="codex", parent_id=parent, subagent_kind=kind)
+
+    def test_children_follow_their_parent_and_carry_a_depth(self):
+        rows = [
+            self._s("a"),
+            self._s("b", "a", "thread_spawn"),
+            self._s("c", "b", "review"),
+            self._s("d"),
+        ]
+        ordered, meta = build_hierarchy(rows)
+        assert [s.id for s in ordered] == ["a", "b", "c", "d"]
+        assert [meta[s.id].depth for s in ordered] == [0, 1, 2, 0]
+        assert meta["a"].child_count == 1 and meta["a"].has_children
+        assert meta["c"].child_count == 0 and not meta["c"].has_children
+
+    def test_a_subagent_with_no_visible_parent_is_marked_not_hidden(self):
+        """The row still has to say what it is.
+
+        11 of 74 Codex subagents on a real machine record no parent at all,
+        and a filter can hide the parent of any of the rest. Rendering those
+        as ordinary sessions is the duplicate-looking-row confusion this
+        whole feature exists to remove.
+        """
+        rows = [self._s("a"), self._s("lost", "not-here", "guardian")]
+        ordered, meta = build_hierarchy(rows)
+        assert [s.id for s in ordered] == ["a", "lost"]
+        assert meta["lost"].depth == 0
+        assert meta["lost"].orphaned is True
+        assert meta["a"].orphaned is False
+
+    def test_collapsing_hides_the_whole_subtree_and_nothing_else(self):
+        rows = [
+            self._s("a"),
+            self._s("b", "a", "review"),
+            self._s("c", "b", "review"),
+            self._s("d"),
+        ]
+        ordered, _ = build_hierarchy(rows, {"a"})
+        assert [s.id for s in ordered] == ["a", "d"]
+        ordered, _ = build_hierarchy(rows, {"b"})
+        assert [s.id for s in ordered] == ["a", "b", "d"]
+
+    def test_a_collapsed_child_is_hidden_rather_than_moved(self):
+        """Regression: the cycle sweep re-added collapsed rows at the end.
+
+        Marking the hidden subtree seen is what stops that, and without it
+        collapsing a parent *relocated* its children to the bottom of the
+        list instead of hiding them — worse than not collapsing at all.
+        """
+        rows = [self._s("a"), self._s("b", "a", "review"), self._s("d")]
+        ordered, _ = build_hierarchy(rows, {"a"})
+        assert "b" not in [s.id for s in ordered]
+
+    def test_a_cycle_costs_the_nesting_not_the_sessions(self):
+        """Parent ids come from another tool's metadata, so a cycle can
+        arrive on disk. A session missing from the list is the one failure a
+        browser must never have."""
+        rows = [self._s("x", "y", "review"), self._s("y", "x", "review")]
+        ordered, meta = build_hierarchy(rows)
+        assert sorted(s.id for s in ordered) == ["x", "y"]
+        assert all(meta[s.id].depth == 0 for s in ordered)
+
+    def test_a_session_parented_to_itself_stays_a_root(self):
+        rows = [self._s("self", "self", "review")]
+        ordered, meta = build_hierarchy(rows)
+        assert [s.id for s in ordered] == ["self"]
+        assert meta["self"].depth == 0
+
+    def test_disabled_returns_the_input_order_but_keeps_the_markers(self):
+        rows = [self._s("a"), self._s("b", "a", "review")]
+        ordered, meta = build_hierarchy(rows, enabled=False)
+        assert [s.id for s in ordered] == ["a", "b"]
+        assert [meta[s.id].depth for s in ordered] == [0, 0]
+        # Flat is not the same as unlabelled: b is still a subagent.
+        assert meta["b"].orphaned is True
+
+    def test_top_level_order_is_whatever_the_sort_produced(self):
+        rows = [self._s("z"), self._s("y"), self._s("zz", "z", "review")]
+        ordered, _ = build_hierarchy(rows)
+        assert [s.id for s in ordered] == ["z", "zz", "y"]
+
+
+@pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
+@pytest.mark.asyncio
+class TestSessionTree:
+    """The tree in the table: markers, expand/collapse, and the flat switch."""
+
+    def _rows(self):
+        return [
+            Session(
+                id="parent",
+                provider="codex",
+                summary="the orchestrating session",
+                updated_at="2026-01-03",
+            ),
+            Session(
+                id="kid1",
+                provider="codex",
+                summary="explorer",
+                updated_at="2026-01-02",
+                parent_id="parent",
+                subagent_kind="thread_spawn",
+            ),
+            Session(
+                id="kid2",
+                provider="codex",
+                summary="reviewer",
+                updated_at="2026-01-01",
+                parent_id="parent",
+                subagent_kind="review",
+            ),
+            Session(
+                id="lonely",
+                provider="codex",
+                summary="a subagent whose parent is gone",
+                updated_at="2026-01-04",
+                parent_id="vanished",
+                subagent_kind="guardian",
+            ),
+        ]
+
+    async def test_children_nest_under_their_parent_with_a_count(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, self._rows())
+            assert [s.id for s in app._table_sessions] == [
+                "parent",
+                "kid1",
+                "kid2",
+                "lonely",
+            ]
+            assert app._row_meta["kid1"].depth == 1
+            assert app._row_meta["parent"].child_count == 2
+
+    async def test_space_collapses_and_expands_the_highlighted_parent(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, self._rows())
+            table = app.query_one("#session-table", DataTable)
+            table.move_cursor(row=0)
+            await pilot.pause()
+
+            app.action_toggle_children()
+            await pilot.pause()
+            assert [s.id for s in app._table_sessions] == ["parent", "lonely"]
+
+            app.action_toggle_children()
+            await pilot.pause()
+            assert [s.id for s in app._table_sessions] == [
+                "parent",
+                "kid1",
+                "kid2",
+                "lonely",
+            ]
+
+    async def test_collapsing_keeps_the_cursor_on_the_parent(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, self._rows())
+            table = app.query_one("#session-table", DataTable)
+            table.move_cursor(row=0)
+            await pilot.pause()
+            app.action_toggle_children()
+            await pilot.pause()
+            assert app._table_sessions[table.cursor_row].id == "parent"
+
+    async def test_a_leaf_says_so_rather_than_doing_nothing(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, self._rows())
+            table = app.query_one("#session-table", DataTable)
+            table.move_cursor(row=1)
+            await pilot.pause()
+            app.action_toggle_children()
+            await pilot.pause()
+            assert "No subagents" in str(app.query_one("#status-bar").render())
+
+    async def test_the_flat_switch_returns_the_plain_list(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, self._rows())
+            app.action_toggle_tree()
+            await pilot.pause()
+            # The result list in its own order, untouched — flat is the
+            # identity case, not a second ordering.
+            assert [s.id for s in app._table_sessions] == [
+                "parent",
+                "kid1",
+                "kid2",
+                "lonely",
+            ]
+            assert all(m.depth == 0 for m in app._row_meta.values())
+            assert "Flat session list" in str(app.query_one("#status-bar").render())
+
+    async def test_selecting_a_nested_row_opens_that_session(self):
+        """The row key indexes the rows on screen, which the tree reorders."""
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, self._rows())
+            table = app.query_one("#session-table", DataTable)
+            table.move_cursor(row=2)
+            await pilot.pause()
+            assert app._selected is not None
+            assert app._selected.id == "kid2"
+
+    async def test_the_row_shows_its_marker(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, self._rows())
+            table = app.query_one("#session-table", DataTable)
+            cells = [str(table.get_cell_at((r, 0))) for r in range(table.row_count)]
+            assert "▾2" in cells[0]
+            assert "sub" in cells[3]
 
 
 @pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")

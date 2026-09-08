@@ -560,7 +560,7 @@ def build_corpus(root: Path) -> Path:
     conn.execute(
         "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, "
         "cwd TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', "
-        "git_branch TEXT, git_origin_url TEXT, "
+        "git_branch TEXT, git_origin_url TEXT, source TEXT, "
         "first_user_message TEXT NOT NULL DEFAULT '', "
         "created_at_ms INTEGER, updated_at_ms INTEGER, "
         "archived INTEGER NOT NULL DEFAULT 0)"
@@ -654,7 +654,8 @@ def build_corpus(root: Path) -> Path:
         "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
         "slug TEXT NOT NULL DEFAULT '', directory TEXT NOT NULL, "
         "title TEXT NOT NULL DEFAULT '', version TEXT NOT NULL DEFAULT '1', "
-        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, "
+        "parent_id TEXT, agent TEXT)"
     )
     conn.execute(
         "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
@@ -1227,6 +1228,12 @@ def loop_probes(root: Path) -> list[LoopProbe]:
                 "first_user_message": f"start session {i} {_filler(i, 0)}",
                 "created_at_ms": 1767603600000,
                 "updated_at_ms": 1767603600000,
+                # The subagent classification the query computes in SQL. Held
+                # constant for the same reason the other values are: this
+                # probe measures per-row Session construction, not the cost
+                # of whichever branch a varying fixture would select.
+                "subagent_kind": "",
+                "parent_thread_id": None,
             }
             for i in range(40)
         ]

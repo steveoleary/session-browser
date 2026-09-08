@@ -124,7 +124,7 @@ when a transcript is unreadable; counts still classifies every returned row.
         ("session", _SESSION_KEYS + ("total_entries", "offset")),
         ("counts", ("returned", "readable", "empty", "unreadable")),
         *_ERROR_GROUPS,
-    )
+    ),
 )
 
 _GET_EPILOG = """Output contract:
@@ -222,7 +222,7 @@ artifact_manifest envelope.
             ),
         ),
         *_ERROR_GROUPS,
-    )
+    ),
 )
 
 _STATS_EPILOG = """Output contract:

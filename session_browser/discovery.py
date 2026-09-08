@@ -34,6 +34,21 @@ class Session:
     created_at: str = ""
     updated_at: str = ""
     content_path: str = ""  # file/dir path for rg search & content loading
+    # The session that spawned this one. None means the provider exposes no
+    # parent-child link at all; "" means it does and this session has none.
+    # Same three-state discipline as *branch*, and for the same reason: a
+    # consumer must not read "unavailable" as "known to have no parent".
+    parent_id: str | None = None
+    # What kind of subagent this is -- "thread_spawn", "review", "guardian",
+    # or a provider's own agent name. "" when the provider says it is not a
+    # subagent, None when it cannot say.
+    #
+    # SEPARATE FROM parent_id ON PURPOSE. 11 of the 74 Codex subagents on
+    # this machine (every "review" and "guardian" one) carry no parent
+    # anywhere -- not in source, not in thread_spawn_edges. "Is a subagent"
+    # and "has a known parent" are different facts, and collapsing them
+    # would file those 11 as ordinary sessions.
+    subagent_kind: str | None = None
 
     @property
     def sort_key(self) -> str:
@@ -242,6 +257,20 @@ def _scan_codex_db(db_path: Path) -> list[Session] | None:
             "           AS origin_name "
             "  FROM tails"
             ") "
+            # threads.id is the thread's own id. See _scan_codex_files on why
+            # the rollout's payload["session_id"] must never be used for this.
+            # Subagent classification stays in SQLite for the same reason
+            # the origin normalization above does: it keeps the Python
+            # per-row construction loop, which loop.codex_db_rows guards, off
+            # the JSON parsing. source is a bare word ("cli") on ordinary
+            # threads and JSON on subagents, so every read is guarded by
+            # json_valid -- json_extract raises on malformed input, and 889
+            # of 963 rows on a real machine are that bare word.
+            #
+            # The parent is read ONLY from inside the subagent object. A
+            # FORKED session also carries a parent id but has source "cli",
+            # so an unguarded read would misfile forks as subagents;
+            # agent-sessions guards the same way and their tests say why.
             "SELECT id, rollout_path, cwd, git_branch, first_user_message, "
             "       CASE "
             "         WHEN origin_name = '' THEN cwd "
@@ -249,7 +278,20 @@ def _scan_codex_db(db_path: Path) -> list[Session] | None:
             "           THEN substr(origin_name, 1, length(origin_name) - 4) "
             "         ELSE origin_name "
             "       END AS repository_source, "
-            "       created_at_ms, updated_at_ms, archived "
+            "       created_at_ms, updated_at_ms, archived, "
+            "       CASE WHEN json_valid(source) "
+            "              AND json_type(source, '$.subagent') IS NOT NULL "
+            "         THEN COALESCE("
+            "           CASE WHEN json_type(source, '$.subagent') = 'text' "
+            "                THEN json_extract(source, '$.subagent') END, "
+            "           CASE WHEN json_type(source, '$.subagent.thread_spawn') "
+            "                       IS NOT NULL THEN 'thread_spawn' END, "
+            "           json_extract(source, '$.subagent.other'), "
+            "           'subagent') "
+            "         ELSE '' END AS subagent_kind, "
+            "       CASE WHEN json_valid(source) THEN json_extract("
+            "         source, '$.subagent.thread_spawn.parent_thread_id') "
+            "       END AS parent_thread_id "
             "FROM names"
         ).fetchall()
     finally:
@@ -297,7 +339,48 @@ def _codex_session_from_row(r) -> Session:
         updated_at=_epoch_ms_to_iso(r["updated_at_ms"], zulu=True)
         or _epoch_ms_to_iso(r["created_at_ms"], zulu=True),
         content_path=r["rollout_path"],
+        parent_id=r["parent_thread_id"] or "",
+        subagent_kind=r["subagent_kind"],
     )
+
+
+def _codex_subagent(payload: dict) -> tuple[str, str]:
+    """(subagent_kind, parent_id) from a rollout's session_meta payload.
+
+    The mirror of the CASE expression in _scan_codex_db, for the fallback
+    scan. ``source`` is a bare string on an ordinary session and an object on
+    a subagent, in three observed shapes::
+
+        {"subagent": "review"}                                  a bare kind
+        {"subagent": {"thread_spawn": {"parent_thread_id": …}}}  the linked one
+        {"subagent": {"other": "guardian"}}                      the catch-all
+
+    ``other`` is Codex's catch-all variant, so an unrecognised object falls
+    back to its first key rather than to "not a subagent" -- a new shape
+    should surface as an oddly-named subagent, never as an ordinary session.
+
+    The parent is read only from inside ``subagent``. A forked session carries
+    a top-level parent id with source "cli", and reading that unconditionally
+    would file forks as subagents.
+    """
+    source = payload.get("source")
+    if not isinstance(source, dict):
+        return "", ""
+    sub = source.get("subagent")
+    if sub is None:
+        return "", ""
+    if isinstance(sub, str):
+        return sub, ""
+    if not isinstance(sub, dict):
+        return "subagent", ""
+    spawn = sub.get("thread_spawn")
+    if isinstance(spawn, dict):
+        parent = spawn.get("parent_thread_id")
+        return "thread_spawn", parent if isinstance(parent, str) else ""
+    other = sub.get("other")
+    if isinstance(other, str):
+        return other, ""
+    return (next(iter(sub), "subagent"), "")
 
 
 def _scan_codex_files() -> list[Session]:
@@ -316,7 +399,18 @@ def _scan_codex_files() -> list[Session]:
             if obj.get("type") != "session_meta":
                 continue
             payload = obj.get("payload", {})
+            # payload["id"], never payload["session_id"] -- they are different
+            # fields and on a subagent rollout the latter is the PARENT's uuid.
+            # Measured on this machine 2026-09-08: of 74 Codex subagent
+            # rollouts, 71 had session_id != id, and in every one session_id
+            # named the parent. Reading it would file a child under its
+            # parent's identity, so `codex resume` on the child would resume
+            # the parent and search would report one session twice. The same
+            # rule holds for the DB fast path, which selects threads.id.
+            # agent-sessions shipped that bug and documents the fix; we are
+            # correct here by one identifier, which is why this says so.
             sid = payload.get("id", f.stem)
+            kind, parent_id = _codex_subagent(payload)
             cwd = payload.get("cwd", "")
             git = payload.get("git", {})
             branch = git.get("branch", "")
@@ -341,6 +435,8 @@ def _scan_codex_files() -> list[Session]:
                         _last_activity_iso(f, "codex") or ts or _file_mtime_iso(f)
                     ),
                     content_path=str(f),
+                    parent_id=parent_id,
+                    subagent_kind=kind,
                 )
             )
         except Exception as exc:
@@ -525,7 +621,14 @@ def scan_opencode() -> list[Session]:
         conn = sqlite3.connect(_readonly_uri(db_path), uri=True, timeout=3)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
+            # parent_id and agent are two more columns on a query that
+            # already reads this table, so the sqlite_statements counter is
+            # unmoved. agent names the AGENT TYPE and is set on parents too
+            # (build 239, orchestrator 101, ... on a real install), so it is
+            # a label for a child rather than evidence of being one --
+            # parent_id is the only thing that says "this was spawned".
             "SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, "
+            "       s.parent_id, s.agent, "
             "       p.worktree, p.name AS project_name "
             "FROM session s "
             "LEFT JOIN project p ON s.project_id = p.id "
@@ -560,6 +663,10 @@ def scan_opencode() -> list[Session]:
                     created_at=_epoch_ms_to_iso(r["time_created"]),
                     updated_at=_epoch_ms_to_iso(r["time_updated"]),
                     content_path=str(db_path),
+                    parent_id=r["parent_id"] or "",
+                    subagent_kind=(
+                        (r["agent"] or "subagent") if r["parent_id"] else ""
+                    ),
                 )
             )
     except (sqlite3.Error, OSError) as exc:

@@ -174,6 +174,8 @@ Press `?` in the app for the complete key map.
 | `n` / `N` | Next / previous match |
 | `m` | Show only the blocks that matched |
 | `f` | Cycle the reading filter: conversation, your turns, agent turns |
+| `space` | Expand or collapse a session's subagents |
+| `T` | Nest subagents under their parent, or list everything flat |
 | `c` | Copy a resume command |
 | `i` | Copy the canonical session id |
 | `e` / `E` | Copy / export the conversation |

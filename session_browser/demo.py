@@ -779,7 +779,8 @@ _OPENCODE_SCHEMA = [
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
         slug TEXT NOT NULL DEFAULT '', directory TEXT NOT NULL,
         title TEXT NOT NULL DEFAULT '', version TEXT NOT NULL DEFAULT '1',
-        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL
+        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
+        parent_id TEXT, agent TEXT
     )""",
     """CREATE TABLE message (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL,

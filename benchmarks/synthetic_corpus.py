@@ -411,7 +411,8 @@ def _write_codex_state(home: Path, rows: list[tuple[str, Path, str, str]]) -> Pa
             "CREATE TABLE threads (id TEXT PRIMARY KEY, "
             "rollout_path TEXT NOT NULL, cwd TEXT NOT NULL, "
             "title TEXT NOT NULL DEFAULT '', git_branch TEXT, "
-            "git_origin_url TEXT, first_user_message TEXT NOT NULL DEFAULT '', "
+            "git_origin_url TEXT, source TEXT, "
+            "first_user_message TEXT NOT NULL DEFAULT '', "
             "created_at_ms INTEGER, updated_at_ms INTEGER, "
             "archived INTEGER NOT NULL DEFAULT 0)"
         )
@@ -492,7 +493,8 @@ _OPENCODE_SCHEMA = (
         "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
         "slug TEXT NOT NULL DEFAULT '', directory TEXT NOT NULL, "
         "title TEXT NOT NULL DEFAULT '', version TEXT NOT NULL DEFAULT '1', "
-        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, "
+        "parent_id TEXT, agent TEXT)"
     ),
     (
         "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
