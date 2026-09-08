@@ -23,6 +23,7 @@ from session_browser.transcript import (
     entry_matches_roles,
     find_entry_matches,
     find_text_spans,
+    is_slash_command,
     lineage_ids,
     load_session_content,
     load_transcript,
@@ -2065,6 +2066,30 @@ class TestRendering:
         assert not entry_matches_roles(plain, {"error"})
         assert entry_matches_roles(ok, {"tool"})
         assert entry_matches_roles(plain, {"assistant", "error"})
+
+    def test_is_slash_command_matches_the_leading_marker_only(self):
+        """Every shape measured in the real corpus, and the false positive."""
+        for text in (
+            "<command-name>/clear</command-name>",
+            "<command-message>goal</command-message>\n<command-name>/goal</command-name>",
+            "<local-command-stdout>Goal set: ...</local-command-stdout>",
+            "<local-command-stderr>Shell command failed</local-command-stderr>",
+            "   \n<command-name>/model</command-name>",
+        ):
+            assert is_slash_command(TranscriptEntry("user", text)), text
+
+    def test_is_slash_command_leaves_a_quoting_human_alone(self):
+        quoting = TranscriptEntry(
+            "user", "slash commands arrive as <command-name>/clear</command-name>"
+        )
+        assert not is_slash_command(quoting)
+
+    def test_is_slash_command_is_about_user_entries(self):
+        """The same text in tool output is a quotation the harness captured,
+        not an invocation, and a role filter already decides its fate."""
+        for role in ("assistant", "tool", "system"):
+            entry = TranscriptEntry(role, "<command-name>/clear</command-name>")
+            assert not is_slash_command(entry), role
 
     def test_render_text_with_indices_prefixes_blocks(self):
         t = Transcript(

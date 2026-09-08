@@ -170,6 +170,7 @@ Press `?` in the app for the complete key map.
 | `z` | Focus the active pane |
 | `n` / `N` | Next / previous match |
 | `m` | Show only the blocks that matched |
+| `f` | Cycle the reading filter: conversation, your turns, agent turns |
 | `c` | Copy a resume command |
 | `i` | Copy the canonical session id |
 | `e` / `E` | Copy / export the conversation |

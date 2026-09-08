@@ -10,7 +10,7 @@ import sys
 from bisect import bisect_left
 from collections.abc import Sequence
 from functools import wraps
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 try:
     from rich.segment import Segment
@@ -49,7 +49,9 @@ from .transcript import (
     _OffsetMap,
     canonical_id,
     entry_label,
+    entry_matches_roles,
     find_text_spans,
+    is_slash_command,
     load_transcript,
     normalize_match_text,
     render_text,
@@ -77,6 +79,39 @@ _FILTER_DEBOUNCE = 0.15
 # see the full transcript, and the window slides to the selected match.
 _DISPLAY_WINDOW = 200_000
 
+
+class _FilterPreset(NamedTuple):
+    """One named reading of a transcript.
+
+    A preset rather than a five-bit role mask, because the five bits are not
+    how anyone reads a session: the questions people actually arrive with are
+    "what did I ask for", "what did it conclude", and "show me the
+    conversation without the tool traffic". A mask makes those three reachable
+    only by knowing which bits to clear, and spends five single keys doing it.
+    """
+
+    #: Shown in the pane title. Empty for the identity preset, which hides
+    #: nothing and so has nothing to announce.
+    label: str
+    #: Roles to keep, or None for every role. Resolved through
+    #: entry_matches_roles, so "error" would match failed tool entries here
+    #: exactly as it does for the CLI's get --role.
+    roles: frozenset[str] | None
+    #: Drop Claude slash-command invocations and their captured stdout.
+    hide_slash_commands: bool
+
+
+# Cycled by f, in order, wrapping back to the first. A ladder from "all of it"
+# to one voice: each step answers a narrower question than the one before, so
+# pressing f repeatedly walks toward the answer rather than around a ring of
+# unrelated modes.
+_FILTER_PRESETS: tuple[_FilterPreset, ...] = (
+    _FilterPreset("", None, False),
+    _FilterPreset("CONVERSATION", frozenset({"user", "assistant"}), True),
+    _FilterPreset("YOUR TURNS", frozenset({"user"}), True),
+    _FilterPreset("AGENT TURNS", frozenset({"assistant"}), False),
+)
+
 # Content search takes ~1s on a large history — too quick to read partial
 # results, long enough that the screen shouldn't sit frozen. So we hold the
 # reveal until every match is in and spin this indicator meanwhile.
@@ -102,6 +137,8 @@ _EDIT_BLOCKED_ACTIONS = frozenset(
         "refresh_sessions",
         "toggle_here",
         "toggle_focus_mode",
+        "toggle_matches_only",
+        "cycle_entry_filter",
         "show_help",
     }
 )
@@ -930,18 +967,25 @@ class TranscriptEntryWidget(Static):
 
 
 class TranscriptGapWidget(Static):
-    """A run of blocks the matching-only projection left out.
+    """A run of blocks a projection left out.
 
     It exists to stop the projection lying by omission. Two entries an hour
     apart, rendered adjacent with nothing between them, read as consecutive
     conversation; a marker saying how many blocks are missing is the
     difference between a filtered transcript and a misleading one.
+
+    *reason* names why, because there are now two projections and they can be
+    on together. It describes the *view* rather than each block: with both on,
+    a single run can hold blocks dropped by either, so the honest word is the
+    empty one -- "4 blocks hidden" -- and the pane title says which modes are
+    responsible.
     """
 
-    def __init__(self, hidden: int) -> None:
+    def __init__(self, hidden: int, reason: str = "non-matching") -> None:
         blocks = "block" if hidden == 1 else "blocks"
+        described = f"{reason} {blocks}" if reason else blocks
         super().__init__(
-            f"[dim]⋯ {hidden:,} non-matching {blocks} hidden[/]",
+            f"[dim]⋯ {hidden:,} {described} hidden[/]",
             classes="transcript-gap",
         )
 
@@ -980,7 +1024,7 @@ class ShortcutHelp(ModalScreen[None]):
 
 [bold]Find[/]       [cyan]/[/] search active pane    [cyan]n / N[/] next / previous match
            [cyan]s[/] find in session       [cyan]m[/] matching blocks only
-           [cyan]p[/] this-project scope
+           [cyan]p[/] this-project scope     [cyan]f[/] filter entries
 
 [bold]Layout[/]     [cyan]z[/] focus current pane    [cyan]Esc[/] step back
 
@@ -1121,6 +1165,7 @@ class SessionBrowser(App):
         Binding("e", "export_chat_clipboard", "Copy chat", show=False),
         Binding("E", "export_chat_file", "Export chat", show=False),
         Binding("m", "toggle_matches_only", "Matching blocks", show=False),
+        Binding("f", "cycle_entry_filter", "Filter entries", show=False),
         Binding("n", "next_match", "Next match", show=False),
         Binding("N", "prev_match", "Prev match", show=False),
         Binding("J", "next_entry", "Next entry", show=False),
@@ -1159,10 +1204,21 @@ class SessionBrowser(App):
         # Matching-blocks-only projection: a display mode over the match state
         # that already exists, holding no transcript of its own.
         self._matches_only: bool = False
+        # Index into _FILTER_PRESETS. A reading preference rather than a view
+        # of a query, so unlike _matches_only it deliberately survives
+        # switching sessions -- someone reading four sessions for "what did I
+        # ask for" should not have to re-press f in each. It can never lie
+        # about it: the title states the preset whenever one is in force.
+        self._filter_idx: int = 0
         self._transcript_title: str = "TRANSCRIPT"
         # What the pane last mounted, entries and gaps in order, so a re-render
         # that would rebuild the same rows reuses them instead.
         self._rendered_plan: list[tuple[str, int]] = []
+        # The gap wording the mounted plan was built with. Held beside the
+        # plan because two different modes can produce identical rows with
+        # different explanations, and reusing the widgets would leave the old
+        # sentence under the new mode.
+        self._rendered_gap_reason: str = ""
         self._projected_blocks: int = 0
         self._window_blocks: int = 0
         self._filter_query: str = ""
@@ -1993,7 +2049,8 @@ class SessionBrowser(App):
         # plan carries the gap rows as well as the entries, because in the
         # projected view a run of hidden blocks is part of what is on screen
         # and two different runs must not reuse each other's marker.
-        if rows == self._rendered_plan:
+        reason = self._gap_reason
+        if rows == self._rendered_plan and reason == self._rendered_gap_reason:
             widgets_by_index = {w.entry_index: w for w in self._entry_widgets}
             matches_by_index: dict[int, list[tuple[int, int]]] = {}
             for index, _, (start, end) in visible:
@@ -2020,7 +2077,7 @@ class SessionBrowser(App):
         widgets: list[TranscriptEntryWidget] = []
         for kind, value in rows:
             if kind == "gap":
-                mounted.append(TranscriptGapWidget(value))
+                mounted.append(TranscriptGapWidget(value, reason))
                 continue
             entry, (start, end) = by_index[value]
             widget = TranscriptEntryWidget(entry, value, start)
@@ -2033,18 +2090,34 @@ class SessionBrowser(App):
             mounted.append(widget)
         self._entry_widgets = widgets
         self._rendered_plan = rows
+        self._rendered_gap_reason = reason
         self._highlighted_entry_indices = {
             widget.entry_index for widget in widgets if widget._match_spans
         }
         if widgets:
             return scroll.mount(*mounted)
-        self.query_one("#detail-content", Static).update(
-            "(no matching blocks)" if self._projecting else "(empty session)"
-        )
+        self.query_one("#detail-content", Static).update(self._empty_pane_text())
         return None
 
+    def _empty_pane_text(self) -> str:
+        """Why the pane is empty, in the pane, naming the way back out.
+
+        A projection that can hide every block has to account for the case
+        where it does. "(no matching blocks)" already did that for m; with a
+        preset in force the same emptiness has a different cause and a
+        different key undoes it, so the message says which.
+        """
+        if not self._projecting:
+            return "(empty session)"
+        preset = self._preset
+        if self._filter_idx != 0 and self._matching_only:
+            return f"(no {preset.label.lower()} blocks matched — f or m to widen)"
+        if self._filter_idx != 0:
+            return f"(no {preset.label.lower()} in this session — f to widen)"
+        return "(no matching blocks)"
+
     @property
-    def _projecting(self) -> bool:
+    def _matching_only(self) -> bool:
         """Whether the matching-only view is in force right now.
 
         The mode is a view *of a query*. With no query there is nothing to
@@ -2054,24 +2127,65 @@ class SessionBrowser(App):
         """
         return self._matches_only and bool(self._search_query)
 
+    @property
+    def _preset(self) -> _FilterPreset:
+        return _FILTER_PRESETS[self._filter_idx]
+
+    @property
+    def _projecting(self) -> bool:
+        """Whether anything at all is being kept off screen.
+
+        One question with one answer, asked by the gap markers, the block
+        counter, the empty-pane message and the title. The two modes stack --
+        f narrows to a kind of entry, m narrows to the ones a query hit --
+        and a reader given two independent hiding mechanisms and one status
+        line ends up trusting a pane that is lying to them.
+        """
+        return self._filter_idx != 0 or self._matching_only
+
+    @property
+    def _gap_reason(self) -> str:
+        """The word the gap markers use for what they are covering."""
+        if self._filter_idx != 0 and self._matching_only:
+            return ""
+        return "filtered" if self._filter_idx != 0 else "non-matching"
+
+    def _entry_shown(self, entry: TranscriptEntry, span: tuple[int, int]) -> bool:
+        """Whether this entry survives every projection currently on."""
+        preset = self._preset
+        if preset.roles is not None and not entry_matches_roles(entry, preset.roles):
+            return False
+        if preset.hide_slash_commands and is_slash_command(entry):
+            return False
+        if not self._matching_only:
+            return True
+        start, end = span
+        return bisect_left(self._matches, (start,)) != bisect_left(
+            self._matches, (end,)
+        )
+
     def _project(
         self, visible: list[tuple[int, TranscriptEntry, tuple[int, int]]]
     ) -> list[tuple[str, int]]:
         """The rows to render: ``("entry", index)`` and ``("gap", hidden)``.
 
-        Built from the match spans already computed for the flat buffer -- a
-        bisect per entry, no parse, no fold, and no second copy of the
-        transcript. The full view is the identity case, so a toggle in either
-        direction costs one re-render of what is already in memory.
+        Built from the entries and the match spans already computed for the
+        flat buffer -- a role test and at most a bisect per entry, no parse,
+        no fold, and no second copy of the transcript. The full view is the
+        identity case, so a toggle in any direction costs one re-render of
+        what is already in memory.
+
+        Display only. Nothing here reaches the canonical transcript, the
+        absolute entry indices, the match list, the export or the resume
+        command -- a projection chooses which of the buffer's blocks to mount,
+        and that is the whole of it.
         """
         if not self._projecting:
             return [("entry", index) for index, _, _ in visible]
         rows: list[tuple[str, int]] = []
         hidden = 0
-        for index, _, (start, end) in visible:
-            if bisect_left(self._matches, (start,)) == bisect_left(
-                self._matches, (end,)
-            ):
+        for index, entry, span in visible:
+            if not self._entry_shown(entry, span):
                 hidden += 1
                 continue
             if hidden:
@@ -2543,8 +2657,15 @@ class SessionBrowser(App):
         hidden when there is nothing to count. A reader who cannot see why
         half the transcript is missing has been given a broken pane rather
         than a filtered one, so the mode is stated where the pane is named.
+
+        Both modes are named when both are on, in the order they narrow:
+        naming only one would leave the other hiding blocks under a label
+        that does not cover them.
         """
-        suffix = "  ·  MATCHING BLOCKS" if self._projecting else ""
+        parts = [self._preset.label] if self._filter_idx != 0 else []
+        if self._matching_only:
+            parts.append("MATCHING BLOCKS")
+        suffix = "".join(f"  ·  {part}" for part in parts)
         self.query_one("#transcript-title", Static).update(
             f"{self._transcript_title}{suffix}"
         )
@@ -2562,6 +2683,23 @@ class SessionBrowser(App):
             self._flash_status("Find in session first (s or /) — then m", ok=False)
             return
         self._matches_only = not self._matches_only
+        self._render_detail()
+
+    def action_cycle_entry_filter(self) -> None:
+        """Step to the next reading preset, wrapping back to the whole thing.
+
+        Unlike m this needs no query and is never refused: every preset is a
+        legitimate view of any transcript, including one where it happens to
+        leave nothing on screen -- and that emptiness is itself the answer to
+        "did I say anything in this session".
+        """
+        if self._transcript is None:
+            return
+        self._filter_idx = (self._filter_idx + 1) % len(_FILTER_PRESETS)
+        preset = self._preset
+        self._flash_status(
+            f"Showing {preset.label.lower()}" if preset.label else "Showing everything"
+        )
         self._render_detail()
 
     def action_next_match(self) -> None:

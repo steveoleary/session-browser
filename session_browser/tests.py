@@ -4029,6 +4029,292 @@ class TestStructuredTranscript:
                 assert app._window_start == 0
 
 
+@pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
+@pytest.mark.asyncio
+class TestReadingFilter:
+    """The f presets: role narrowing plus harness noise, display only."""
+
+    def _transcript(self, session: Session) -> Transcript:
+        """One of everything a Claude session actually records.
+
+        Entry 7 is the false positive the predicate has to survive: a human
+        message that quotes a slash-command marker without being one.
+        """
+        return Transcript(
+            session,
+            [
+                TranscriptEntry("user", "so where are we with the plan?"),
+                TranscriptEntry("assistant", "here is the plan"),
+                TranscriptEntry(
+                    "tool",
+                    'Bash({"cmd": "ls"})',
+                    metadata={"kind": "call", "tool": "Bash"},
+                ),
+                TranscriptEntry(
+                    "tool",
+                    "a.py b.py",
+                    metadata={"kind": "output", "tool": "Bash"},
+                ),
+                TranscriptEntry(
+                    "user",
+                    "<command-name>/clear</command-name>\n"
+                    "<command-message>clear</command-message>",
+                ),
+                TranscriptEntry(
+                    "user",
+                    "<local-command-stdout>Set model to Opus 5</local-command-stdout>",
+                ),
+                TranscriptEntry(
+                    "system",
+                    "<task-notification>\n<task-id>abc</task-id>",
+                    metadata={"kind": "injected", "subtype": "task_notification"},
+                ),
+                TranscriptEntry(
+                    "user", "note that <command-name> shows up as a user turn"
+                ),
+                TranscriptEntry("assistant", "understood"),
+                TranscriptEntry(
+                    "tool",
+                    "boom",
+                    metadata={"kind": "output", "tool": "Bash", "is_error": True},
+                ),
+            ],
+        )
+
+    async def _loaded(self, app, pilot, fake):
+        await _install_fake_sessions(app, pilot, fake)
+        app._on_transcript_loaded(self._transcript(fake[0]))
+        await pilot.pause()
+
+    async def test_each_preset_keeps_exactly_what_it_names(self):
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._loaded(app, pilot, fake)
+
+            def shown():
+                return [w.entry_index for w in app.query(TranscriptEntryWidget)]
+
+            assert shown() == list(range(10))
+
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            # Conversation: both voices, no tool traffic, no harness bookkeeping.
+            assert shown() == [0, 1, 7, 8]
+
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert shown() == [0, 7]
+
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert shown() == [1, 8]
+
+            # And back round to the whole thing.
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert shown() == list(range(10))
+
+    async def test_a_quoted_marker_is_still_a_message(self):
+        """Leading marker only: quoting one of these is speaking, not noise."""
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._loaded(app, pilot, fake)
+            app.action_cycle_entry_filter()
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+
+            texts = [w.entry.text for w in app.query(TranscriptEntryWidget)]
+            assert any("shows up as a user turn" in t for t in texts)
+            assert not any(t.startswith("<command-name>") for t in texts)
+            assert not any(t.startswith("<local-command-stdout>") for t in texts)
+
+    async def test_the_title_and_gaps_name_the_preset(self):
+        from session_browser.app import TranscriptGapWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._loaded(app, pilot, fake)
+            title = app.query_one("#transcript-title")
+            assert "CONVERSATION" not in str(title.render())
+
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert "CONVERSATION" in str(title.render())
+            gaps = [str(g.render()) for g in app.query(TranscriptGapWidget)]
+            assert "5 filtered blocks hidden" in gaps[0]
+            assert "1 filtered block hidden" in gaps[1]
+            # Shown plus accounted-for is the whole window, as for m.
+            assert 4 + 5 + 1 == 10
+            assert "4 of 10 blocks" in str(app.query_one("#match-counter").render())
+
+    async def test_the_filter_and_matching_blocks_stack(self):
+        """Two projections, one set of gaps, and a title naming both."""
+        from session_browser.app import TranscriptEntryWidget, TranscriptGapWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._loaded(app, pilot, fake)
+            app._do_session_search("plan")
+            await pilot.pause()
+            app.action_toggle_matches_only()
+            await pilot.pause()
+            # The query alone reaches both voices.
+            assert [w.entry_index for w in app.query(TranscriptEntryWidget)] == [0, 1]
+
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert [w.entry_index for w in app.query(TranscriptEntryWidget)] == [0, 1]
+
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert [w.entry_index for w in app.query(TranscriptEntryWidget)] == [0]
+
+            title = str(app.query_one("#transcript-title").render())
+            assert "YOUR TURNS" in title and "MATCHING BLOCKS" in title
+            # With both on a run can hold blocks dropped by either, so the
+            # marker claims neither cause.
+            gaps = [str(g.render()) for g in app.query(TranscriptGapWidget)]
+            assert gaps == [g for g in gaps if "9 blocks hidden" in g]
+            assert len(gaps) == 1
+
+    async def test_a_preset_that_leaves_nothing_says_which_key_widens_it(self):
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(
+                Transcript(
+                    fake[0],
+                    [TranscriptEntry("user", "one thing, then I left")],
+                )
+            )
+            await pilot.pause()
+            for _ in range(3):
+                app.action_cycle_entry_filter()
+            await pilot.pause()
+
+            assert not list(app.query(TranscriptEntryWidget))
+            content = str(app.query_one("#detail-content").render())
+            assert "no agent turns in this session" in content
+            assert "f to widen" in content
+
+    async def test_an_empty_stack_names_both_ways_out(self):
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._loaded(app, pilot, fake)
+            # A phrase only the human used, so narrowing to the agent's turns
+            # empties the pane for a reason neither key owns alone.
+            app._do_session_search("where are we")
+            await pilot.pause()
+            app.action_toggle_matches_only()
+            app.action_cycle_entry_filter()
+            app.action_cycle_entry_filter()
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+
+            content = str(app.query_one("#detail-content").render())
+            assert "no agent turns blocks matched" in content
+            assert "f or m to widen" in content
+
+    async def test_the_canonical_session_is_untouched(self):
+        """Indices, matches, n/N, the flat buffer and the export are the same."""
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._loaded(app, pilot, fake)
+            app._do_session_search("plan")
+            await pilot.pause()
+            before_text = app._detail_text
+            before_matches = list(app._matches)
+
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+
+            assert app._detail_text == before_text
+            assert app._matches == before_matches
+            assert "1 / 2" in str(app.query_one("#match-counter").render())
+            # Absolute positions, not positions within the projection.
+            assert [w.entry_index for w in app.query(TranscriptEntryWidget)] == [
+                0,
+                1,
+                7,
+                8,
+            ]
+            # The export reads the flat buffer, so it still carries the
+            # harness noise the reading view drops.
+            export = build_chat_export(fake[0], app._detail_text)
+            assert "<command-name>/clear</command-name>" in export
+
+            app.action_next_match()
+            await pilot.pause()
+            assert "2 / 2" in str(app.query_one("#match-counter").render())
+
+    async def test_the_preset_survives_a_session_switch(self):
+        """Unlike m, it is a reading preference rather than a view of a query."""
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(2)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._loaded(app, pilot, fake)
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert app._filter_idx == 1
+
+            app._on_transcript_loaded(
+                Transcript(
+                    fake[1],
+                    [
+                        TranscriptEntry("user", "second session"),
+                        TranscriptEntry(
+                            "tool", "ls", metadata={"kind": "call", "tool": "Bash"}
+                        ),
+                        TranscriptEntry("assistant", "answered"),
+                    ],
+                )
+            )
+            await pilot.pause()
+
+            assert app._filter_idx == 1
+            assert [w.entry_index for w in app.query(TranscriptEntryWidget)] == [0, 2]
+            assert "CONVERSATION" in str(app.query_one("#transcript-title").render())
+
+    async def test_cycling_is_never_refused_and_says_what_it_did(self):
+        """m needs a query; a preset is a legitimate view of any transcript."""
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._loaded(app, pilot, fake)
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert "Showing conversation" in str(app.query_one("#status-bar").render())
+
+            for _ in range(3):
+                app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert app._filter_idx == 0
+            assert "Showing everything" in str(app.query_one("#status-bar").render())
+
+    async def test_f_does_not_fire_while_typing_in_a_search_box(self):
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self._loaded(app, pilot, fake)
+            from session_browser.app import SearchInput
+
+            search = app.query_one("#global-search", SearchInput)
+            search.focus()
+            await pilot.pause()
+            await pilot.press("f")
+            await pilot.pause()
+
+            assert app._filter_idx == 0
+            assert search.value == "f"
+
+
 class TestCopyToClipboard:
     def test_linux_tries_clip_exe_first(self):
         """On Linux (including WSL), clip.exe should be tried before xclip/xsel."""

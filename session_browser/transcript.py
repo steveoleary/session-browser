@@ -2319,6 +2319,45 @@ def _claude_injected_subtype(text: str) -> str | None:
     return None
 
 
+# Slash commands are recorded by Claude Code as ordinary ``user`` entries:
+# the invocation as a <command-name>/<command-message>/<command-args> block,
+# and anything the command printed as <local-command-stdout>. Unlike the
+# injected shapes above these are *not* reclassified during parsing -- doing
+# so would change what literal search indexes, which is a corpus decision
+# rather than a display one. They are named here so the reader that wants
+# them gone can ask, and so both halves of the knowledge live together.
+#
+# Measured over the whole Claude corpus (209 sessions, 2026-09-08): 77
+# command-name, 55 command-message, 43 local-command-stdout, 1
+# local-command-stderr. <local-command-caveat> leads 69 *raw records* and
+# zero parsed entries -- the parser drops them before an entry exists -- so
+# it is deliberately absent rather than listed on a guess; add it here if a
+# harness change ever lands one in a user entry.
+_CLAUDE_SLASH_COMMAND_HEADS = (
+    "<command-name>",
+    "<command-message>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+)
+
+
+def is_slash_command(entry: TranscriptEntry) -> bool:
+    """True if this user entry is a slash-command invocation or its output.
+
+    Leading marker only, exactly as _claude_injected_subtype matches: someone
+    who writes "<command-name> shows up as a user turn" is still speaking,
+    and a filter that swallowed that message would be hiding conversation.
+
+    Provider-specific by measurement, not by assumption. Surveyed 60 sessions
+    each of Codex, OpenCode and Pi on 2026-09-08: none records a slash command
+    as a leading-marker user entry, so the predicate is inert for them rather
+    than wrong.
+    """
+    return entry.role == "user" and entry.text.lstrip().startswith(
+        _CLAUDE_SLASH_COMMAND_HEADS
+    )
+
+
 def _claude_user_entry(text: str, ts: str) -> TranscriptEntry:
     """A user text entry, demoted to ``system`` when the harness authored it."""
     subtype = _claude_injected_subtype(text)
