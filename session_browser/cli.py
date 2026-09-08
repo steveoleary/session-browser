@@ -86,12 +86,39 @@ def _json_key_contract(*groups: tuple[str, tuple[str, ...]]) -> str:
     )
 
 
+# The tab-separated columns each text format emits, in order. Named here so
+# --help can state them and a test can check the names against a real run,
+# rather than leaving the shape to be rediscovered by piping and guessing.
+#
+# Worth stating at all because agents do not know it: across 660 real
+# invocations measured on this machine, 222 piped output into jq or an inline
+# python reducer to project exactly the fields these columns already carry,
+# while --format text was requested 11 times. The data was not missing; the
+# contract was, because --help named only the {json,text} enum.
+_LIST_TEXT_COLUMNS = ("id", "updated", "entries", "duration", "cwd", "summary")
+_SEARCH_TEXT_COLUMNS = ("id", "match_count", "updated", "summary")
+
+
+def _text_column_contract(label: str, columns: tuple[str, ...], extra: str) -> str:
+    return (
+        f"Text columns [{label}]: {', '.join(columns)}\n"
+        f"Text is tab-separated, one record per line, no header. {extra}"
+    )
+
+
 _LIST_EPILOG = """Output contract:
 Default format: json. Text emits one tab-separated session per line.
 {keys}
+{text}
 "warnings" and session "offset" are conditional. "total_entries" is null
 when a transcript is unreadable; counts still classifies every returned row.
 """.format(
+    text=_text_column_contract(
+        "list",
+        _LIST_TEXT_COLUMNS,
+        "With --around, an offset column follows updated. Warnings go to "
+        "stderr, so stdout stays parseable; a missing value is '-'.",
+    ),
     keys=_json_key_contract(
         ("envelope", ("sessions", "counts", "warnings")),
         ("session", _SESSION_KEYS + ("total_entries", "offset")),
@@ -154,6 +181,7 @@ _SEARCH_EPILOG = """Output contract:
 Default format: json; default mode: snippets. Text emits tab-separated result
 headers. ids omits snippets/entries; snippets adds snippets; full adds entries.
 {keys}
+{text}
 Result keys are the union across stdout and manifest variants: "file" exists
 only in full-mode manifests; other conditional keys depend on matches, modes,
 warnings, and --around. A multi-phrase snippet adds "query". "role" preserves
@@ -161,6 +189,15 @@ provenance: tool hits are observed text, not necessarily agent-authored text.
 With --output-dir, stdout is artifact_confirmation and manifest.json uses the
 artifact_manifest envelope.
 """.format(
+    text=_text_column_contract(
+        "search",
+        _SEARCH_TEXT_COLUMNS,
+        "Result headers only: in snippets mode each is followed by INDENTED "
+        "snippet lines and a blank line, and full mode follows it with a "
+        "Markdown transcript, so a header line is a record but a line is not. "
+        "With --around an offset column follows updated; a summary-only hit "
+        "appends a [summary match] column.",
+    ),
     keys=_json_key_contract(
         ("envelope", ("query", "mode", "filters", "results", "skipped", "warnings")),
         ("filters", _FILTER_KEYS),

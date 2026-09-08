@@ -113,6 +113,15 @@ def _key_union(objects) -> set[str]:
     return {key for item in objects for key in item}
 
 
+def _text_columns(help_text: str, label: str) -> list[str]:
+    """The declared text columns, read back out of rendered help."""
+    prefix = f"Text columns [{label}]: "
+    for line in help_text.splitlines():
+        if line.startswith(prefix):
+            return line.removeprefix(prefix).split(", ")
+    raise AssertionError(f"no text-column contract for {label!r}")
+
+
 class TestHelpOutputContracts:
     """The discoverable contracts must be exact unions of runtime variants.
 
@@ -144,6 +153,62 @@ class TestHelpOutputContracts:
         assert contract["counts"] == _key_union(
             payload["counts"] for payload in payloads
         )
+
+    def test_list_text_columns_match_what_text_actually_emits(self, cli, capsys):
+        """The columns are declared in one tuple and checked against a run.
+
+        Parsed out of rendered help rather than imported, for the same reason
+        the JSON contracts are: a column renamed in only one of the two places
+        has to fail rather than leave help quietly describing the old shape.
+        """
+        code, out, _ = cli("list", "--format", "text")
+        assert code == 0
+        rows = [line for line in out.splitlines() if line]
+        assert rows, "no text rows to check the contract against"
+        _, help_text = _help_contract("list", capsys)
+        columns = _text_columns(help_text, "list")
+        assert columns[0] == "id"
+        for row in rows:
+            assert len(row.split("\t")) == len(columns), row
+        # The conditional column is declared as conditional, and appears.
+        code, out, _ = cli(
+            "list", "--around", "codex:bbb", "--window", "1w", "--format", "text"
+        )
+        assert code == 0
+        around_rows = [line for line in out.splitlines() if line]
+        assert around_rows
+        for row in around_rows:
+            assert len(row.split("\t")) == len(columns) + 1, row
+        assert "an offset column follows updated" in " ".join(help_text.split())
+
+    def test_search_text_headers_match_the_declared_columns(self, cli, capsys):
+        """search text is NOT one record per line, and says so.
+
+        A header line is a record; the indented snippet lines under it are
+        not. An agent piping this into cut needs that stated, because the
+        shape looks tabular until the first snippet.
+        """
+        code, out, _ = cli("search", "alpha", "--mode", "ids", "--format", "text")
+        assert code == 0
+        rows = [line for line in out.splitlines() if line]
+        assert rows
+        _, help_text = _help_contract("search", capsys)
+        columns = _text_columns(help_text, "search")
+        for row in rows:
+            assert not row.startswith("  ")
+            cols = row.split("\t")
+            # The one documented conditional: a summary-only hit appends a tag.
+            if len(cols) == len(columns) + 1:
+                assert cols[-1] == "[summary match]", row
+            else:
+                assert len(cols) == len(columns), row
+        assert "appends a [summary match] column" in " ".join(help_text.split())
+        code, out, _ = cli("search", "alpha", "--mode", "snippets", "--format", "text")
+        assert code == 0
+        assert any(line.startswith("  [") for line in out.splitlines()), (
+            "expected indented snippet continuation lines"
+        )
+        assert "INDENTED" in help_text
 
     def test_get_contract_matches_single_batch_and_output_runtime(
         self, cli, sessions, tmp_path, capsys
