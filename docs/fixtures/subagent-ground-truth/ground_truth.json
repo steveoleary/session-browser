@@ -1,9 +1,10 @@
 {
   "recorded": "2026-09-13",
-  "method": "Read from the SPAWNING side of each edge: for Claude Code, the toolUseResult.agentId on the tool_result that answered each Agent call, in whichever transcript made the call; for OpenCode, the task tool part's state.metadata.sessionId. Neither is the field discovery reads (sidecar/directory for Claude, session.parent_id for OpenCode), so the graph below is independent of the code under test.",
+  "method": "Read from the SPAWNING side of each edge: for Claude Code, the toolUseResult.agentId on the tool_result that answered each Agent call, in whichever transcript made the call; for OpenCode, the task tool part's state.metadata.sessionId; for Codex, the SubAgentActivity kind=started event in the rollout that made the spawn_agent call (its id is that call's call_id). Neither is the field discovery reads (sidecar/directory for Claude, session.parent_id for OpenCode, source.subagent.thread_spawn for Codex), so the graph below is independent of the code under test.",
   "versions": {
     "claude_code": "2.1.270",
-    "opencode": "1.18.30"
+    "opencode": "1.18.30",
+    "codex_cli": "0.154.0"
   },
   "claude": {
     "parent_session": "a3dcce18-13a9-4260-820b-ec747764e557",
@@ -99,5 +100,87 @@
         "child": "ses_f6447843affegRuo4O9O7qc2vL"
       }
     ]
+  },
+  "codex": {
+    "roots": [
+      "01a09c86-a4cf-7712-bbe0-817d7218d037",
+      "01a09c88-aea5-77a0-8c75-ef0fba63115e"
+    ],
+    "edges": [
+      {
+        "spawner": "01a09c86-a4cf-7712-bbe0-817d7218d037",
+        "child": "01a09c86-c2a4-7cf1-85ce-b6829f20bc27",
+        "call_id": "call_69nA0ZwgrpQc3DRIn7x5sqNA",
+        "task_name": "alpha",
+        "agent_path": "/root/alpha",
+        "spawn_turn_id": "01a09c86-a585-71e2-bb57-19e4a7a38a48",
+        "completed": true,
+        "spawn_root_turn_id": "01a09c86-a585-71e2-bb57-19e4a7a38a48"
+      },
+      {
+        "spawner": "01a09c86-a4cf-7712-bbe0-817d7218d037",
+        "child": "01a09c86-ce6e-7733-9af8-6477744b02c5",
+        "call_id": "call_nVLnCgbdfv7AFmCbFex0JBSn",
+        "task_name": "beta",
+        "agent_path": "/root/beta",
+        "spawn_turn_id": "01a09c86-a585-71e2-bb57-19e4a7a38a48",
+        "completed": true,
+        "spawn_root_turn_id": "01a09c86-a585-71e2-bb57-19e4a7a38a48"
+      },
+      {
+        "spawner": "01a09c88-aea5-77a0-8c75-ef0fba63115e",
+        "child": "01a09c88-c65f-72c3-a231-e17f6f8dee46",
+        "call_id": "call_nnpSw2Jbssqg6WpolktsH5YP",
+        "task_name": "epsilon",
+        "agent_path": "/root/epsilon",
+        "spawn_turn_id": "01a09c88-aef2-75a2-b82a-9a081f3e0c16",
+        "completed": false,
+        "spawn_root_turn_id": "01a09c88-aef2-75a2-b82a-9a081f3e0c16"
+      },
+      {
+        "spawner": "01a09c86-a4cf-7712-bbe0-817d7218d037",
+        "child": "01a09c87-6ab9-75a0-9b9b-41c85860376a",
+        "call_id": "call_eerTBeIzpaJHQ9AObf8c3FIn",
+        "task_name": "gamma",
+        "agent_path": "/root/gamma",
+        "spawn_turn_id": "01a09c87-4eba-7490-aa9c-e36004647e10",
+        "completed": true,
+        "spawn_root_turn_id": "01a09c87-4eba-7490-aa9c-e36004647e10"
+      },
+      {
+        "spawner": "01a09c87-6ab9-75a0-9b9b-41c85860376a",
+        "child": "01a09c87-8872-71a3-9970-b527b42fa7ef",
+        "call_id": "call_OG465zwbQjrLkR4BUjfNAW6q",
+        "task_name": "delta",
+        "agent_path": "/root/gamma/delta",
+        "spawn_turn_id": "01a09c87-6ae7-7692-a38e-923f1ca7395b",
+        "completed": true,
+        "spawn_root_turn_id": "01a09c87-4eba-7490-aa9c-e36004647e10"
+      }
+    ],
+    "forks": [
+      {
+        "session": "01a09c87-df82-78b3-867c-409738c68852",
+        "forked_from": "01a09c86-a4cf-7712-bbe0-817d7218d037",
+        "of": "root"
+      },
+      {
+        "session": "01a09c88-543a-76f3-bcee-6141297357c7",
+        "forked_from": "01a09c87-6ab9-75a0-9b9b-41c85860376a",
+        "of": "subagent"
+      }
+    ],
+    "interrupted": {
+      "session": "01a09c88-aea5-77a0-8c75-ef0fba63115e",
+      "child": "01a09c88-c65f-72c3-a231-e17f6f8dee46",
+      "turn_aborted": {
+        "01a09c88-aea5-77a0-8c75-ef0fba63115e": [
+          "interrupted"
+        ],
+        "01a09c88-c65f-72c3-a231-e17f6f8dee46": [
+          "interrupted"
+        ]
+      }
+    }
   }
 }

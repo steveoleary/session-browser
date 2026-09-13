@@ -10,7 +10,8 @@ This fixture is that known-correct set. Its subagents were spawned on purpose
 on 2026-09-13, and every edge in `ground_truth.json` comes from the **spawning
 side**: the tool result that answered the spawn call. Discovery reads the other
 end of the edge (the sidecar and directory for Claude Code, `session.parent_id`
-for OpenCode), so a linking bug has no way to agree with itself here.
+for OpenCode, `source.subagent.thread_spawn` for Codex), so a linking bug has no
+way to agree with itself here.
 
 ## What was spawned
 
@@ -35,6 +36,20 @@ overlay):
 - with `"subagent_depth": 2`, a parent → `beta` → `gamma` chain.
 
 Edges come from each `task` tool part's `state.metadata.sessionId`.
+
+**Codex CLI 0.154.0** (`codex exec`, `agents.max_depth=2`, low reasoning
+effort), in a scratch directory:
+
+- a root session whose turn 1 spawned `alpha` and `beta` together;
+- turn 2 (`codex exec resume`, same thread id): `gamma`, which itself spawned
+  `delta`;
+- `codex exec fork` of the root, and a second fork of `gamma`, the subagent;
+- a second root that spawned `epsilon` into `sleep 300` and was then
+  interrupted with SIGINT while epsilon was still running.
+
+Edges come from each `SubAgentActivity` event of kind `started`, in the rollout
+that made the `spawn_agent` call. Its `id` is that call's `call_id` and
+`agent_thread_id` is the child.
 
 ## Facts this fixture pins
 
@@ -67,10 +82,42 @@ OpenCode:
   children.
 - A depth-2 child's `parent_id` is its direct spawner, not the root.
 
+Codex:
+
+- **Nesting is recursive.** `source.subagent.thread_spawn.parent_thread_id` is
+  the direct spawner, `depth` counts from the root, and `agent_path` spells out
+  the whole chain (`/root/gamma/delta`), not only a leaf name.
+- **Every subagent is also a fork of its spawner**: its `session_meta` carries
+  `forked_from_id` equal to `parent_thread_id`. So `forked_from_id` does not
+  tell a fork from a spawn; `source` and `thread_source` do. A real fork has
+  `source: "exec"`, `thread_source: "user"`, and no `parent_thread_id` at any
+  level, even when it is a fork of a subagent.
+- A subagent also carries `parent_thread_id` at the **top level** of
+  `session_meta`, the shape agent-sessions guards against. On this build it
+  appears only on subagents, never on forks.
+- **`session_id` names the root of the tree**, not the direct parent. At depth 1
+  those are the same; at depth 2 they differ.
+- **A subagent's rollout starts with its spawner's history.** The spawner's
+  `session_meta` is the second record, followed by its prompts, up to
+  `subagent_history_start_ordinal`. Only the first `session_meta` describes the
+  file.
+- A fork copies **no** spawn records. It points at its source through
+  `history_base` instead of repeating it, unlike an OpenCode fork.
+- A spawn's `root_turn_id` groups like Claude's `promptId`: alpha and beta
+  share turn 1, and gamma and its own child delta share turn 2.
+- An interrupted child is visible only as a `started` event with no matching
+  `completed` one, plus `turn_aborted` with reason `interrupted` in both
+  rollouts. `thread_spawn_edges.status` does not record it: every edge here is
+  still `open`, finished or killed.
+
 ## States
 
 `baseline` (accepted): the OpenCode graph as `session-browser list` reports it
-matches the ground truth exactly, fork included. Claude subagents are invisible
+matches the ground truth exactly, fork included. So does the Codex graph,
+through both discovery paths: the `state_5.sqlite` index and the rollout file
+scan. The index run must write nothing to stderr, because discovery logs there
+when it falls back to the file scan, and a silent fallback would otherwise test
+the same path twice. Claude subagents are invisible
 to discovery, so only the parent session is listed, with `parent_id: null`.
 
 `candidate`: the Claude children are listed too, each with `parent_id` set to
@@ -85,7 +132,8 @@ and this fixture should not decide it.
 ```
 
 The verifier copies `home/` to a temporary directory and builds the OpenCode
-database there from `opencode_sessions.json`. The rows stay reviewable in a
+database there from `opencode_sessions.json`, and Codex's `state_5.sqlite` from
+`codex_threads.json`. The rows stay reviewable in a
 diff, and nothing is written into the repository or read from the machine's
 real history.
 
@@ -98,12 +146,18 @@ Attachments, hook output, queue operations and thinking blocks are dropped, so
 rewritten to `/fixture/...`. Sidecars are verbatim. OpenCode rows keep only the
 columns discovery reads.
 
+The Codex rollouts keep `session_meta` (without instructions, tools and context
+window), `turn_context` reduced to its turn ids, task start, completion and
+abort events, `SubAgentActivity` and `UserMessage` events, user and assistant
+messages, inter-agent messages, and `spawn_agent`/`wait_agent` calls with their
+outputs. Injected developer and user context is dropped, and so is the
+`message` argument of `spawn_agent`, which Codex stores encrypted. The index rows
+are the ones Codex wrote, with `rollout_path` made relative to `~/.codex`.
+
 ## Not covered yet
 
-- **Codex.** The spawn run hit an account usage limit before it produced a
-  subagent, so its nesting depth and fork-versus-spawn distinction are still
-  unverified against a deliberate run.
 - **Claude workflow subagents** (`subagents/workflows/wf_*/`) were not
   produced.
-- **An interrupted subagent**, one killed mid-run, as opposed to a failed
-  spawn.
+- **An interrupted Claude or OpenCode subagent.** Only Codex has one.
+- **Codex `review` and `guardian` subagents**, which carry no parent. Only
+  `thread_spawn` was produced.

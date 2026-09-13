@@ -1,0 +1,166 @@
+{
+  "threads": [
+    {
+      "id": "01a09c86-a4cf-7712-bbe0-817d7218d037",
+      "rollout_path": "sessions/2026/09/13/rollout-2026-09-13T21-47-44-01a09c86-a4cf-7712-bbe0-817d7218d037.jsonl",
+      "created_at_ms": 1789332464851,
+      "updated_at_ms": 1789332531203,
+      "source": "exec",
+      "thread_source": "user",
+      "cwd": "/fixture/spawn-codex",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "sb-fixture-parent. Spawn exactly two subagents in parallel in this one turn, using the spawn_agent tool twice. Name the first task 'alpha' and give it the message: 'Reply with the single word ALPHA. Do not use tools. Do not spawn agents.' Name the second 'beta' with message: 'Reply with the single word BETA. Do not use tools. Do not spawn agents.' Wait for both to finish, then reply with their two answers and nothing else.",
+      "archived": 0,
+      "agent_path": null,
+      "agent_nickname": null
+    },
+    {
+      "id": "01a09c86-c2a4-7cf1-85ce-b6829f20bc27",
+      "rollout_path": "sessions/2026/09/13/rollout-2026-09-13T21-47-52-01a09c86-c2a4-7cf1-85ce-b6829f20bc27.jsonl",
+      "created_at_ms": 1789332472484,
+      "updated_at_ms": 1789332478081,
+      "source": "{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"01a09c86-a4cf-7712-bbe0-817d7218d037\",\"depth\":1,\"agent_path\":\"/root/alpha\",\"agent_nickname\":\"Lagrange\",\"agent_role\":null}}}",
+      "thread_source": "subagent",
+      "cwd": "/fixture/spawn-codex",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "",
+      "archived": 0,
+      "agent_path": "/root/alpha",
+      "agent_nickname": "Lagrange"
+    },
+    {
+      "id": "01a09c86-ce6e-7733-9af8-6477744b02c5",
+      "rollout_path": "sessions/2026/09/13/rollout-2026-09-13T21-47-55-01a09c86-ce6e-7733-9af8-6477744b02c5.jsonl",
+      "created_at_ms": 1789332475502,
+      "updated_at_ms": 1789332481831,
+      "source": "{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"01a09c86-a4cf-7712-bbe0-817d7218d037\",\"depth\":1,\"agent_path\":\"/root/beta\",\"agent_nickname\":\"Kierkegaard\",\"agent_role\":null}}}",
+      "thread_source": "subagent",
+      "cwd": "/fixture/spawn-codex",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "",
+      "archived": 0,
+      "agent_path": "/root/beta",
+      "agent_nickname": "Kierkegaard"
+    },
+    {
+      "id": "01a09c87-6ab9-75a0-9b9b-41c85860376a",
+      "rollout_path": "sessions/2026/09/13/rollout-2026-09-13T21-48-35-01a09c87-6ab9-75a0-9b9b-41c85860376a.jsonl",
+      "created_at_ms": 1789332515513,
+      "updated_at_ms": 1789332528956,
+      "source": "{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"01a09c86-a4cf-7712-bbe0-817d7218d037\",\"depth\":1,\"agent_path\":\"/root/gamma\",\"agent_nickname\":\"Ptolemy\",\"agent_role\":null}}}",
+      "thread_source": "subagent",
+      "cwd": "/fixture/spawn-codex",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "",
+      "archived": 0,
+      "agent_path": "/root/gamma",
+      "agent_nickname": "Ptolemy"
+    },
+    {
+      "id": "01a09c87-8872-71a3-9970-b527b42fa7ef",
+      "rollout_path": "sessions/2026/09/13/rollout-2026-09-13T21-48-43-01a09c87-8872-71a3-9970-b527b42fa7ef.jsonl",
+      "created_at_ms": 1789332523122,
+      "updated_at_ms": 1789332527340,
+      "source": "{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"01a09c87-6ab9-75a0-9b9b-41c85860376a\",\"depth\":2,\"agent_path\":\"/root/gamma/delta\",\"agent_nickname\":\"Archimedes\",\"agent_role\":null}}}",
+      "thread_source": "subagent",
+      "cwd": "/fixture/spawn-codex",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "",
+      "archived": 0,
+      "agent_path": "/root/gamma/delta",
+      "agent_nickname": "Archimedes"
+    },
+    {
+      "id": "01a09c87-df82-78b3-867c-409738c68852",
+      "rollout_path": "sessions/2026/09/13/rollout-2026-09-13T21-49-05-01a09c87-df82-78b3-867c-409738c68852.jsonl",
+      "created_at_ms": 1789332545410,
+      "updated_at_ms": 1789332551290,
+      "source": "exec",
+      "thread_source": "user",
+      "cwd": "/fixture/spawn-codex",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "sb-fixture-fork. Do not spawn agents and do not use tools. Reply with the single word FORKED.",
+      "archived": 0,
+      "agent_path": null,
+      "agent_nickname": null
+    },
+    {
+      "id": "01a09c88-543a-76f3-bcee-6141297357c7",
+      "rollout_path": "sessions/2026/09/13/rollout-2026-09-13T21-49-35-01a09c88-543a-76f3-bcee-6141297357c7.jsonl",
+      "created_at_ms": 1789332575290,
+      "updated_at_ms": 1789332582224,
+      "source": "exec",
+      "thread_source": "user",
+      "cwd": "/fixture/spawn-codex",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "sb-fixture-subagent-fork. Do not spawn agents and do not use tools. Reply with the single word FORKED.",
+      "archived": 0,
+      "agent_path": null,
+      "agent_nickname": null
+    },
+    {
+      "id": "01a09c88-aea5-77a0-8c75-ef0fba63115e",
+      "rollout_path": "sessions/2026/09/13/rollout-2026-09-13T21-49-58-01a09c88-aea5-77a0-8c75-ef0fba63115e.jsonl",
+      "created_at_ms": 1789332598437,
+      "updated_at_ms": 1789332626402,
+      "source": "exec",
+      "thread_source": "user",
+      "cwd": "/fixture/spawn-codex",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "sb-fixture-killed. Spawn exactly one subagent with spawn_agent, task name 'epsilon', message: 'Run the shell command: sleep 300. Then reply EPSILON.' Then wait for it to finish, with a long timeout, and reply with its answer.",
+      "archived": 0,
+      "agent_path": null,
+      "agent_nickname": null
+    },
+    {
+      "id": "01a09c88-c65f-72c3-a231-e17f6f8dee46",
+      "rollout_path": "sessions/2026/09/13/rollout-2026-09-13T21-50-04-01a09c88-c65f-72c3-a231-e17f6f8dee46.jsonl",
+      "created_at_ms": 1789332604511,
+      "updated_at_ms": 1789332626412,
+      "source": "{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"01a09c88-aea5-77a0-8c75-ef0fba63115e\",\"depth\":1,\"agent_path\":\"/root/epsilon\",\"agent_nickname\":\"Aristotle\",\"agent_role\":null}}}",
+      "thread_source": "subagent",
+      "cwd": "/fixture/spawn-codex",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "",
+      "archived": 0,
+      "agent_path": "/root/epsilon",
+      "agent_nickname": "Aristotle"
+    }
+  ],
+  "thread_spawn_edges": [
+    {
+      "parent_thread_id": "01a09c86-a4cf-7712-bbe0-817d7218d037",
+      "child_thread_id": "01a09c86-c2a4-7cf1-85ce-b6829f20bc27",
+      "status": "open"
+    },
+    {
+      "parent_thread_id": "01a09c86-a4cf-7712-bbe0-817d7218d037",
+      "child_thread_id": "01a09c86-ce6e-7733-9af8-6477744b02c5",
+      "status": "open"
+    },
+    {
+      "parent_thread_id": "01a09c86-a4cf-7712-bbe0-817d7218d037",
+      "child_thread_id": "01a09c87-6ab9-75a0-9b9b-41c85860376a",
+      "status": "open"
+    },
+    {
+      "parent_thread_id": "01a09c87-6ab9-75a0-9b9b-41c85860376a",
+      "child_thread_id": "01a09c87-8872-71a3-9970-b527b42fa7ef",
+      "status": "open"
+    },
+    {
+      "parent_thread_id": "01a09c88-aea5-77a0-8c75-ef0fba63115e",
+      "child_thread_id": "01a09c88-c65f-72c3-a231-e17f6f8dee46",
+      "status": "open"
+    }
+  ]
+}
