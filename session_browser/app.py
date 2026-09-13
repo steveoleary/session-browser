@@ -835,14 +835,19 @@ class ResponsiveFooter(Footer):
 class SessionTable(DataTable):
     """DataTable that hops back to the search field when cursor-up at row 0."""
 
-    #: True while the RowSelected message in flight was posted by a click.
+    #: True while the message in flight was posted by a click.
     #:
-    #: Textual posts RowSelected for a click on the cell the cursor already
-    #: sits on -- a second click is its activate -- exactly as it does for
-    #: Enter, and the message itself carries no record of which arrived. Both
-    #: paths are stamped here, at the source: `on_click` before DataTable's own
-    #: click handler posts the message, `action_select_cursor` before the
-    #: Enter binding posts the keystroke's.
+    #: Textual posts RowHighlighted when a click moves the cursor and
+    #: RowSelected when it lands on the cell the cursor already occupies --
+    #: the same message Enter sends -- and neither carries a record of which
+    #: input arrived. Both paths are stamped here, at the source: `on_click`
+    #: before DataTable's own click handler posts one of them, and
+    #: `action_select_cursor` before the Enter binding posts RowSelected.
+    #:
+    #: A click posts exactly one of the two messages, so the stamp is read
+    #: through `take_pointer_selection` -- one message, one answer. A stamp
+    #: that outlived its message would be inherited by the next keyboard move,
+    #: which is why nothing reads the attribute directly.
     pointer_selection: bool = False
 
     class ColumnsChanged(Message):
@@ -876,16 +881,39 @@ class SessionTable(DataTable):
         """Right crosses into the detail pane instead of moving columns."""
         self.app.action_focus_right_pane()
 
-    def on_click(self) -> None:
-        """Stamp a pending selection as pointer-driven.
+    def on_click(self, event: events.Click) -> None:
+        """Stamp a pending highlight or selection as pointer-driven.
 
         The ordering is load-bearing rather than incidental: Textual walks the
         MRO and takes the private handler from the class that defines one, so
         this class's `on_click` is dispatched before `DataTable._on_click` and
-        the flag is already set when DataTable posts RowSelected from inside
+        the flag is already set when DataTable posts its message from inside
         that handler.
+
+        Only a click on a real cell stamps it. Header, row-label and
+        below-the-last-row clicks post nothing to consume the stamp, and one
+        left behind would be inherited by the next keyboard move -- which in a
+        one-pane layout means an arrow key opening a transcript.
         """
-        self.pointer_selection = True
+        meta = event.style.meta if event.style is not None else {}
+        row = meta.get("row")
+        self.pointer_selection = (
+            isinstance(row, int)
+            and 0 <= row < self.row_count
+            and meta.get("column", -1) >= 0
+        )
+
+    def take_pointer_selection(self) -> bool:
+        """Was the message being handled posted by a click? Answered once.
+
+        Reading the stamp and clearing it are one act on purpose. The caller
+        is handling a message a click may have posted, and that message is the
+        only thing entitled to the answer; anything later came from the
+        keyboard until a click says otherwise.
+        """
+        selection = self.pointer_selection
+        self.pointer_selection = False
+        return selection
 
     def action_select_cursor(self) -> None:
         """Stamp Enter's selection as keyboard-driven."""
@@ -1525,6 +1553,22 @@ class SessionBrowser(App):
         if self._focus_mode:
             screen.add_class("-focus-right" if pane == "detail" else "-focus-left")
 
+    def _one_pane_layout(self) -> bool:
+        """True when the layout shows one pane at a time.
+
+        Both the narrow flows and the `z` focus view hide the detail rather
+        than squeezing it, so a row cannot be highlighted *and* shown: the
+        transcript for it is behind a pane switch. That is the whole
+        difference between the layouts -- beside a visible detail pane, a click
+        on a row has already shown the transcript it moved the highlight to.
+        """
+        screen = self.screen
+        return (
+            self._focus_mode
+            or screen.has_class("-micro")
+            or screen.has_class("-compact")
+        )
+
     def _update_context_bar(self, widget=None) -> None:
         if self._status.has_class("-flash-ok") or self._status.has_class("-flash-err"):
             return
@@ -2080,19 +2124,35 @@ class SessionBrowser(App):
         self._select_session(str(event.row_key.value))
         self._apply_pane_visibility("detail")
         # A click on the row the cursor is already on arrives here as well --
-        # that is Textual's activate-on-click -- and it means the opposite of
-        # Enter: the pointer is in the list, so the list keeps the focus. Only
-        # a layout whose pane switch above has just hidden the list can answer
-        # differently, because then there is no visible list left to hold it.
-        if event.data_table.pointer_selection and self.query_one("#left-pane").display:
+        # that is Textual's activate-on-click -- and it means the same as the
+        # click that highlighted the row and the opposite of Enter: the pointer
+        # chose a row, and the pointer is in the list, so the list keeps the
+        # keyboard. Only a layout whose switch above has just hidden the list
+        # can answer differently, because then there is no visible list left to
+        # hold it -- the same rule the highlighting click follows.
+        if event.data_table.take_pointer_selection() and not self._one_pane_layout():
             return
         self.screen.set_focus(self.query_one("#detail-scroll", VerticalScroll))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        # The stamp is read before the early returns below: it belongs to this
+        # message, and a suppressed echo must not leave it set for the next
+        # keyboard move to inherit.
+        pointer = event.data_table.take_pointer_selection()
         if self._suppress_table_highlights:
             return
         if event.row_key:
             self._select_session(str(event.row_key.value))
+            # In a one-pane layout the highlight is shown in no pane at all, so
+            # the click that moved it chose a row to read and the transcript
+            # for that row is behind the pane switch: the click opens it. The
+            # missing pane is what decides, not the click -- beside a visible
+            # detail pane the same gesture has already shown the transcript,
+            # and following it with the keyboard would take the reader out of
+            # the list their pointer is still in.
+            if pointer and self._one_pane_layout():
+                self._apply_pane_visibility("detail")
+                self.screen.set_focus(self.query_one("#detail-scroll", VerticalScroll))
 
     def _select_session(self, row_key: str) -> None:
         try:

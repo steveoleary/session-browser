@@ -2221,6 +2221,13 @@ class TestPointerFlow:
     focusable, so clicking one did nothing at all. And a click on the cell the
     cursor already occupies posts RowSelected -- the same message Enter sends,
     and the app answers that by handing the reader to the transcript.
+
+    What a click on a row *does* is settled by the layout, not by the click: a
+    row clicked beside a visible detail pane has already been shown, and there
+    the keyboard stays in the list. In a one-pane flow the transcript for it is
+    behind the pane switch, so the same click brings that pane up -- otherwise
+    the row takes two clicks, and the first has no consequence a reader can
+    see beyond the highlight bar.
     """
 
     async def test_click_on_pane_chrome_focuses_that_pane(self):
@@ -2239,17 +2246,23 @@ class TestPointerFlow:
             assert app.query_one("#detail-scroll").has_focus
 
     async def test_click_on_highlighted_row_keeps_the_list_focused(self):
+        """Beside a visible detail pane, the transcript has already appeared.
+
+        The click that moved the highlight showed it, and moving the keyboard
+        as well would be a bounce for a reader whose pointer is in the list.
+        """
         app, fake = _make_app_with_rows()
         async with app.run_test(size=(160, 45)) as pilot:
             await _install_fake_sessions(app, pilot, fake)
             app.action_focus_right_pane()
             await pilot.pause()
 
-            # The first click moves the cursor, so the second lands on the row
-            # the cursor already sits on -- Textual's activate, which is the
-            # message a reader gets for Enter as well.
+            # The first click moves the cursor, and the detailed transcript for
+            # that row is on screen. The second lands on the row the cursor
+            # already sits on -- Textual's activate, the message Enter sends.
             await pilot.click("#session-table", offset=(6, 4))
             await pilot.pause()
+            assert app._selected is not None and app._selected.id == "s4"
             await pilot.click("#session-table", offset=(6, 4))
             await pilot.pause()
 
@@ -2266,9 +2279,13 @@ class TestPointerFlow:
             await pilot.pause()
             assert app.query_one("#detail-scroll").has_focus
 
-    async def test_click_that_hides_the_list_takes_focus_with_it(self):
-        """A narrow flow shows one pane at a time: the click that opens the
-        transcript leaves no list behind to hold the keyboard."""
+    async def test_one_click_opens_when_the_detail_is_behind_a_pane_switch(self):
+        """The click that moves the highlight is the click that opens.
+
+        There is no pane on screen for the selection to appear in, so the
+        switch is the other half of the same click -- otherwise a reader picks
+        a row and the only thing that moves is the highlight bar.
+        """
         app, fake = _make_app_with_rows()
         async with app.run_test(size=(88, 28)) as pilot:
             await _install_fake_sessions(app, pilot, fake)
@@ -2276,12 +2293,92 @@ class TestPointerFlow:
 
             await pilot.click("#session-table", offset=(6, 4))
             await pilot.pause()
-            assert app.query_one("#session-table").has_focus
+
+            assert app._selected is not None and app._selected.id == "s4"
+            assert not app.query_one("#left-pane").display
+            assert app.query_one("#right-pane").display
+            assert app.query_one("#detail-scroll").has_focus
+
+    async def test_click_on_the_highlighted_row_opens_in_a_one_pane_flow(self):
+        """The other click Textual posts: the row the cursor already sits on.
+
+        Reading and coming back leaves the cursor where it was, so the next
+        click on that row arrives as RowSelected rather than RowHighlighted.
+        Same gesture, same row, so it must not answer differently.
+        """
+        app, fake = _make_app_with_rows()
+        async with app.run_test(size=(88, 28)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            await pilot.click("#session-table", offset=(6, 4))
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.query_one("#left-pane").display
 
             await pilot.click("#session-table", offset=(6, 4))
             await pilot.pause()
+
             assert not app.query_one("#left-pane").display
             assert app.query_one("#detail-scroll").has_focus
+
+    async def test_focus_view_counts_as_one_pane(self):
+        """`z` is the same drill-down by hand: the detail is one switch away."""
+        app, fake = _make_app_with_rows()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app.query_one("#session-table").focus()
+            await pilot.press("z")
+            await pilot.pause()
+            assert app.screen.has_class("-focus-left")
+            assert not app.query_one("#right-pane").display
+
+            await pilot.click("#session-table", offset=(6, 4))
+            await pilot.pause()
+
+            assert app.screen.has_class("-focus-right")
+            assert app.query_one("#detail-scroll").has_focus
+
+    async def test_a_keyboard_move_after_a_click_only_moves_the_highlight(self):
+        """Only the message a click posted may open; arrows never inherit it.
+
+        In the one-pane flow the arrows are how the list is read, so a stamp
+        left behind by an earlier click would turn browsing into opening.
+        """
+        app, fake = _make_app_with_rows()
+        async with app.run_test(size=(88, 28)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            await pilot.click("#session-table", offset=(6, 4))
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+
+            await pilot.press("down")
+            await pilot.pause()
+
+            table = app.query_one("#session-table")
+            assert table.cursor_row == 4
+            assert app.query_one("#left-pane").display
+            assert table.has_focus
+
+    async def test_a_click_that_posts_no_row_message_leaves_no_stamp(self):
+        """A header click picks no row, and Textual returns from its own
+        handler before moving the cursor: were it to stamp, the next arrow key
+        would read that stamp as its own."""
+        app, fake = _make_app_with_rows()
+        async with app.run_test(size=(88, 28)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            table = app.query_one("#session-table")
+
+            await pilot.click("#session-table", offset=(6, 0))
+            await pilot.pause()
+            assert table.cursor_row == 0
+
+            await pilot.press("down")
+            await pilot.pause()
+
+            assert table.cursor_row == 1
+            assert app.query_one("#left-pane").display
+            assert not app.query_one("#right-pane").display
 
 
 @pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
