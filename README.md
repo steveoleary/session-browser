@@ -128,6 +128,9 @@ available through four commands for agents, scripts, and targeted retrieval:
 # Browse recent sessions from this project
 session-browser list --here --limit 20
 
+# Choose a session using short excerpts of its latest user and assistant messages
+session-browser list --here --limit 6 --preview ending
+
 # Search complete transcripts and return useful context
 session-browser search --here --mode snippets "pytest fixture"
 
@@ -137,6 +140,9 @@ session-browser get claude:7645 --output handoff.md
 # What a session was asked to do and where it got to, in one read
 session-browser get claude:7645 --brief
 
+# Read recent user and assistant messages together, sharing a text budget
+session-browser get claude:7645 --recent 8 --budget 6000
+
 # Summarise providers, activity, and working directories
 session-browser stats --here
 ```
@@ -144,6 +150,11 @@ session-browser stats --here
 Use `session-browser COMMAND --help` for filters, output formats, date ranges,
 and retrieval windows. Commands return JSON by default where it is useful for
 automation.
+
+Ending previews and recent reads preserve entry numbers for expanding evidence.
+The recent budget caps entry text per session; metadata and omission receipts are
+additional. These are excerpts of the transcript, including progress messages,
+not generated summaries or a claim that the session's work is complete.
 
 ## Skill for agents
 

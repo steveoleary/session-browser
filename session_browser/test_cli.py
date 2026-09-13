@@ -136,6 +136,7 @@ class TestHelpOutputContracts:
             ("list",),
             ("list", "--around", "codex:bbb", "--window", "1w"),
             ("list", "--cwd", "projAA"),
+            ("list", "--preview", "ending"),
         ):
             code, out, _ = cli(*argv)
             assert code == 0
@@ -153,6 +154,9 @@ class TestHelpOutputContracts:
         assert contract["counts"] == _key_union(
             payload["counts"] for payload in payloads
         )
+        previews = [e for row in payloads[-1]["sessions"] for e in row["preview"]]
+        assert previews
+        assert contract["preview_entry"] == _key_union(previews)
 
     def test_list_text_columns_match_what_text_actually_emits(self, cli, capsys):
         """The columns are declared in one tuple and checked against a run.
@@ -226,6 +230,7 @@ class TestHelpOutputContracts:
             ("get", "claude:aaa", "--entries", "0", "--format", "json"),
             ("get", "claude:aaa", "--role", "user", "--format", "json"),
             ("get", "claude:aaa", "--brief", "1:1", "--format", "json"),
+            ("get", "claude:aaa", "--recent", "--budget", "5", "--format", "json"),
         ):
             code, out, _ = cli(*argv)
             assert code == 0
@@ -260,6 +265,10 @@ class TestHelpOutputContracts:
         assert contract["brief"] == _key_union(
             payload["brief"] for payload in singles if "brief" in payload
         )
+        receipt = singles[-1]["budget"]
+        assert contract["budget"] == set(receipt)
+        assert receipt["omitted"]
+        assert contract["omitted_entry"] == _key_union(receipt["omitted"])
         assert contract["entry"] == _key_union(
             entry for payload in singles for entry in payload["entries"]
         )
@@ -2172,6 +2181,200 @@ class TestGetBrief:
         code, _, _ = talky_cli("get", "claude:talky", "--brief", "2:3")
         assert code == 0
         assert len(calls) == 1
+
+    def test_recent_matches_combined_tail_and_reads_once(self, talky_cli, monkeypatch):
+        import session_browser.cli as cli_mod
+
+        _, before, _ = talky_cli(
+            "get",
+            "talky",
+            "--role",
+            "user,assistant",
+            "--tail",
+            "8",
+            "--format",
+            "json",
+        )
+        real = cli_mod.load_transcript
+        calls = []
+
+        def counted(session):
+            calls.append(session.id)
+            return real(session)
+
+        monkeypatch.setattr(cli_mod, "load_transcript", counted)
+        code, out, _ = talky_cli("get", "talky", "--recent", "--format", "json")
+        assert code == 0
+        data = json.loads(out)
+        assert data["entries"] == json.loads(before)["entries"]
+        assert data["recent"] == 8
+        assert data["budget"]["omitted"] == []
+        assert calls == ["talky"]
+
+    def test_budget_preserves_coordinates_and_can_expand_every_excerpt(self, talky_cli):
+        import shlex
+
+        _, full, _ = talky_cli(
+            "get", "talky", "--recent", "4", "--budget", "0", "--format", "json"
+        )
+        originals = json.loads(full)["entries"]
+        code, out, _ = talky_cli(
+            "get", "talky", "--recent", "4", "--budget", "13", "--format", "json"
+        )
+        assert code == 0
+        data = json.loads(out)
+        assert [e["entry_index"] for e in data["entries"]] == [
+            e["entry_index"] for e in originals
+        ]
+        assert sum(len(e["text"]) for e in data["entries"]) == 13
+        assert data["budget"]["returned_chars"] == 13
+        assert (
+            data["budget"]["omitted_chars"]
+            == sum(len(e["text"]) for e in originals) - 13
+        )
+        assert {e["role"] for e in data["entries"]} == {"user", "assistant"}
+        for item in data["budget"]["omitted"]:
+            code, expanded, _ = talky_cli(
+                *shlex.split(item["expand"])[1:], "--format", "json"
+            )
+            assert code == 0
+            entry = json.loads(expanded)["entries"][0]
+            assert entry == next(
+                e for e in originals if e["entry_index"] == item["entry_index"]
+            )
+        _, text, _ = talky_cli("get", "talky", "--recent", "4", "--budget", "13")
+        assert "chars omitted" in text
+        assert "expand: `session-browser get" in text
+
+    def test_preview_uses_only_one_stream_and_latest_of_each_role(
+        self, talky_cli, monkeypatch
+    ):
+        import session_browser.cli as cli_mod
+
+        calls = []
+        real = cli_mod.iter_entries
+
+        def counted(session, warnings):
+            calls.append(session.id)
+            return real(session, warnings)
+
+        monkeypatch.setattr(cli_mod, "iter_entries", counted)
+        code, out, _ = talky_cli("list", "--preview", "ending")
+        assert code == 0
+        row = json.loads(out)["sessions"][0]
+        assert row["total_entries"] == 24
+        assert [(e["entry_index"], e["role"], e["text"]) for e in row["preview"]] == [
+            (21, "user", "ask 7"),
+            (22, "assistant", "answer 7"),
+        ]
+        assert calls == ["talky"]
+
+
+class TestOrientationEdgeCases:
+    def test_short_correction_survives_a_long_reply_and_small_budget(
+        self, cli, sessions
+    ):
+        f = Path(sessions[0].content_path)
+        f.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in [
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [{"type": "text", "text": "done " * 1000}]
+                        },
+                    },
+                    {"type": "user", "message": {"content": "No, still broken."}},
+                ]
+            )
+            + "\n"
+        )
+        code, out, _ = cli(
+            "get", "aaa", "--recent", "--budget", "40", "--format", "json"
+        )
+        assert code == 0
+        data = json.loads(out)
+        assert data["entries"][-1]["text"] == "No, still broken."
+        assert sum(len(e["text"]) for e in data["entries"]) == 40
+        assert data["budget"]["omitted"][0]["entry_index"] == 0
+        code, out, _ = cli("list", "--preview", "ending", "--cwd", "projA")
+        assert code == 0
+        preview = json.loads(out)["sessions"][0]["preview"]
+        assert [e["role"] for e in preview] == ["assistant", "user"]
+        assert preview[-1]["text"] == "No, still broken."
+
+    def test_preview_clips_and_reports_partial_and_unreadable(
+        self, cli, sessions, tmp_path
+    ):
+        f = Path(sessions[0].content_path)
+        write_claude(f, ["x" * 900])
+        f.write_text(f.read_text() + "{broken\n")
+        sessions.append(
+            Session(id="bad", provider="claude", content_path=str(tmp_path / "missing"))
+        )
+        code, out, _ = cli("list", "--preview", "ending")
+        assert code == 0
+        data = json.loads(out)
+        rows = {s["id"]: s for s in data["sessions"]}
+        entry = rows["claude:aaa"]["preview"][0]
+        assert entry["text"] == "x" * 600
+        assert entry["original_chars"] == 900
+        assert rows["claude:bad"]["preview"] is None
+        assert data["counts"]["unreadable"] == 1
+        assert any("claude:aaa" in w for w in data["warnings"])
+
+    def test_preview_limit_is_applied_before_reading(self, cli, monkeypatch):
+        import session_browser.cli as cli_mod
+
+        real = cli_mod._ending_preview
+        calls = []
+
+        def counted(session):
+            calls.append(session.id)
+            return real(session)
+
+        monkeypatch.setattr(cli_mod, "_ending_preview", counted)
+        code, out, _ = cli("list", "--preview", "ending", "--limit", "1")
+        assert code == 0
+        assert calls == ["ccc"]
+        assert json.loads(out)["warnings"]
+
+    def test_empty_and_batch_recent_preserve_diagnostics(self, cli, sessions, tmp_path):
+        Path(sessions[0].content_path).write_text("")
+        sessions.append(
+            Session(id="bad", provider="claude", content_path=str(tmp_path / "missing"))
+        )
+        code, out, _ = cli(
+            "get", "aaa", "bbb", "bad", "--recent", "--budget", "3", "--format", "json"
+        )
+        assert code == 0
+        data = json.loads(out)
+        assert data["sessions"][0]["entries"] == []
+        assert data["sessions"][0]["budget"]["returned_chars"] == 0
+        assert data["sessions"][1]["budget"]["returned_chars"] == 3
+        assert data["skipped"][0]["id"] == "claude:bad"
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            ("--recent", "0"),
+            ("--recent", "-1"),
+            ("--recent", "--budget", "-1"),
+            ("--recent", "--role", "user"),
+            ("--recent", "--clip", "10"),
+            ("--budget", "10"),
+        ],
+    )
+    def test_invalid_recent_options_fail(self, cli, flags):
+        code, _, err = cli("get", "aaa", *flags)
+        assert code == 1
+        assert "--" in err
+
+    def test_preview_does_not_silently_disappear_in_text(self, cli):
+        code, _, err = cli("list", "--preview", "ending", "--format", "text")
+        assert code == 1
+        assert "requires --format json" in err
 
 
 class TestGetRoleFilter:

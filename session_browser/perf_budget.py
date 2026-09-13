@@ -911,6 +911,12 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             lambda: _cli("list", "--limit", "50"),
         ),
         Workload(
+            "cli.list.preview",
+            "Ending previews must reuse the listing's count scan, limited to "
+            "the returned sessions, rather than load transcripts again.",
+            lambda: _cli("list", "--limit", "50", "--preview", "ending"),
+        ),
+        Workload(
             "cli.list.no_codex_db",
             "The file-scan fallback is the safety net for a missing or stale "
             "Codex index. It must stay budgeted so a regression in it cannot "
@@ -938,6 +944,12 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "Retrieving one session must read one transcript, on top of the "
             "discovery pass that located it.",
             lambda: _cli("get", "claude:perf-claude-0000"),
+        ),
+        Workload(
+            "cli.get.recent",
+            "A recent conversation and its text budget must use one transcript "
+            "read, not separate user and assistant retrievals.",
+            lambda: _cli("get", "claude:perf-claude-0000", "--recent"),
         ),
         Workload(
             "tui.search.rare",

@@ -12,6 +12,7 @@ import difflib
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -124,6 +125,10 @@ Default format: json. Text emits one tab-separated session per line.
 {text}
 "warnings" and session "offset" are conditional. "total_entries" is null
 when a transcript is unreadable; counts still classifies every returned row.
+"preview" is present only with --preview ending: at most the latest user and
+assistant entries in chronological order, or null if unreadable. It is an
+excerpt, not a summary or evidence of completion. original_chars > len(text)
+means clipped; expand retrieves the full entry. Empty readable sessions use [].
 {subagents}
 """.format(
     subagents=_SUBAGENT_CONTRACT,
@@ -135,7 +140,8 @@ when a transcript is unreadable; counts still classifies every returned row.
     ),
     keys=_json_key_contract(
         ("envelope", ("sessions", "counts", "warnings")),
-        ("session", _SESSION_KEYS + ("total_entries", "offset")),
+        ("session", _SESSION_KEYS + ("total_entries", "offset", "preview")),
+        ("preview_entry", ("entry_index", "role", "text", "original_chars", "expand")),
         ("counts", ("returned", "readable", "empty", "unreadable")),
         *_ERROR_GROUPS,
     ),
@@ -149,7 +155,7 @@ Batch JSON example: {{"sessions": [{{"session": {{"id": "claude:abc", ...}},
   "entries": [...], ...}}], "skipped": [{{"id": "claude:bad", "error": "..."}}]}}
 {keys}
 {subagents}
-"entry_range", "roles", "brief" and "clip" are conditional. Every entry has
+"entry_range", "roles", "brief", "clip", "recent" and "budget" are conditional. Every entry has
 all entry keys; entry_index is absolute and matches search snippets. A batch's
 "sessions" items have exactly the single payload shape, not list rows.
 With --output --format json, stdout is the output_confirmation shape.
@@ -167,6 +173,8 @@ With --output --format json, stdout is the output_confirmation shape.
                 "roles",
                 "brief",
                 "clip",
+                "recent",
+                "budget",
             ),
         ),
         ("batch", ("sessions", "skipped")),
@@ -174,6 +182,8 @@ With --output --format json, stdout is the output_confirmation shape.
         ("entry", _ENTRY_KEYS),
         ("entry_range", ("start", "end")),
         ("brief", ("intent", "ending")),
+        ("budget", ("limit", "returned_chars", "omitted_chars", "omitted")),
+        ("omitted_entry", ("entry_index", "omitted_chars", "expand")),
         ("skipped", ("id", "error")),
         ("output_confirmation", ("written", "id", "warnings")),
         *_ERROR_GROUPS,
@@ -339,6 +349,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_filter_args(p_list)
     p_list.add_argument(
+        "--preview",
+        choices=["ending"],
+        help="include the latest user and assistant entries, in order, each capped "
+        "at 600 characters with original length and an expansion command. "
+        "Reuses the entry-count scan. JSON only; unreadable previews are null",
+    )
+    p_list.add_argument(
         "--sort",
         choices=["recent", "oldest"],
         default="recent",
@@ -405,6 +422,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="return only the last N entries (how it ended; "
         "with --role: the last N kept entries, e.g. the "
         "last N user turns)",
+    )
+    window.add_argument(
+        "--recent",
+        nargs="?",
+        const=8,
+        type=int,
+        metavar="N",
+        help="last N user/assistant entries in conversation order (default 8), "
+        "with a shared text budget (default 6000 chars). Includes progress "
+        "messages; does not infer final replies. Cannot combine with --role or --clip",
+    )
+    p_get.add_argument(
+        "--budget",
+        type=int,
+        metavar="N",
+        help="with --recent: maximum total entry-text characters per session "
+        "(default 6000; 0 disables). Headers, JSON syntax and omission receipts "
+        "are additional. Short entries get space first; longer entries share the remainder",
     )
     window.add_argument(
         "--brief",
@@ -1007,6 +1042,95 @@ def _entry_count(s: Session) -> int | None:
         return None
 
 
+def _expand_entry(s: Session, index: int) -> str:
+    return shlex.join(
+        [
+            "session-browser",
+            "get",
+            canonical_id(s),
+            "--entries",
+            str(index),
+            "--clip",
+            "0",
+        ]
+    )
+
+
+def _ending_preview(s: Session) -> tuple[int | None, list[dict] | None, list[str]]:
+    """Count and retain at most two bounded excerpts in one streaming read."""
+    warnings: list[str] = []
+    latest: dict[str, dict] = {}
+    count = 0
+    try:
+        for i, entry in enumerate(iter_entries(s, warnings)):
+            count = i + 1
+            if entry.role in {"user", "assistant"}:
+                latest[entry.role] = {
+                    "entry_index": i,
+                    "role": entry.role,
+                    "text": entry.text[:600],
+                    "original_chars": len(entry.text),
+                }
+    except (TranscriptUnreadable, OSError):
+        return None, None, warnings
+    preview = sorted(latest.values(), key=lambda e: e["entry_index"])
+    for item in preview:
+        item["expand"] = _expand_entry(s, item["entry_index"])
+    return count, preview, warnings
+
+
+def _budget_transcript(t: Transcript, indices: list[int], budget: int):
+    """Share a source-text budget without letting a long reply erase user context.
+
+    Allocate shortest entries first. Long entries share the remaining budget;
+    ties favour newer entries. Receipts stay outside the source text.
+    """
+    entries = list(t.entries)
+    remaining = budget
+    order = sorted(range(len(entries)), key=lambda i: (len(entries[i].text), i))
+    omitted = []
+    for position, i in enumerate(order):
+        entry = entries[i]
+        keep = (
+            min(len(entry.text), remaining // (len(order) - position))
+            if budget
+            else len(entry.text)
+        )
+        remaining -= keep
+        if keep < len(entry.text):
+            entries[i] = replace(entry, text=entry.text[:keep])
+            omitted.append(
+                {
+                    "entry_index": indices[i],
+                    "omitted_chars": len(entry.text) - keep,
+                    "expand": _expand_entry(t.session, indices[i]),
+                }
+            )
+    receipt = {
+        "limit": budget,
+        "returned_chars": sum(len(e.text) for e in entries),
+        "omitted_chars": sum(e["omitted_chars"] for e in omitted),
+        "omitted": sorted(omitted, key=lambda e: e["entry_index"]),
+    }
+    return Transcript(t.session, entries, t.warnings), receipt
+
+
+def _render_budget(receipt: dict) -> str:
+    lines = [
+        (
+            f"Text budget: {receipt['returned_chars']} chars returned; "
+            f"{receipt['omitted_chars']} chars omitted from the selected entries. "
+            "Metadata and receipts are additional."
+        )
+    ]
+    for item in receipt["omitted"]:
+        lines.append(
+            f"- [{item['entry_index']}] clipped {item['omitted_chars']} chars; "
+            f"expand: `{item['expand']}`"
+        )
+    return "\n".join(lines)
+
+
 def _human_duration(seconds: int | None) -> str:
     if seconds is None:
         return "-"
@@ -1067,6 +1191,8 @@ def _id_sample(ids: list[str], cap: int = 5) -> str:
 
 
 def cmd_list(args) -> int:
+    if args.preview and args.format != "json":
+        raise CliError("--preview requires --format json", code="invalid_filter")
     warnings: list[str] = []
     discovered = _discover(args)
     around = _resolve_anchor(discovered, args)
@@ -1085,9 +1211,19 @@ def cmd_list(args) -> int:
     # Entry counts open every listed transcript — I/O-bound reads, so
     # overlap them (same rationale as search's per-session scan pool).
     counts: list[int | None] = []
+    previews = {}
     if sessions:
         with ThreadPoolExecutor(max_workers=8) as ex:
-            counts = list(ex.map(_entry_count, sessions))
+            if args.preview:
+                results = list(ex.map(_ending_preview, sessions))
+                for s, (n, preview, parse_warnings) in zip(
+                    sessions, results, strict=True
+                ):
+                    counts.append(n)
+                    previews[canonical_id(s)] = preview
+                    warnings.extend(f"{canonical_id(s)}: {w}" for w in parse_warnings)
+            else:
+                counts = list(ex.map(_entry_count, sessions))
         unreadable = [
             canonical_id(s) for s, n in zip(sessions, counts, strict=True) if n is None
         ]
@@ -1111,6 +1247,8 @@ def cmd_list(args) -> int:
         for s, n in zip(sessions, counts, strict=True):
             item = session_to_dict(s)
             item["total_entries"] = n
+            if args.preview:
+                item["preview"] = previews[canonical_id(s)]
             if around is not None:
                 ts = _session_time(s)
                 item["offset"] = (
@@ -1441,6 +1579,23 @@ def _session_view(session: Session, args, roles):
 def cmd_get(args) -> int:
     roles = _parse_roles(args.role)
     brief = _parse_brief(args.brief)
+    if args.recent is not None:
+        if args.recent < 1:
+            raise CliError("--recent must be positive", code="invalid_filter")
+        if roles is not None or args.clip is not None:
+            raise CliError(
+                "--recent chooses its roles and uses --budget instead of --clip",
+                code="invalid_filter",
+            )
+        roles = ["user", "assistant"]
+        args.tail = args.recent
+        args.clip = 0
+        if args.budget is None:
+            args.budget = 6000
+        if args.budget < 0:
+            raise CliError("--budget must be non-negative", code="invalid_filter")
+    elif args.budget is not None:
+        raise CliError("--budget requires --recent", code="invalid_filter")
     if brief is not None and roles is not None:
         raise CliError(
             "--brief chooses its own roles (user for the intent, assistant "
@@ -1464,6 +1619,7 @@ def cmd_get(args) -> int:
         if all(s is not prev for prev in sessions):
             sessions.append(s)
     views = []
+    budgets = {}
     skipped: list[tuple[Session, str]] = []
     for s in sessions:
         try:
@@ -1476,6 +1632,9 @@ def cmd_get(args) -> int:
                 ) from exc
             skipped.append((s, str(exc)))
             continue
+        if args.recent is not None:
+            t, receipt = _budget_transcript(t, indices, args.budget)
+            budgets[canonical_id(s)] = receipt
         views.append((s, _clip_transcript(t, clip), total, window, indices))
     if not views:
         raise CliError(
@@ -1498,6 +1657,9 @@ def cmd_get(args) -> int:
                 payload["brief"] = {"intent": brief[0], "ending": brief[1]}
             if clip:
                 payload["clip"] = clip
+            if args.recent is not None:
+                payload["recent"] = args.recent
+                payload["budget"] = budgets[canonical_id(t.session)]
             payloads.append(payload)
         if single:
             content = json.dumps(payloads[0], indent=2)
@@ -1527,6 +1689,11 @@ def cmd_get(args) -> int:
             )
             for _, t, total, window, indices in views
         ]
+        if args.recent is not None:
+            docs = [
+                _render_budget(budgets[canonical_id(s)]) + "\n\n" + doc
+                for doc, (s, *_) in zip(docs, views, strict=True)
+            ]
         content = "\n\n---\n\n".join(docs)
     if args.output:
         path = Path(args.output)
