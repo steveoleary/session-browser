@@ -835,6 +835,16 @@ class ResponsiveFooter(Footer):
 class SessionTable(DataTable):
     """DataTable that hops back to the search field when cursor-up at row 0."""
 
+    #: True while the RowSelected message in flight was posted by a click.
+    #:
+    #: Textual posts RowSelected for a click on the cell the cursor already
+    #: sits on -- a second click is its activate -- exactly as it does for
+    #: Enter, and the message itself carries no record of which arrived. Both
+    #: paths are stamped here, at the source: `on_click` before DataTable's own
+    #: click handler posts the message, `action_select_cursor` before the
+    #: Enter binding posts the keystroke's.
+    pointer_selection: bool = False
+
     class ColumnsChanged(Message):
         """The list crossed a width threshold and needs different columns."""
 
@@ -865,6 +875,22 @@ class SessionTable(DataTable):
     def action_cursor_right(self) -> None:
         """Right crosses into the detail pane instead of moving columns."""
         self.app.action_focus_right_pane()
+
+    def on_click(self) -> None:
+        """Stamp a pending selection as pointer-driven.
+
+        The ordering is load-bearing rather than incidental: Textual walks the
+        MRO and takes the private handler from the class that defines one, so
+        this class's `on_click` is dispatched before `DataTable._on_click` and
+        the flag is already set when DataTable posts RowSelected from inside
+        that handler.
+        """
+        self.pointer_selection = True
+
+    def action_select_cursor(self) -> None:
+        """Stamp Enter's selection as keyboard-driven."""
+        self.pointer_selection = False
+        super().action_select_cursor()
 
     def on_resize(self, event: events.Resize) -> None:
         width = event.size.width
@@ -1529,6 +1555,35 @@ class SessionBrowser(App):
         self._apply_pane_visibility(pane)
         self._update_context_bar(event.widget)
 
+    def on_click(self, event: events.Click) -> None:
+        """A click on the pane's own chrome works in that pane too.
+
+        Textual focuses the focusable widget under the pointer, and a pane's
+        title strip, header and border are none of them focusable -- they are
+        plain containers and Static labels -- so clicking SESSIONS or TRANSCRIPT
+        did nothing whatsoever, which reads as the pane refusing focus. A click
+        that landed in a pane is a request to work in it, so it goes to the
+        widget that pane exists for.
+
+        The guard in front of it is what keeps this from being a grab: a click
+        that landed on something focusable is not touched at all, and that is
+        the search boxes, the list, the transcript entries, and the scroll they
+        live in.
+        """
+        if self.screen.get_focusable_widget_at(event.screen_x, event.screen_y):
+            return
+        for pane_id, focus_id in (
+            ("#left-pane", "#session-table"),
+            ("#right-pane", "#detail-scroll"),
+        ):
+            pane = self.query_one(pane_id, Vertical)
+            # `display` is read rather than assumed: the hidden pane in a narrow
+            # flow still reports a region from its last layout, so a click in
+            # the visible pane would otherwise be credited to the invisible one.
+            if pane.display and pane.region.contains(event.screen_x, event.screen_y):
+                self.query_one(focus_id).focus()
+                return
+
     @_teardown_safe
     def _sync_responsive_chrome(self) -> None:
         """Refresh width/height-sensitive text after an in-place resize."""
@@ -2024,6 +2079,13 @@ class SessionBrowser(App):
         # Enter drills into the transcript. Search remains a contextual `/`.
         self._select_session(str(event.row_key.value))
         self._apply_pane_visibility("detail")
+        # A click on the row the cursor is already on arrives here as well --
+        # that is Textual's activate-on-click -- and it means the opposite of
+        # Enter: the pointer is in the list, so the list keeps the focus. Only
+        # a layout whose pane switch above has just hidden the list can answer
+        # differently, because then there is no visible list left to hold it.
+        if event.data_table.pointer_selection and self.query_one("#left-pane").display:
+            return
         self.screen.set_focus(self.query_one("#detail-scroll", VerticalScroll))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:

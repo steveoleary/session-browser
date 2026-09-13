@@ -2213,6 +2213,79 @@ class TestKeyboardFlow:
 
 @pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
 @pytest.mark.asyncio
+class TestPointerFlow:
+    """A click must leave the keyboard where the pointer went.
+
+    Two paths used to fail that. Textual focuses the focusable widget under the
+    pointer, and a pane's title strip, header and border are none of them
+    focusable, so clicking one did nothing at all. And a click on the cell the
+    cursor already occupies posts RowSelected -- the same message Enter sends,
+    and the app answers that by handing the reader to the transcript.
+    """
+
+    async def test_click_on_pane_chrome_focuses_that_pane(self):
+        app, fake = _make_app_with_rows()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app.query_one("#detail-scroll").focus()
+            await pilot.pause()
+
+            await pilot.click("#sessions-status")
+            await pilot.pause()
+            assert app.query_one("#session-table").has_focus
+
+            await pilot.click("#transcript-title")
+            await pilot.pause()
+            assert app.query_one("#detail-scroll").has_focus
+
+    async def test_click_on_highlighted_row_keeps_the_list_focused(self):
+        app, fake = _make_app_with_rows()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app.action_focus_right_pane()
+            await pilot.pause()
+
+            # The first click moves the cursor, so the second lands on the row
+            # the cursor already sits on -- Textual's activate, which is the
+            # message a reader gets for Enter as well.
+            await pilot.click("#session-table", offset=(6, 4))
+            await pilot.pause()
+            await pilot.click("#session-table", offset=(6, 4))
+            await pilot.pause()
+
+            assert app.query_one("#session-table").has_focus
+            assert not app.query_one("#detail-scroll").has_focus
+
+    async def test_enter_still_hands_the_reader_to_the_transcript(self):
+        app, fake = _make_app_with_rows()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app.query_one("#session-table").focus()
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.query_one("#detail-scroll").has_focus
+
+    async def test_click_that_hides_the_list_takes_focus_with_it(self):
+        """A narrow flow shows one pane at a time: the click that opens the
+        transcript leaves no list behind to hold the keyboard."""
+        app, fake = _make_app_with_rows()
+        async with app.run_test(size=(88, 28)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            assert app.screen.has_class("-compact")
+
+            await pilot.click("#session-table", offset=(6, 4))
+            await pilot.pause()
+            assert app.query_one("#session-table").has_focus
+
+            await pilot.click("#session-table", offset=(6, 4))
+            await pilot.pause()
+            assert not app.query_one("#left-pane").display
+            assert app.query_one("#detail-scroll").has_focus
+
+
+@pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
+@pytest.mark.asyncio
 class TestResponsiveLayout:
     """Breakpoint composition should follow the terminal, not crush panes."""
 
