@@ -1,0 +1,5 @@
+{
+  "name": "subagent-ground-truth",
+  "accepted_state": "baseline",
+  "verifier": "verify_case.py"
+}

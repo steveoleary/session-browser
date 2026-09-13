@@ -1,0 +1,103 @@
+{
+  "recorded": "2026-09-13",
+  "method": "Read from the SPAWNING side of each edge: for Claude Code, the toolUseResult.agentId on the tool_result that answered each Agent call, in whichever transcript made the call; for OpenCode, the task tool part's state.metadata.sessionId. Neither is the field discovery reads (sidecar/directory for Claude, session.parent_id for OpenCode), so the graph below is independent of the code under test.",
+  "versions": {
+    "claude_code": "2.1.270",
+    "opencode": "1.18.30"
+  },
+  "claude": {
+    "parent_session": "a3dcce18-13a9-4260-820b-ec747764e557",
+    "edges": [
+      {
+        "spawner": "a3dcce18-13a9-4260-820b-ec747764e557",
+        "child_agent_id": "a040171fa6b1394cb",
+        "tool_use_id": "toolu_01YBD7KPLqpQowrt9Yhp24tK",
+        "spawn_prompt_id": "c550f6a1-d1b9-484b-9b03-2e95cb1996ed",
+        "description": "alpha"
+      },
+      {
+        "spawner": "a3dcce18-13a9-4260-820b-ec747764e557",
+        "child_agent_id": "aaba91ffdf36bbaa6",
+        "tool_use_id": "toolu_01MFboctg2gaJhqfdHFEx6Nm",
+        "spawn_prompt_id": "c550f6a1-d1b9-484b-9b03-2e95cb1996ed",
+        "description": "beta"
+      },
+      {
+        "spawner": "a3dcce18-13a9-4260-820b-ec747764e557",
+        "child_agent_id": "a065f82783d655ea8",
+        "tool_use_id": "toolu_01PKyq8r6zBpthVuxyXMnd2u",
+        "spawn_prompt_id": "8b3642b7-7034-4ebf-b43b-e63504a2a344",
+        "description": "gamma"
+      },
+      {
+        "spawner": "a065f82783d655ea8",
+        "child_agent_id": "a9a379b71a4bb177a",
+        "tool_use_id": "toolu_01Un46k8ubyFqwRkg9HzWyy7",
+        "spawn_prompt_id": "8b3642b7-7034-4ebf-b43b-e63504a2a344",
+        "description": "delta"
+      }
+    ]
+  },
+  "opencode": {
+    "roots": [
+      "ses_f64468dfaffeuuZRZRfUf8irHl",
+      "ses_f644705feffe3jFYtOF9njQ1So",
+      "ses_f64474df6ffeoYzoumeCNFyOJv",
+      "ses_f6447a689ffeTR731crEfPt1mL"
+    ],
+    "fork": {
+      "session": "ses_f64474df6ffeoYzoumeCNFyOJv",
+      "forked_from": "ses_f6447a689ffeTR731crEfPt1mL"
+    },
+    "edges": [
+      {
+        "spawner": "ses_f6447a689ffeTR731crEfPt1mL",
+        "child": "ses_f64478702ffeQfyltQKHEtVJT9",
+        "description": "alpha",
+        "subagent_type": "general"
+      },
+      {
+        "spawner": "ses_f6447a689ffeTR731crEfPt1mL",
+        "child": "ses_f6447843affegRuo4O9O7qc2vL",
+        "description": "beta",
+        "subagent_type": "general"
+      },
+      {
+        "spawner": "ses_f644705feffe3jFYtOF9njQ1So",
+        "child": "ses_f6446e709ffeREwuC6temxcoJo",
+        "description": "beta",
+        "subagent_type": "general"
+      },
+      {
+        "spawner": "ses_f64468dfaffeuuZRZRfUf8irHl",
+        "child": "ses_f64467027ffeMeIMqTQwxlWA8n",
+        "description": "beta",
+        "subagent_type": "general"
+      },
+      {
+        "spawner": "ses_f64467027ffeMeIMqTQwxlWA8n",
+        "child": "ses_f64465b49ffeq3PGq6WBCaxsaE",
+        "description": "gamma",
+        "subagent_type": "general"
+      }
+    ],
+    "failed_spawns": [
+      {
+        "spawner": "ses_f6446e709ffeREwuC6temxcoJo",
+        "error": "Subagent depth limit reached (1). Increase \"subagent_depth\" to allow nested subagents."
+      }
+    ],
+    "fork_copied_spawn_records": [
+      {
+        "in_session": "ses_f64474df6ffeoYzoumeCNFyOJv",
+        "names_spawner": "ses_f6447a689ffeTR731crEfPt1mL",
+        "child": "ses_f64478702ffeQfyltQKHEtVJT9"
+      },
+      {
+        "in_session": "ses_f64474df6ffeoYzoumeCNFyOJv",
+        "names_spawner": "ses_f6447a689ffeTR731crEfPt1mL",
+        "child": "ses_f6447843affegRuo4O9O7qc2vL"
+      }
+    ]
+  }
+}

@@ -124,6 +124,7 @@ def test_module_cli_lists_committed_cases_with_accepted_states():
         "claude-queued-command-fidelity\taccepted=candidate",
         "conversation-first-overlooked-session\taccepted=baseline",
         "fresh-agent-skill-brief\taccepted=candidate",
+        "subagent-ground-truth\taccepted=baseline",
     ]
 
 
@@ -192,10 +193,13 @@ def test_committed_fixture_cases_have_independent_accepted_baselines():
         "claude-queued-command-fidelity",
         "conversation-first-overlooked-session",
         "fresh-agent-skill-brief",
+        "subagent-ground-truth",
     }
     assert cases["conversation-first-overlooked-session"].accepted_state == "baseline"
     assert cases["claude-queued-command-fidelity"].accepted_state == "candidate"
     assert cases["fresh-agent-skill-brief"].accepted_state == "candidate"
+    # Baseline until Claude subagents are discovered; candidate is red until then.
+    assert cases["subagent-ground-truth"].accepted_state == "baseline"
 
     results = case_runner.run_committed_cases(state="accepted")
 
@@ -203,4 +207,5 @@ def test_committed_fixture_cases_have_independent_accepted_baselines():
         ("claude-queued-command-fidelity", "candidate", 0),
         ("conversation-first-overlooked-session", "baseline", 0),
         ("fresh-agent-skill-brief", "candidate", 0),
+        ("subagent-ground-truth", "baseline", 0),
     ]

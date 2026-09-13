@@ -1,0 +1,83 @@
+[
+  {
+    "id": "ses_f6447a689ffeTR731crEfPt1mL",
+    "parent_id": null,
+    "agent": "build",
+    "title": "sb-fixture-parent",
+    "directory": "/fixture/spawn-opencode",
+    "time_created": 1789318945142,
+    "time_updated": 1789318957905
+  },
+  {
+    "id": "ses_f64478702ffeQfyltQKHEtVJT9",
+    "parent_id": "ses_f6447a689ffeTR731crEfPt1mL",
+    "agent": "general",
+    "title": "alpha (@general subagent)",
+    "directory": "/fixture/spawn-opencode",
+    "time_created": 1789318953213,
+    "time_updated": 1789318954492
+  },
+  {
+    "id": "ses_f6447843affegRuo4O9O7qc2vL",
+    "parent_id": "ses_f6447a689ffeTR731crEfPt1mL",
+    "agent": "general",
+    "title": "beta (@general subagent)",
+    "directory": "/fixture/spawn-opencode",
+    "time_created": 1789318953925,
+    "time_updated": 1789318955999
+  },
+  {
+    "id": "ses_f64474df6ffeoYzoumeCNFyOJv",
+    "parent_id": null,
+    "agent": "build",
+    "title": "sb-fixture-parent (fork #1)",
+    "directory": "/fixture/spawn-opencode",
+    "time_created": 1789318967818,
+    "time_updated": 1789318973996
+  },
+  {
+    "id": "ses_f644705feffe3jFYtOF9njQ1So",
+    "parent_id": null,
+    "agent": "build",
+    "title": "sb-fixture-nest",
+    "directory": "/fixture/spawn-opencode",
+    "time_created": 1789318986241,
+    "time_updated": 1789319002879
+  },
+  {
+    "id": "ses_f6446e709ffeREwuC6temxcoJo",
+    "parent_id": "ses_f644705feffe3jFYtOF9njQ1So",
+    "agent": "general",
+    "title": "beta (@general subagent)",
+    "directory": "/fixture/spawn-opencode",
+    "time_created": 1789318994166,
+    "time_updated": 1789319001946
+  },
+  {
+    "id": "ses_f64468dfaffeuuZRZRfUf8irHl",
+    "parent_id": null,
+    "agent": "build",
+    "title": "sb-fixture-nest2",
+    "directory": "/fixture/spawn-opencode",
+    "time_created": 1789319016965,
+    "time_updated": 1789319037048
+  },
+  {
+    "id": "ses_f64467027ffeMeIMqTQwxlWA8n",
+    "parent_id": "ses_f64468dfaffeuuZRZRfUf8irHl",
+    "agent": "general",
+    "title": "beta (@general subagent)",
+    "directory": "/fixture/spawn-opencode",
+    "time_created": 1789319024600,
+    "time_updated": 1789319035272
+  },
+  {
+    "id": "ses_f64465b49ffeq3PGq6WBCaxsaE",
+    "parent_id": "ses_f64467027ffeMeIMqTQwxlWA8n",
+    "agent": "general",
+    "title": "gamma (@general subagent)",
+    "directory": "/fixture/spawn-opencode",
+    "time_created": 1789319029942,
+    "time_updated": 1789319033202
+  }
+]
