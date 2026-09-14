@@ -86,6 +86,11 @@ def scan_claude() -> list[Session]:
                 # sometimes carries none and the decoded directory name is a
                 # lossy last resort (see below).
                 seen_cwd = ""
+                # Whether the file holds anything to show, or anything that
+                # might have been a turn before it was damaged. See the skip
+                # below the loop.
+                has_turn = undecodable = False
+                obj = None  # still None after the loop: nothing decoded
                 with open(f) as fh:
                     for line in fh:
                         line = line.strip()
@@ -94,11 +99,13 @@ def scan_claude() -> list[Session]:
                         try:
                             obj = json.loads(line)
                         except json.JSONDecodeError:
+                            undecodable = True
                             continue
                         if not seen_cwd:
                             seen_cwd = obj.get("cwd", "")
+                        kind = obj.get("type")
                         # Extract metadata from first user message
-                        if obj.get("type") == "user" and not obj.get("isMeta"):
+                        if kind == "user" and not obj.get("isMeta"):
                             msg = obj.get("message", {})
                             content = msg.get("content", "")
                             if isinstance(content, str):
@@ -106,7 +113,24 @@ def scan_claude() -> list[Session]:
                             cwd = obj.get("cwd", "")
                             branch = obj.get("gitBranch", "")
                             created_at = obj.get("timestamp", "")
+                            has_turn = True
                             break
+                        if kind in ("user", "assistant"):
+                            has_turn = True
+                # A file Claude Code wrote with no conversation in it is not a
+                # session. The common case is a session opened only to run
+                # /resume: it gets a one-line "bridge-session" record, the
+                # resumed conversation goes on writing to its own file, and
+                # the stub is left behind. Listed, it looks exactly like the
+                # session it was opened to reach (same project, same age), and
+                # `claude --resume` on it fails with "No conversation found".
+                # Kept, though just as empty: a file with an undecodable line,
+                # or with no records at all. Either may be a transcript that
+                # was damaged or never finished being written, not one that
+                # was complete and empty, and the zero-entries warning exists
+                # to flag exactly that.
+                if obj is not None and not has_turn and not undecodable:
+                    continue
                 # Decode project path from dir name. Claude Code encodes "/"
                 # as "-", which is lossy: a directory whose real name contains
                 # a hyphen (session-browser, feed-finder-chrome) decodes into

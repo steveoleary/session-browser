@@ -212,8 +212,9 @@ class TestScanClaude:
         assert sessions[0].updated_at == "2026-06-29T15:28:00.000Z"
 
     def test_updated_at_falls_back_to_mtime_when_no_turn(self, tmp_path):
-        """A transcript with no user/assistant turn (and no first-message
-        created_at) falls back to file mtime, not an empty string."""
+        """A transcript with no timestamped user/assistant turn (and no
+        first-message created_at) falls back to file mtime, not an empty
+        string."""
         projects = tmp_path / ".claude" / "projects" / "-Users-test"
         projects.mkdir(parents=True)
         f = projects / "s2.jsonl"
@@ -222,7 +223,7 @@ class TestScanClaude:
                 json.dumps(x)
                 for x in [
                     {"type": "system", "timestamp": "2026-06-30T08:00:00.000Z"},
-                    {"type": "summary", "summary": "orphan"},
+                    {"type": "user", "message": {"content": "no timestamp"}},
                 ]
             )
             + "\n"
@@ -233,6 +234,75 @@ class TestScanClaude:
 
         assert sessions[0].updated_at == _file_mtime_iso(f)
         assert sessions[0].updated_at  # non-empty
+
+    def _write(self, tmp_path, name, lines):
+        projects = tmp_path / ".claude" / "projects" / "-Users-test-driver"
+        projects.mkdir(parents=True, exist_ok=True)
+        (projects / f"{name}.jsonl").write_text("\n".join(lines) + "\n")
+
+    def _ids(self, tmp_path):
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            return {s.id for s in scan_claude()}
+
+    def test_resume_stub_with_no_conversation_is_not_a_session(self, tmp_path):
+        """Opening Claude Code only to run /resume leaves a one-line
+        bridge-session file behind. Listed, it sits beside the session it was
+        opened to reach -- same project, same age -- and resuming it fails
+        with "No conversation found"."""
+        bridge = {"type": "bridge-session", "sessionId": "stub", "lastSequenceNum": 0}
+        self._write(tmp_path, "stub", [json.dumps(bridge), json.dumps(bridge)])
+
+        assert self._ids(tmp_path) == set()
+
+    def test_file_of_only_local_commands_and_bookkeeping_is_not_a_session(
+        self, tmp_path
+    ):
+        """The same shape with a slash command run in it: system and
+        bookkeeping records, still no turn."""
+        lines = [
+            {"type": "mode", "mode": "normal"},
+            {"type": "permission-mode", "permissionMode": "default"},
+            {"type": "system", "subtype": "local_command", "content": "/skills"},
+            {"type": "cost-state", "totalCostUSD": 0},
+            {"type": "last-prompt", "leafUuid": "x"},
+        ]
+        self._write(tmp_path, "cmds", [json.dumps(x) for x in lines])
+
+        assert self._ids(tmp_path) == set()
+
+    def test_file_with_a_turn_anywhere_is_kept(self, tmp_path):
+        """Only a first *non-meta* user message feeds the summary, but any
+        user or assistant record proves there is a conversation to show."""
+        self._write(
+            tmp_path,
+            "assistant-only",
+            [json.dumps({"type": "assistant", "message": {"content": "hi"}})],
+        )
+        self._write(
+            tmp_path,
+            "meta-only",
+            [json.dumps({"type": "user", "isMeta": True, "message": {"content": "x"}})],
+        )
+
+        assert self._ids(tmp_path) == {"assistant-only", "meta-only"}
+
+    def test_file_with_an_undecodable_line_is_kept(self, tmp_path):
+        """A damaged line may have been a turn. Dropping the file would hide
+        the corruption the zero-entries warning exists to report."""
+        self._write(
+            tmp_path,
+            "damaged",
+            [json.dumps({"type": "bridge-session"}), '{"type": "user", "mess'],
+        )
+
+        assert self._ids(tmp_path) == {"damaged"}
+
+    def test_file_with_no_records_at_all_is_kept(self, tmp_path):
+        """An empty file is as likely a failed write as an empty session, so
+        it stays visible and gets reported as zero entries, not dropped."""
+        self._write(tmp_path, "blank", [""])
+
+        assert self._ids(tmp_path) == {"blank"}
 
 
 class TestScanCodex:
