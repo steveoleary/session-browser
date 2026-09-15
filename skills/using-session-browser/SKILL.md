@@ -1,6 +1,6 @@
 ---
 name: using-session-browser
-description: Use when finding, searching, or retrieving prior agent sessions, transcripts, handoffs, decisions, lessons, or context with the session-browser CLI.
+description: Recover what earlier agent sessions actually said — the history, reasoning and precedent that is not in the repo, the tracker or this conversation, across every project on this machine. Use whenever the user asks why something was done, decided or dropped; asks you to find the session where something happened; refers to work this conversation has no memory of ("we did this before", "last week", "the thing we sent over"); says they can't remember or have lost track; or asserts something about the past you cannot confirm from the tree. Reach for it BEFORE answering from the repo, git log or the tracker alone, and before saying there is no record of something. Also on "use session browser", "check the sessions", "read the last session", "find where we", "for context", "for history", "what was the rationale". For a cold-open state of play, `where-are-we` runs first and calls this for any single session it needs.
 ---
 
 # Using Session Browser
