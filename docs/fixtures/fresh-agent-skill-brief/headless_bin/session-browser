@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# PATH shim: points ONLY the tool at the frozen fixture corpus, and logs each call.
+#
+# Why a shim rather than HOME=... on the agent itself: the agent reads its own
+# credentials out of $HOME, so moving HOME for the agent process breaks auth and
+# the run dies before it reaches the corpus. Moving it for the tool alone is the
+# whole trick, and it is the reason this file exists instead of one env var.
+#
+# Reads three variables, all set by run_headless.sh:
+#   SB_BRIEF_BIN   the real session-browser executable
+#   SB_BRIEF_HOME  the fixture corpus to expose as HOME
+#   SB_BRIEF_LOG   TSV call log: time, exit code, output bytes, argv
+set -u
+
+out=$(HOME="${SB_BRIEF_HOME:?}" "${SB_BRIEF_BIN:?}" "$@" 2>&1); rc=$?
+printf '%s\t%d\t%d\t%s\n' \
+    "$(date +%H:%M:%S)" "$rc" "${#out}" "$(printf '%q ' "$@")" >> "${SB_BRIEF_LOG:?}"
+printf '%s\n' "$out"
+exit $rc

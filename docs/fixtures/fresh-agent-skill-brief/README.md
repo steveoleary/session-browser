@@ -19,8 +19,24 @@ or on its own:
 
 `brief.md` is the qualitative half: the same four questions, written to be
 handed to an agent that has never seen this repository, plus the friction
-report to read afterwards. It is not scored and not automated, because the
+report to read afterwards. It is **not scored and not gated**, because the
 consumer is a model and this repository does not gate on stochastic checks.
+`run_headless.sh` will drive one run for you — a convenience, not a gate;
+`case_runner` does not call it:
+
+```bash
+./run_headless.sh                                    # live SKILL.md, one run
+./run_headless.sh --name old --skill /tmp/before.md  # A/B an edit
+```
+
+It prints a run directory holding `out.json`, `err.txt` and `calls.tsv` — every
+tool call the agent made, with output bytes. **Read the friction report in
+`out.json`; do not grade the answers.** One Sonnet 5 run costs about $0.20.
+
+The awkward part is in `headless_bin/session-browser`, and it is why that file
+exists: the agent reads its own credentials from `$HOME`, so pointing `HOME` at
+this fixture breaks auth before the run starts. Only the *tool* can be moved,
+by a PATH shim. `run_headless.sh --help` documents the rest of the flags.
 
 ## Why it exists
 
@@ -59,4 +75,11 @@ corpus drifted.
 On changes to what drifts: `skills/using-session-browser/SKILL.md`, the
 argparse help in `session_browser/cli.py`, and the module docstrings the skill
 points at. Not on every commit — the deterministic half is cheap enough to run
-with the other fixtures, but the live half costs an agent session.
+with the other fixtures; the live half costs a model call per run.
+
+One run says little on its own: the corpus is 8 sessions of ≤5 entries, so
+agents clear it comfortably and a wording change shows up in *how* they work
+rather than in whether they are right. Seven runs on 2026-09-15 all answered
+4/4, across two wordings of the skill's step 3. What they disagreed on was the
+friction report, and that is where the one finding came from — `get --output -`
+writing a file named `-`. Run a few, read those sections, ignore the score.
