@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 #
-# Install this repository's git hooks alongside the active hook owner.
+# Install this repository's git hooks, beside whatever else already uses them.
 #
-# Git does not clone hooks, so they need an install step. In a Tracker Store
-# workspace, `trk hooks install --tracker` owns core.hooksPath and the Tracker-managed
-# sections under .tracker/hooks; this installer adds the project's sections
-# outside those markers. Each installer can then regenerate its own section
-# without erasing the other. A clone with no .tracker workspace keeps the normal
-# .git/hooks location and has no Tracker dependency.
+# Git does not clone hooks, so they need an install step.
+#
+# WHICH DIRECTORY: whichever one git runs hooks from — core.hooksPath when it is
+# set, otherwise $GIT_DIR/hooks. That is resolved by asking git, never by
+# guessing from the presence of a directory, and --check prints the answer as
+# its first line. Guessing is how a clone came to report leak-guard as missing
+# while the hook git really ran had carried it all along.
+#
+# OTHER TOOLS' SECTIONS ARE PRESERVED. This installer owns only the text between
+# its own markers: it rewrites that and copies everything else through
+# untouched, so another tool that manages its own marked section of the same
+# hook can regenerate that section without either installer erasing the other.
+# Installing those other sections is that tool's job, not this script's.
 #
 # Two hooks, because one cannot do both jobs:
 #   pre-commit   scripts/hooks/leak-guard      staged file contents and paths
@@ -52,7 +59,11 @@ while [ $# -gt 0 ]; do
     --check) mode="check"; shift ;;
     --add-pattern) add_pattern="${2:?--add-pattern needs a value}"; shift 2 ;;
     --add-pattern=*) add_pattern="${1#*=}"; shift ;;
-    -h|--help) sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # Anchored to the shape of the header, not to line numbers: the previous
+    # fixed range silently stopped printing paragraphs as the header grew.
+    -h|--help)
+      awk 'NR<3 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
+      exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
 done
@@ -125,54 +136,29 @@ if [ -n "$add_pattern" ]; then
   exit 0
 fi
 
-tracker_workspace=0
-hooks_dir="$git_dir/hooks"
-if [ -d "$top/.tracker" ]; then
-  tracker_workspace=1
-  command -v trk >/dev/null 2>&1 \
-    || die "this Tracker workspace needs trk to install its hook owner."
-  hooks_dir="$top/.tracker/hooks"
-fi
+# Where git ACTUALLY runs hooks from: core.hooksPath when set, else
+# $GIT_DIR/hooks. Ask git rather than guessing from a directory's existence.
+# Guessing is how a clone came to report leak-guard as missing while the hook
+# git really runs carried it all along -- the check was reading a file in a
+# directory git had never been told to use.
+resolve_hooks_dir() {
+  configured="$(git config --get core.hooksPath 2>/dev/null || true)"
+  case "$configured" in
+    '') printf '%s\n' "$git_dir/hooks" ;;
+    /*) printf '%s\n' "$configured" ;;
+    *)  printf '%s\n' "$top/$configured" ;;
+  esac
+}
+hooks_dir="$(resolve_hooks_dir)"
 pre_hook="$hooks_dir/pre-commit"
 msg_hook="$hooks_dir/commit-msg"
 
-tracker_hooks_active() {
-  active_hooks="$(git config --get core.hooksPath 2>/dev/null || true)"
-  case "$active_hooks" in
-    .tracker/hooks|./.tracker/hooks|"$hooks_dir") return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 if [ "$mode" = "check" ]; then
   status=0
-  if [ "$tracker_workspace" -eq 1 ]; then
-    if tracker_hooks_active; then
-      printf '%-11s %s\n' "hook path" ".tracker/hooks active"
-    else
-      printf '%-11s %s\n' \
-        "hook path" ".tracker/hooks NOT active — run scripts/install-hooks.sh"
-      status=1
-    fi
-
-    tracker_list="$(trk hooks list 2>&1)"
-    tracker_list_status=$?
-    tracker_ok=1
-    [ "$tracker_list_status" -eq 0 ] || tracker_ok=0
-    for hook_name in \
-      pre-commit post-merge pre-push post-checkout prepare-commit-msg; do
-      printf '%s\n' "$tracker_list" | grep -q "${hook_name}: installed" \
-        || tracker_ok=0
-    done
-    if [ "$tracker_ok" -eq 1 ]; then
-      printf '%-11s %s\n' "tracker" "all managed hooks installed"
-    else
-      printf '%-11s %s\n' \
-        "tracker" "managed hooks incomplete — run scripts/install-hooks.sh"
-      status=1
-    fi
-  fi
-
+  # Name the directory every line below is about. Without it, a report that
+  # disagrees with the hook you are looking at gives you no way to tell which
+  # of you is reading the wrong file.
+  printf '%-11s %s\n' "hook path" "${hooks_dir#"$top"/}"
   report_hook() {
     if [ -f "$1" ] && grep -qF "$2" "$1"; then
       printf '%-11s %s section installed\n' "$3" "$4"
@@ -190,13 +176,6 @@ if [ "$mode" = "check" ]; then
   printf '%-11s %s configured in this clone\n' "patterns" "${n:-0}"
   [ "${n:-0}" -gt 0 ] || printf '%-11s none — the guards will pass everything until you add some\n' "patterns"
   exit "$status"
-fi
-
-if [ "$tracker_workspace" -eq 1 ]; then
-  trk hooks install --tracker \
-    || die "trk could not install the Tracker-managed hooks."
-  tracker_hooks_active \
-    || die "trk did not activate .tracker/hooks through core.hooksPath."
 fi
 
 mkdir -p "$hooks_dir"

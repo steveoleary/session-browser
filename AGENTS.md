@@ -381,16 +381,27 @@ Optionally the hook also checks the commit author, when a clone sets
 inert for everyone else. It catches committing from a machine whose global git
 identity is somebody else's — the failure that no directory convention covers.
 
-In a checkout with a local Tracker Store workspace the installer first runs
-`trk hooks install --tracker`, which makes `.tracker/hooks` the active hook
-directory; the project hooks are added outside Tracker' managed markers, so
-either installer can regenerate its own section safely. `--check` reports both
-project hooks separately, how many patterns this clone has, and — in a Tracker
-workspace — that `.tracker/hooks` is active with all five Tracker hooks installed.
-**Do not repoint `core.hooksPath` by hand**: only one directory is
-active, so doing that can silently bypass either the project guards or the
-tracker hooks. A public clone with no `.tracker` workspace uses `.git/hooks` and
-needs no Tracker.
+**The installer puts the guards wherever git actually runs hooks** — that is
+`core.hooksPath` when set, otherwise `.git/hooks` — and it asks git rather than
+inferring the location from anything else on disk. The two answers differ more
+often than they look like they would, and when they did here the guards went
+into one directory while git ran another: `--check` called `leak-guard` missing
+although the hook git really ran had carried it all along, and the genuinely
+absent `commit-msg` hook was lost in the noise of that false alarm. `--check`
+now prints the directory it inspected as its first line, so a report that
+disagrees with the file in front of you can be settled in one look.
+
+**Another tool's hook sections are preserved, and installing them is not this
+script's job.** The installer owns only the text between its own markers; it
+rewrites that and copies everything else in the file through untouched, so a
+tool managing its own marked section of the same hook can regenerate that
+section without either installer erasing the other. `--check` says
+`other sections present and preserved` when it sees any, and reports both
+project hooks separately alongside how many patterns this clone has.
+
+**Do not repoint `core.hooksPath` by hand.** Only one directory is ever active,
+so doing that silently takes the guards out of the path git uses — without
+changing anything you can see in the files themselves.
 
 Escape hatch is git's own — `git commit --no-verify`.
 
