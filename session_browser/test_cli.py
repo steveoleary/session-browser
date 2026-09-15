@@ -1396,6 +1396,40 @@ class TestGet:
         code3, _, _ = cli("get", "claude:aaa", "--output", str(target), "--overwrite")
         assert code3 == 0
 
+    def test_output_dash_means_stdout_and_creates_no_file(
+        self, cli, tmp_path, monkeypatch
+    ):
+        """'-' is the Unix convention for stdout, and was taken as a filename.
+
+        The tool wrote a file literally called '-' into the working directory
+        and reported 'wrote -'; running it again then failed with 'refusing to
+        overwrite existing file: -', which reads as a tool error rather than
+        the caller's own slip. Omitting --output already means stdout, so '-'
+        now maps onto exactly that.
+        """
+        monkeypatch.chdir(tmp_path)
+        code, out, _ = cli("get", "claude:aaa", "--output", "-")
+
+        assert code == 0
+        assert "User: alpha wombat message" in out  # the content, not "wrote -"
+        assert "wrote" not in out
+        assert not (tmp_path / "-").exists()
+
+        # Repeatable: no file was left to collide with on the next run.
+        code2, out2, _ = cli("get", "claude:aaa", "--output", "-")
+        assert code2 == 0
+        assert out2 == out
+
+        # --format json gives the session, not the output_confirmation shape.
+        code3, out3, _ = cli("get", "claude:aaa", "--output", "-", "--format", "json")
+        assert code3 == 0
+        assert "written" not in json.loads(out3)
+
+        # A file really named '-' is still reachable by a path that says so.
+        code4, _, _ = cli("get", "claude:aaa", "--output", "./-")
+        assert code4 == 0
+        assert (tmp_path / "-").is_file()
+
     def test_json_output_file_writes_structured_data(self, cli, tmp_path):
         target = tmp_path / "session.json"
         code, out, _ = cli(

@@ -333,6 +333,19 @@ def run_cli(argv: list[str]) -> int:
         return 1
 
 
+def _output_path(value: str) -> str | None:
+    """Normalise --output, treating the conventional '-' as stdout.
+
+    Taken literally, '-' is a legal filename, so the tool used to create a file
+    called '-' in the working directory and report 'wrote -'. The next run then
+    failed with 'refusing to overwrite existing file: -', which reads as a tool
+    error rather than as the caller's own slip. Since omitting --output already
+    means stdout, '-' has no other useful meaning, so it maps onto that. A file
+    genuinely named '-' is still reachable as './-'.
+    """
+    return None if value == "-" else value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="session-browser",
@@ -392,7 +405,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     p_get.add_argument(
-        "--output", help="write to this file instead of stdout (single session only)"
+        "--output",
+        type=_output_path,
+        help="write to this file instead of stdout (single session only); "
+        "'-' means stdout, the same as omitting the flag",
     )
     p_get.add_argument(
         "--overwrite",
