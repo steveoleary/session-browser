@@ -4,7 +4,9 @@
   "versions": {
     "claude_code": "2.1.270",
     "opencode": "1.18.30",
-    "codex_cli": "0.154.0"
+    "codex_cli": "0.154.0",
+    "claude_code_interrupted_run": "2.1.272",
+    "claude_code_workflow_run": "2.1.272"
   },
   "claude": {
     "parent_session": "a3dcce18-13a9-4260-820b-ec747764e557",
@@ -37,7 +39,38 @@
         "spawn_prompt_id": "8b3642b7-7034-4ebf-b43b-e63504a2a344",
         "description": "delta"
       }
-    ]
+    ],
+    "interrupted": {
+      "recorded": "2026-09-15",
+      "how": "claude -p (Haiku 4.5) asked for one FOREGROUND Agent whose only job was a 300 s python sleep in the foreground; SIGINT was sent to the process group four seconds after the child's Bash tool_use appeared in its transcript. The run's own result reported subagent_stats.killed.user = 1 and subtype error_during_execution.",
+      "parent_session": "58ac2261-ee93-46e8-9175-4536aedad563",
+      "edge": {
+        "spawner": "58ac2261-ee93-46e8-9175-4536aedad563",
+        "child_agent_id": "afcc45a35d31dcffb",
+        "tool_use_id": "toolu_0169FgqNQZyocdT2jQnhjv7M",
+        "spawn_prompt_id": "dcad3b41-a881-4aa3-acf2-8397e6b859ee",
+        "description": "epsilon"
+      },
+      "parent_tool_use_result": "User rejected tool use",
+      "denial_kind": "user-rejected",
+      "child_last_text": "[Request interrupted by user for tool use]"
+    },
+    "workflow": {
+      "recorded": "2026-09-15",
+      "how": "claude -p (Sonnet 5; Haiku 4.5 replied FINISHED without calling anything, twice) with Workflow in --tools and --allowedTools and the prompt opening 'ultracode: use a workflow', which is the opt-in the Workflow tool requires. The script was one agent() call labelled zeta in phase Probe. The workflow ran as a background task; its completion arrived in the parent as a task-notification user record with a fresh promptId.",
+      "parent_session": "2f39f1e6-4bf8-4536-9bb9-dc19fa129f83",
+      "run_id": "wf_7a3f56f7-4cb",
+      "tool_use_id": "toolu_01DEwnEHFwpovspqtepqU1k4",
+      "spawn_prompt_id": "019e05da-99f2-426e-84b5-52a6ab88c9b9",
+      "edge": {
+        "spawner": "2f39f1e6-4bf8-4536-9bb9-dc19fa129f83",
+        "child_agent_id": "a2d868cbbbfd86b65",
+        "tool_use_id": "toolu_01DEwnEHFwpovspqtepqU1k4",
+        "spawn_prompt_id": "019e05da-99f2-426e-84b5-52a6ab88c9b9",
+        "description": "zeta"
+      },
+      "phase": "Probe"
+    }
   },
   "opencode": {
     "roots": [
@@ -181,6 +214,24 @@
           "interrupted"
         ]
       }
+    },
+    "review": {
+      "recorded": "2026-09-15",
+      "how": "codex review --uncommitted (codex-cli 0.154.0, low reasoning effort) in a scratch git repository holding one wrong two-line function. The exec thread that runs the review is the parent; Codex opens a second thread for the review itself.",
+      "parent": "01a0a432-d7fd-7ed3-9cd0-1effc8df9262",
+      "child": "01a0a432-da22-7682-bb6f-d1194755a1c8",
+      "spawning_side": "The parent rollout records the child's items: on the parent's own turn, between EnteredReviewMode and ExitedReviewMode items, its item_completed events carry thread_id equal to the child (the UserMessage one is kept here; Reasoning and CommandExecution ones were reduced away). The review's verdict then re-enters the parent as a <user_action> user message.",
+      "child_session_meta": {
+        "source": {
+          "subagent": "review"
+        },
+        "thread_source": "subagent",
+        "parent_thread_id_top_level": "01a0a432-d7fd-7ed3-9cd0-1effc8df9262",
+        "session_id": "01a0a432-d7fd-7ed3-9cd0-1effc8df9262",
+        "multi_agent_version": "disabled",
+        "copies_spawner_history": false
+      },
+      "in_thread_spawn_edges": false
     }
   }
 }

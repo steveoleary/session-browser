@@ -25,6 +25,25 @@ Edges come from the `agentId: …` line in each Agent tool result, taken from
 whichever transcript made the call. The parent's call is in the parent
 transcript and gamma's call is in gamma's transcript.
 
+**Claude Code 2.1.272**, a second session recorded 2026-09-15 under
+`-fixture-spawn-claude-kill`: one foreground agent, `epsilon`, whose whole job
+was a 300-second Python sleep in the foreground. SIGINT went to the process
+group four seconds after the child's Bash `tool_use` reached its transcript;
+the run's own result reported `subagent_stats.killed.user: 1`. Its edge is
+recorded under `claude.interrupted`, and it comes from the parent's Agent
+`tool_use` block rather than a tool result, because a killed child never gets
+one (below).
+
+**Claude Code 2.1.272**, a third session recorded 2026-09-15 under
+`-fixture-spawn-claude-wf`: one Workflow-tool run, `probe`, whose script made a
+single `agent()` call labelled `zeta` in phase `Probe`. The Workflow tool needs
+an explicit opt-in, so the headless prompt opened with `ultracode: use a
+workflow` and `Workflow` was in both `--tools` and `--allowedTools`; Haiku 4.5
+answered without calling anything, twice, and Sonnet 5 complied. Recorded under
+`claude.workflow`. The edge here runs through the **run id**, not a tool
+result: the parent's Workflow result names `runId`, the transcript directory is
+named for it, and the journal in that directory maps the agent id to its label.
+
 **OpenCode 1.18.30** (`opencode run --pure`, `opencode-go/deepseek-v4-flash`,
 with the built-in `general` agent enabled by a one-off `OPENCODE_CONFIG`
 overlay):
@@ -46,6 +65,11 @@ effort), in a scratch directory:
 - `codex exec fork` of the root, and a second fork of `gamma`, the subagent;
 - a second root that spawned `epsilon` into `sleep 300` and was then
   interrupted with SIGINT while epsilon was still running.
+- recorded 2026-09-15 with the same build: `codex review --uncommitted` in a
+  scratch repository, which runs as an `exec` parent plus a second thread for
+  the review itself. Recorded under `codex.review`; its spawning-side evidence
+  is the parent rollout carrying the child's `item_completed` events between
+  `EnteredReviewMode` and `ExitedReviewMode`.
 
 Edges come from each `SubAgentActivity` event of kind `started`, in the rollout
 that made the `spawn_agent` call. Its `id` is that call's `call_id` and
@@ -72,6 +96,32 @@ Claude Code:
   alpha and beta share turn 1's id. gamma and its own child delta share turn
   2's id. So `promptId` groups a fan-out but cannot say which agent spawned
   which; that answer is in `parentAgentId` and `toolUseId`.
+- **A killed child is never announced to its parent.** The parent's
+  `tool_result` for the Agent call is the plain denial — `toolUseResult` is the
+  string `"User rejected tool use"`, `toolDenialKind` is `"user-rejected"` —
+  with no `agentId` anywhere, so a linker that waits for the spawn-side id
+  never sees this child. The sidecar still carries the parent's `toolUseId`,
+  and that is the only edge there is.
+- **The kill is legible only in the child.** Its single `tool_use` is answered
+  by the same denial record, and the transcript ends on a user record reading
+  `[Request interrupted by user for tool use]`, never on a result. The parent
+  ends on the same marker one millisecond later, so the two endings are
+  simultaneous rather than causal in either direction.
+- **A workflow agent is one directory deeper**, at
+  `<parent>/subagents/workflows/<runId>/agent-<id>.jsonl`, with nothing stored
+  flat in `subagents/` — so a one-level scan of `subagents/` finds no trace of
+  the run. Its sidecar says `agentType: "workflow-subagent"`, carries
+  `workflowPhase`, and has **no `toolUseId`**. Beside it, `journal.jsonl`
+  records `started` and `result` events with `agentId` and `label`, and the
+  parent's `workflows/<runId>.json` run record lists every agent with its id,
+  model, tokens and state. The launch answer in the parent
+  (`toolUseResult.status: "async_launched"`) names the run and its transcript
+  directory but no agent, because none has started yet.
+- **Completion is a new turn.** The run's result reaches the parent as a
+  `task-notification` user record (`origin.kind`) with its own `promptId`, so
+  the spawn turn and the completion turn are different prompt ids — the same
+  shape as a background Agent finishing.
+
 
 OpenCode:
 
@@ -101,6 +151,15 @@ Codex:
   `session_meta` is the second record, followed by its prompts, up to
   `subagent_history_start_ordinal`. Only the first `session_meta` describes the
   file.
+- **A `review` child has a parent, written where the fork guard cannot see
+  it.** Its `source` is the bare string `"review"`, so there is no
+  `thread_spawn.parent_thread_id`; the parent is the **top-level**
+  `parent_thread_id` (and `session_id`) of its `session_meta`, and every
+  review rollout on the recording machine since June 2026 carries it. It has
+  no `thread_spawn_edges` row, and the `threads` index has no parent column
+  at all, so the index path cannot recover this parent from the row it reads.
+  A review child also copies **none** of its spawner's history, unlike a
+  `thread_spawn` child.
 - A fork copies **no** spawn records. It points at its source through
   `history_base` instead of repeating it, unlike an OpenCode fork.
 - A spawn's `root_turn_id` groups like Claude's `promptId`: alpha and beta
@@ -118,10 +177,11 @@ through both discovery paths: the `state_5.sqlite` index and the rollout file
 scan. The index run must write nothing to stderr, because discovery logs there
 when it falls back to the file scan, and a silent fallback would otherwise test
 the same path twice. Claude subagents are invisible
-to discovery, so only the parent session is listed, with `parent_id: null`.
+to discovery, so only the three parent sessions are listed, each with
+`parent_id: null`.
 
-`candidate`: the Claude children are listed too, each with `parent_id` set to
-its direct spawner. This state is deliberately red until the Claude half of
+`candidate`: the Claude children are listed too, the killed `epsilon` and the
+workflow's `zeta` included, each with `parent_id` set to its direct spawner. This state is deliberately red until the Claude half of
 subagent linking exists. The check matches children by agent-id suffix
 because the id a Claude subagent should be addressed by is not decided yet,
 and this fixture should not decide it.
@@ -156,8 +216,6 @@ are the ones Codex wrote, with `rollout_path` made relative to `~/.codex`.
 
 ## Not covered yet
 
-- **Claude workflow subagents** (`subagents/workflows/wf_*/`) were not
-  produced.
-- **An interrupted Claude or OpenCode subagent.** Only Codex has one.
-- **Codex `review` and `guardian` subagents**, which carry no parent. Only
-  `thread_spawn` was produced.
+- **An interrupted OpenCode subagent.** Codex and Claude Code each have one.
+- **Codex `guardian` subagents.** Only the incidental corpus has them, and no
+  headless trigger is known.

@@ -134,6 +134,36 @@
       "archived": 0,
       "agent_path": "/root/epsilon",
       "agent_nickname": "Aristotle"
+    },
+    {
+      "agent_nickname": null,
+      "agent_path": null,
+      "archived": 0,
+      "created_at_ms": 1789461190653,
+      "cwd": "/fixture/spawn-codex-review",
+      "first_user_message": "Review the current code changes (staged, unstaged, and untracked files) and provide prioritized findings.",
+      "git_branch": "main",
+      "git_origin_url": null,
+      "id": "01a0a432-d7fd-7ed3-9cd0-1effc8df9262",
+      "rollout_path": "sessions/2026/09/15/rollout-2026-09-15T09-33-10-01a0a432-d7fd-7ed3-9cd0-1effc8df9262.jsonl",
+      "source": "exec",
+      "thread_source": "user",
+      "updated_at_ms": 1789461222375
+    },
+    {
+      "agent_nickname": null,
+      "agent_path": null,
+      "archived": 0,
+      "created_at_ms": 1789461191202,
+      "cwd": "/fixture/spawn-codex-review",
+      "first_user_message": "Review the current code changes (staged, unstaged, and untracked files) and provide prioritized findings.",
+      "git_branch": "main",
+      "git_origin_url": null,
+      "id": "01a0a432-da22-7682-bb6f-d1194755a1c8",
+      "rollout_path": "sessions/2026/09/15/rollout-2026-09-15T09-33-11-01a0a432-da22-7682-bb6f-d1194755a1c8.jsonl",
+      "source": "{\"subagent\":\"review\"}",
+      "thread_source": "subagent",
+      "updated_at_ms": 1789461222339
     }
   ],
   "thread_spawn_edges": [

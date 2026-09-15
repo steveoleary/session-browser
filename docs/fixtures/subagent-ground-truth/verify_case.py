@@ -37,6 +37,18 @@ SUBAGENTS_DIR = (
     / CLAUDE_PARENT
     / "subagents"
 )
+INTERRUPTED = CLAUDE["interrupted"]
+KILL_PARENT = INTERRUPTED["parent_session"]
+KILL_PROJECT_DIR = (
+    FIXTURE_DIR / "home" / ".claude" / "projects" / "-fixture-spawn-claude-kill"
+)
+WORKFLOW = CLAUDE["workflow"]
+WF_PARENT = WORKFLOW["parent_session"]
+WF_PROJECT_DIR = (
+    FIXTURE_DIR / "home" / ".claude" / "projects" / "-fixture-spawn-claude-wf"
+)
+CLAUDE_PARENTS = {CLAUDE_PARENT, KILL_PARENT, WF_PARENT}
+CLAUDE_EDGES = CLAUDE["edges"] + [INTERRUPTED["edge"], WORKFLOW["edge"]]
 
 
 def build_home(root: Path, *, codex_index: bool = True) -> Path:
@@ -209,6 +221,164 @@ def check_claude_raw_facts() -> None:
     assert grouped == [["alpha", "beta"], ["delta", "gamma"]], grouped
 
 
+def check_claude_interrupted_raw_facts() -> None:
+    """What Claude Code leaves behind when a run is killed mid-subagent.
+
+    The spawning side never gets the ``agentId: …`` tool result here: the
+    parent's tool_result for the Agent call is a bare denial string. So the
+    only edge from the parent's side is the tool_use id itself, which the
+    child's sidecar repeats. Everything else about the kill is in the child.
+    """
+    edge = INTERRUPTED["edge"]
+    sub_dir = KILL_PROJECT_DIR / KILL_PARENT / "subagents"
+    files = sorted(sub_dir.glob("agent-*.jsonl"))
+    assert [f.stem.removeprefix("agent-") for f in files] == [edge["child_agent_id"]]
+    (f,) = files
+    meta = json.loads(f.with_name(f.stem + ".meta.json").read_text())
+    assert meta["toolUseId"] == edge["tool_use_id"], meta
+    assert meta["description"] == edge["description"], meta
+    assert meta["spawnDepth"] == 1 and "parentAgentId" not in meta, meta
+
+    parent = [
+        json.loads(line)
+        for line in (KILL_PROJECT_DIR / f"{KILL_PARENT}.jsonl").read_text().splitlines()
+    ]
+    calls = [
+        b
+        for r in parent
+        if r["type"] == "assistant"
+        for b in r["message"]["content"]
+        if b.get("type") == "tool_use" and b.get("name") == "Agent"
+    ]
+    assert [c["id"] for c in calls] == [edge["tool_use_id"]], calls
+    assert calls[0]["input"]["description"] == edge["description"], calls[0]
+    (answer,) = [
+        r
+        for r in parent
+        if r["type"] == "user"
+        and isinstance(r["message"]["content"], list)
+        and any(
+            b.get("type") == "tool_result"
+            and b.get("tool_use_id") == edge["tool_use_id"]
+            for b in r["message"]["content"]
+        )
+    ]
+    # No agentId anywhere in the answer: a killed child is never announced to
+    # its parent, so a linker that waits for the spawn-side id never sees it.
+    assert answer["toolUseResult"] == INTERRUPTED["parent_tool_use_result"], answer
+    assert answer["toolDenialKind"] == INTERRUPTED["denial_kind"], answer
+    assert "agentId" not in json.dumps(answer), answer
+
+    child = [json.loads(line) for line in f.read_text().splitlines()]
+    first = child[0]
+    assert first["sessionId"] == KILL_PARENT and first["isSidechain"] is True, first
+    assert first["agentId"] == edge["child_agent_id"], first
+    assert first["promptId"] == edge["spawn_prompt_id"], first
+    # The child's one tool call is answered by the same denial its parent got,
+    # and the transcript ends on the interruption marker, not on a result.
+    tool_uses = [
+        b
+        for r in child
+        if r["type"] == "assistant"
+        for b in r["message"]["content"]
+        if b.get("type") == "tool_use"
+    ]
+    assert len(tool_uses) == 1 and tool_uses[0]["name"] == "Bash", tool_uses
+    denied, last = child[-2], child[-1]
+    assert denied["toolDenialKind"] == INTERRUPTED["denial_kind"], denied
+    assert denied["message"]["content"][0]["tool_use_id"] == tool_uses[0]["id"], denied
+    assert last["type"] == "user", last
+    assert last["message"]["content"][0]["text"] == INTERRUPTED["child_last_text"], last
+
+
+def check_claude_workflow_raw_facts() -> None:
+    """Where a Workflow-tool agent lands, and what links it to its parent.
+
+    The transcript is one directory deeper than an Agent-tool child, under
+    ``subagents/workflows/<runId>/``, and its sidecar carries no toolUseId.
+    The edge runs through the run id instead: the parent's Workflow tool
+    result names it, the directory is named for it, and the journal beside
+    the transcript maps each agent id to its label.
+    """
+    edge = WORKFLOW["edge"]
+    run_dir = (
+        WF_PROJECT_DIR / WF_PARENT / "subagents" / "workflows" / WORKFLOW["run_id"]
+    )
+    flat = list((WF_PROJECT_DIR / WF_PARENT / "subagents").glob("agent-*"))
+    assert not flat, f"a workflow agent should not be stored flat: {flat}"
+    files = sorted(run_dir.glob("agent-*.jsonl"))
+    assert [f.stem.removeprefix("agent-") for f in files] == [edge["child_agent_id"]]
+    (f,) = files
+    meta = json.loads(f.with_name(f.stem + ".meta.json").read_text())
+    assert meta["agentType"] == "workflow-subagent", meta
+    assert meta["description"] == edge["description"], meta
+    assert meta["workflowPhase"] == WORKFLOW["phase"], meta
+    assert meta["spawnDepth"] == 1 and "toolUseId" not in meta, meta
+
+    journal = [
+        json.loads(line)
+        for line in (run_dir / "journal.jsonl").read_text().splitlines()
+    ]
+    (started,) = [j for j in journal if j["type"] == "started"]
+    assert started["agentId"] == edge["child_agent_id"], started
+    assert started["label"] == edge["description"], started
+
+    parent = [
+        json.loads(line)
+        for line in (WF_PROJECT_DIR / f"{WF_PARENT}.jsonl").read_text().splitlines()
+    ]
+    calls = [
+        b
+        for r in parent
+        if r["type"] == "assistant"
+        for b in r["message"]["content"]
+        if b.get("type") == "tool_use" and b.get("name") == "Workflow"
+    ]
+    assert [c["id"] for c in calls] == [WORKFLOW["tool_use_id"]], calls
+    (answer,) = [
+        r
+        for r in parent
+        if r["type"] == "user"
+        and isinstance(r["message"]["content"], list)
+        and any(
+            b.get("type") == "tool_result"
+            and b.get("tool_use_id") == WORKFLOW["tool_use_id"]
+            for b in r["message"]["content"]
+        )
+    ]
+    result = answer["toolUseResult"]
+    assert result["status"] == "async_launched", result
+    assert result["runId"] == WORKFLOW["run_id"], result
+    assert result["transcriptDir"].endswith(
+        f"subagents/workflows/{WORKFLOW['run_id']}"
+    ), result
+    # The launch answer names no agent: agent ids exist only once the run has
+    # started them, in the journal and in the run record under workflows/.
+    assert "agentId" not in json.dumps(result), result
+    run_record = json.loads(
+        (
+            WF_PROJECT_DIR / WF_PARENT / "workflows" / f"{WORKFLOW['run_id']}.json"
+        ).read_text()
+    )
+    agents = [
+        p for p in run_record["workflowProgress"] if p["type"] == "workflow_agent"
+    ]
+    assert [a["agentId"] for a in agents] == [edge["child_agent_id"]], agents
+    # Completion reaches the parent as a task-notification user record with a
+    # promptId of its own, not the turn that launched the run.
+    (done,) = [
+        r for r in parent if (r.get("origin") or {}).get("kind") == "task-notification"
+    ]
+    assert done["promptId"] != WORKFLOW["spawn_prompt_id"], done
+    assert WORKFLOW["tool_use_id"] in done["message"]["content"], done
+
+    child = [json.loads(line) for line in f.read_text().splitlines()]
+    first = child[0]
+    assert first["sessionId"] == WF_PARENT and first["isSidechain"] is True, first
+    assert first["agentId"] == edge["child_agent_id"], first
+    assert first["promptId"] == edge["spawn_prompt_id"], first
+
+
 def check_opencode_raw_facts() -> None:
     rows = {r["id"]: r for r in OPENCODE_ROWS}
     fork = OPENCODE["fork"]
@@ -334,6 +504,48 @@ def check_codex_raw_facts() -> None:
 # ------------------------------------------------------- session-browser view
 
 
+def check_codex_review_raw_facts() -> None:
+    """A ``codex review`` child: a subagent with a parent, but not a spawn.
+
+    The parent is written at the TOP level of the child's session_meta, not
+    inside ``source.subagent`` (which is the bare string "review"), and the
+    pair has no thread_spawn_edges row. So the fork guard -- read the parent
+    only from inside the subagent object -- is exactly what loses it, and the
+    threads index has no column that carries it either.
+    """
+    review = CODEX["review"]
+    parent, child = review["parent"], review["child"]
+    want = review["child_session_meta"]
+    child_rollout = codex_rollout(child)
+    metas = [r for r in child_rollout if r["type"] == "session_meta"]
+    assert len(metas) == 1, "a review child does not copy its spawner's history"
+    meta = metas[0]["payload"]
+    assert meta["source"] == want["source"], meta
+    assert meta["thread_source"] == want["thread_source"], meta
+    assert meta["parent_thread_id"] == parent, meta
+    assert meta["session_id"] == parent and meta["id"] == child, meta
+    assert meta["multi_agent_version"] == want["multi_agent_version"], meta
+    assert "subagent_history_start_ordinal" not in meta, meta
+    parent_meta = codex_rollout(parent)[0]["payload"]
+    assert parent_meta["source"] == "exec" and "parent_thread_id" not in parent_meta
+    # Spawning side: the parent's own rollout records the child's items.
+    items = [
+        r["payload"]
+        for r in codex_rollout(parent)
+        if r["type"] == "event_msg" and r["payload"]["type"] == "item_completed"
+    ]
+    modes = [i["item"]["type"] for i in items if i["thread_id"] == parent]
+    assert modes[0] == "EnteredReviewMode" and "ExitedReviewMode" in modes, modes
+    assert any(i["thread_id"] == child for i in items), items
+    assert not any(
+        child in (e["parent_thread_id"], e["child_thread_id"])
+        for e in CODEX_INDEX["thread_spawn_edges"]
+    )
+    (row,) = [t for t in CODEX_INDEX["threads"] if t["id"] == child]
+    assert json.loads(row["source"]) == want["source"], row
+    assert "parent_thread_id" not in row, row
+
+
 def check_codex_graph() -> None:
     """The Codex graph through both discovery paths: index and file scan."""
     spawner_of = {e["child"]: e["spawner"] for e in CODEX["edges"]}
@@ -349,6 +561,11 @@ def check_codex_graph() -> None:
             if thread_id in spawner_of:
                 assert s["parent_id"] == spawner_of[thread_id], (where, s)
                 assert s["subagent_kind"] == "thread_spawn", (where, s)
+            elif thread_id == CODEX["review"]["child"]:
+                # Known as a subagent on both paths; its parent is not read on
+                # either, although the rollout carries it (see the raw facts).
+                assert s["subagent_kind"] == "review", (where, s)
+                assert s["parent_id"] == "", (where, s)
             else:
                 # Roots and forks alike: a fork is not a child.
                 assert s["parent_id"] == "" and s["subagent_kind"] == "", (where, s)
@@ -375,7 +592,7 @@ def claude_children(listed: list[dict]) -> dict[str, dict]:
     addressed by is not decided, and this fixture must not decide it.
     """
     out = {}
-    for agent_id in (e["child_agent_id"] for e in CLAUDE["edges"]):
+    for agent_id in (e["child_agent_id"] for e in CLAUDE_EDGES):
         hits = [s for s in listed if s["id"].endswith(agent_id)]
         assert len(hits) <= 1, (agent_id, hits)
         if hits:
@@ -385,16 +602,19 @@ def claude_children(listed: list[dict]) -> dict[str, dict]:
 
 def check_baseline() -> None:
     check_claude_raw_facts()
+    check_claude_interrupted_raw_facts()
+    check_claude_workflow_raw_facts()
     check_opencode_raw_facts()
     check_codex_raw_facts()
+    check_codex_review_raw_facts()
     check_codex_graph()
     with tempfile.TemporaryDirectory() as tmp:
         home = build_home(Path(tmp))
         check_opencode_graph(home)
         listed = list_sessions(home, "claude")
-        ids = [s["id"] for s in listed]
-        assert ids == [f"claude:{CLAUDE_PARENT}"], ids
-        assert listed[0]["parent_id"] is None, listed[0]
+        ids = sorted(s["id"] for s in listed)
+        assert ids == sorted(f"claude:{p}" for p in CLAUDE_PARENTS), ids
+        assert all(s["parent_id"] is None for s in listed), listed
         found = claude_children(listed)
         assert not found, f"Claude subagents are now discovered: {sorted(found)}"
     print(
@@ -405,22 +625,26 @@ def check_baseline() -> None:
 
 def check_candidate() -> None:
     check_claude_raw_facts()
+    check_claude_interrupted_raw_facts()
+    check_claude_workflow_raw_facts()
     check_opencode_raw_facts()
     check_codex_raw_facts()
+    check_codex_review_raw_facts()
     check_codex_graph()
     with tempfile.TemporaryDirectory() as tmp:
         home = build_home(Path(tmp))
         check_opencode_graph(home)
         listed = list_sessions(home, "claude")
         found = claude_children(listed)
-        missing = sorted({e["child_agent_id"] for e in CLAUDE["edges"]} - set(found))
+        missing = sorted({e["child_agent_id"] for e in CLAUDE_EDGES} - set(found))
         assert not missing, f"Claude subagents not discovered: {missing}"
-        parent = next(s for s in listed if s["id"] == f"claude:{CLAUDE_PARENT}")
-        assert parent["parent_id"] == "", parent
-        for e in CLAUDE["edges"]:
+        for parent_id in CLAUDE_PARENTS:
+            parent = next(s for s in listed if s["id"] == f"claude:{parent_id}")
+            assert parent["parent_id"] == "", parent
+        for e in CLAUDE_EDGES:
             child = found[e["child_agent_id"]]
-            if e["spawner"] == CLAUDE_PARENT:
-                want = CLAUDE_PARENT
+            if e["spawner"] in CLAUDE_PARENTS:
+                want = e["spawner"]
             else:
                 want = found[e["spawner"]]["id"].split(":", 1)[1]
             assert child["parent_id"] == want, (e, child)
