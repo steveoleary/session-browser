@@ -95,14 +95,17 @@ where they disagree, `--help` describes the binary you are actually running.
    deep work. When one session is known and the question is what else was
    happening near it, `list --around ID` returns its temporal neighbours;
    do not hand-compute a window from its timestamp.
-3. **Search rare phrases in `--mode ids` first.** Pass alternate phrasings
-   together — `search "phrase a" "phrase b"` ORs them in one scan. "Rare" means
-   rare *in this corpus*: ordinary English ("delete", "batch", "table") and
-   vocabulary shared across projects ("App Store", "tethered") match most of it.
-   Three common words matched 71% of the corpus in one measured run, and it
-   cost three seconds to find that out — so when a query feels broad, run it in
-   `--mode ids` and look at the count before refining. Prefer multiword phrases
-   the answer itself would contain. Summaries are scanned too, so words from
+3. **Search rare phrases, and pick the mode by how broad the query is.**
+   Pass alternate phrasings together — `search "phrase a" "phrase b"` ORs them
+   in one scan. "Rare" means rare *in this corpus*: ordinary English ("delete",
+   "batch", "table") and vocabulary shared across projects ("App Store",
+   "tethered") match most of it. Three common words matched 71% of the corpus
+   in one measured run, and it cost three seconds to find that out — so when a
+   query feels broad, run it in `--mode ids` and look at the count before
+   refining. When the phrase is specific, go straight to `--mode snippets`
+   (step 4): both modes parse the same candidate transcripts, so `ids` followed
+   by `snippets` on the same query does the whole scan twice for no new
+   information. Prefer multiword phrases the answer itself would contain. Summaries are scanned too, so words from
    how the work would be *titled* are good phrases; a summary-only hit returns
    `match_count 0` with the phrases in `summary_matches`. Matching is literal
    and markdown-insensitive, never semantic.
@@ -132,9 +135,9 @@ where they disagree, `--help` describes the binary you are actually running.
 | Recent sessions in a project | `session-browser list --cwd project --limit 10` |
 | Sessions from this project | `session-browser list --here --limit 10` |
 | What else happened around a known session | `session-browser list --around ID --limit 15` |
-| Find candidates | `session-browser search "rare phrase" --cwd my-project --mode ids --limit 10` |
+| Size up a query that may be broad | `session-browser search "phrase" --cwd my-project --mode ids --limit 10` |
 | Alternate phrasings, one scan | `session-browser search "phrase a" "phrase b" --mode ids` |
-| Inspect matches | `session-browser search "rare phrase" --mode snippets --context 120 --limit 5` |
+| Find and inspect a rare phrase in one scan | `session-browser search "rare phrase" --mode snippets --context 120 --limit 5` |
 | Rank by hit count, not recency | add `--sort matches` |
 | Read the matched region | `session-browser get ID --entries 38:60` |
 | What was asked for, and how it ended | `session-browser get ID --brief` |
