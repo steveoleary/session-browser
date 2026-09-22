@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -48,6 +49,8 @@ from .transcript import (
     Transcript,
     TranscriptEntry,
     TranscriptUnreadable,
+    _codex_entries,
+    _dedupe_codex_turns,
     _offset_map,
     _OffsetMap,
     canonical_id,
@@ -81,6 +84,93 @@ _FILTER_DEBOUNCE = 0.15
 # strictly a presentation bound: search, match counts, and exports always
 # see the full transcript, and the window slides to the selected match.
 _DISPLAY_WINDOW = 200_000
+
+
+def _codex_fork_transcript(
+    session: Session, sessions_by_id: dict[str, Session]
+) -> Transcript:
+    """Join a Codex fork's inherited records for the TUI's reading view.
+
+    Codex stores only the new records in a fork's rollout. Its history_base
+    points to an exact byte boundary in the source rollout. This is a display
+    read; corpus search continues to read each physical file once.
+    """
+    transcript = load_transcript(session)
+    if session.provider != "codex" or session.subagent_kind:
+        return transcript
+
+    warnings = transcript.warnings
+    seen: set[str] = set()
+
+    def inherited(current: Session) -> list[TranscriptEntry]:
+        if current.id in seen:
+            warnings.append("fork history contains a cycle")
+            return []
+        seen.add(current.id)
+        try:
+            with open(current.content_path, "rb") as fh:
+                first = json.loads(fh.readline())
+            meta = first.get("payload", {})
+            base = meta.get("history_base")
+            if not isinstance(base, dict):
+                return []
+            source_id = base.get("thread_id")
+            byte_end = base.get("end_byte_offset")
+            source = sessions_by_id.get(source_id)
+            if source is None or not isinstance(byte_end, int) or byte_end < 0:
+                warnings.append(f"fork history unavailable: {source_id}")
+                return []
+            earlier = inherited(source)
+            with open(source.content_path, "rb") as fh:
+                prefix = fh.read(byte_end)
+            if len(prefix) != byte_end or (prefix and not prefix.endswith(b"\n")):
+                warnings.append(f"fork history incomplete: {source_id}")
+                return earlier
+
+            def raw_entries():
+                for line in prefix.splitlines():
+                    try:
+                        obj = json.loads(line)
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        warnings.append(f"invalid fork history record: {source_id}")
+                        continue
+                    if isinstance(obj, dict):
+                        yield from _codex_entries(obj)
+
+            return earlier + list(_dedupe_codex_turns(raw_entries()))
+        except (OSError, ValueError, TypeError) as exc:
+            warnings.append(f"fork history unavailable: {exc}")
+            return []
+
+    prefix_entries = inherited(session)
+    if prefix_entries:
+        transcript.entries = prefix_entries + transcript.entries
+    return transcript
+
+
+class DetailScroll(VerticalScroll):
+    """Let mouse-wheel navigation cross the transcript's display windows."""
+
+    def _on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        if not (event.ctrl or event.shift):
+            app = self.app
+            if (
+                app._detail_window_end() < len(app._detail_text)
+                and self.scroll_y + app.scroll_sensitivity_y >= self.max_scroll_y
+            ):
+                app._scroll_detail(max(1, app.scroll_sensitivity_y))
+                event.stop()
+                return
+        super()._on_mouse_scroll_down(event)
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        if not (event.ctrl or event.shift):
+            app = self.app
+            if app._window_start > 0 and self.scroll_y <= app.scroll_sensitivity_y:
+                app._scroll_detail(-max(1, app.scroll_sensitivity_y))
+                event.stop()
+                return
+        super()._on_mouse_scroll_up(event)
 
 
 class RowMeta(NamedTuple):
@@ -1527,7 +1617,7 @@ class SessionBrowser(App):
                     id="detail-search",
                 )
                 yield Label("", id="match-counter")
-                yield VerticalScroll(
+                yield DetailScroll(
                     Static("Select a session to view details", id="detail-content"),
                     id="detail-scroll",
                 )
@@ -2227,8 +2317,9 @@ class SessionBrowser(App):
         # lands after the selection moved on can be discarded.
         self._clear_transcript_widgets()
         self.query_one("#detail-content", Static).update("Loading…")
+        sessions_by_id = {s.id: s for s in self._all_sessions}
         self.run_worker(
-            lambda s=session: (s, self._load_transcript_safe(s)),
+            lambda s=session: (s, self._load_transcript_safe(s, sessions_by_id)),
             thread=True,
             exclusive=True,
             group="load_content",
@@ -2236,9 +2327,11 @@ class SessionBrowser(App):
         )
 
     @staticmethod
-    def _load_transcript_safe(session: Session) -> Transcript:
+    def _load_transcript_safe(
+        session: Session, sessions_by_id: dict[str, Session] | None = None
+    ) -> Transcript:
         try:
-            return load_transcript(session)
+            return _codex_fork_transcript(session, sessions_by_id or {})
         except (TranscriptUnreadable, OSError) as exc:
             return Transcript(
                 session,

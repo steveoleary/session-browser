@@ -3399,6 +3399,73 @@ class TestDisplayWindow:
             assert "1 / 2" in counter
 
 
+class TestCodexForkReading:
+    def test_fork_inherits_only_the_source_prefix(self, tmp_path):
+        from session_browser.app import _codex_fork_transcript
+
+        source_path = tmp_path / "source.jsonl"
+        inherited = [
+            {"type": "session_meta", "payload": {"session_id": "source"}},
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "first"},
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "first answer"}],
+                },
+            },
+        ]
+        prefix = "".join(json.dumps(record) + "\n" for record in inherited).encode()
+        source_path.write_bytes(
+            prefix
+            + (
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "user_message", "message": "later"},
+                    }
+                )
+                + "\n"
+            ).encode()
+        )
+        fork_path = tmp_path / "fork.jsonl"
+        fork_path.write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "session_id": "fork",
+                        "history_base": {
+                            "thread_id": "source",
+                            "end_byte_offset": len(prefix),
+                        },
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "new"},
+                }
+            )
+            + "\n"
+        )
+        source = Session(id="source", provider="codex", content_path=str(source_path))
+        fork = Session(id="fork", provider="codex", content_path=str(fork_path))
+        transcript = _codex_fork_transcript(fork, {source.id: source, fork.id: fork})
+        assert [(e.role, e.text) for e in transcript.entries] == [
+            ("user", "first"),
+            ("assistant", "first answer"),
+            ("user", "new"),
+        ]
+        assert transcript.warnings == []
+
+
 @pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
 @pytest.mark.asyncio
 class TestStructuredTranscript:
@@ -4305,6 +4372,36 @@ class TestStructuredTranscript:
                 scroll.scroll_home(animate=False)
                 await pilot.pause()
                 app.action_nav_up()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                assert app._window_start == 0
+
+    async def test_mouse_wheel_crosses_both_window_boundaries(self):
+        from textual import events
+        from textual.containers import VerticalScroll
+
+        app, fake = _make_app_with_rows(1)
+        with patch("session_browser.app._DISPLAY_WINDOW", 500):
+            async with app.run_test(size=(120, 18)) as pilot:
+                await _install_fake_sessions(app, pilot, fake)
+                app._on_transcript_loaded(self._windowed_transcript(fake[0]))
+                scroll = app.query_one("#detail-scroll", VerticalScroll)
+                await pilot.pause()
+
+                scroll.scroll_end(animate=False, immediate=True)
+                await pilot.pause()
+                down = events.MouseScrollDown(
+                    scroll, 1, 1, 0, 1, 0, False, False, False
+                )
+                scroll._on_mouse_scroll_down(down)
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                assert app._window_start == 250
+
+                scroll.scroll_home(animate=False, immediate=True)
+                await pilot.pause()
+                up = events.MouseScrollUp(scroll, 1, 1, 0, -1, 0, False, False, False)
+                scroll._on_mouse_scroll_up(up)
                 await app.workers.wait_for_complete()
                 await pilot.pause()
                 assert app._window_start == 0
