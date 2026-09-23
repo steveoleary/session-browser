@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -2018,6 +2019,34 @@ def _make_app_with_rows(n: int = 5):
         for i in range(1, n + 1)
     ]
     return app, fake
+
+
+async def _cross_detail_window(app, pilot, cross) -> None:
+    """Run *cross*, which slides the transcript window, and return only once the
+    viewport restore that slide deferred has landed.
+
+    The restore runs in a worker that awaits the remount and then schedules
+    itself with call_after_refresh, so neither wait_for_complete() nor a
+    pause() waits for it. A test that moved the viewport next -- scroll_home
+    before a wheel-up -- used to lose to it about half the time on a busy
+    machine: the restore landed afterwards and put the viewport back at its
+    anchor, so the wheel-up no longer crossed. call_after_refresh captures the
+    bound method when it schedules, which is why the wrapper must be in place
+    before *cross* runs."""
+    landed = asyncio.Event()
+    restore = app._restore_detail_anchor
+
+    def traced(*args):
+        restore(*args)
+        landed.set()
+
+    app._restore_detail_anchor = traced
+    try:
+        cross()
+        await asyncio.wait_for(landed.wait(), timeout=5)
+    finally:
+        del app._restore_detail_anchor
+    await pilot.pause()
 
 
 async def _install_fake_sessions(app, pilot, fake):
@@ -4418,9 +4447,7 @@ class TestStructuredTranscript:
 
                 scroll.scroll_end(animate=False)
                 await pilot.pause()
-                app.action_nav_down()
-                await app.workers.wait_for_complete()
-                await pilot.pause()
+                await _cross_detail_window(app, pilot, app.action_nav_down)
                 assert app._window_start == 250
 
                 scroll.scroll_home(animate=False)
@@ -4447,9 +4474,9 @@ class TestStructuredTranscript:
                 down = events.MouseScrollDown(
                     scroll, 1, 1, 0, 1, 0, False, False, False
                 )
-                scroll._on_mouse_scroll_down(down)
-                await app.workers.wait_for_complete()
-                await pilot.pause()
+                await _cross_detail_window(
+                    app, pilot, lambda: scroll._on_mouse_scroll_down(down)
+                )
                 assert app._window_start == 250
 
                 scroll.scroll_home(animate=False, immediate=True)
