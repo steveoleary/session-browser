@@ -3093,6 +3093,60 @@ class TestSearchUX:
             app._apply_filter("")
             assert "of 3" not in str(app._app_meta.render())
 
+    async def test_ignore_file_hides_sessions_until_toggled(
+        self, tmp_path, monkeypatch
+    ):
+        """Discovery drops what the ignore file names; `.` brings it back, and
+        the header says which view is showing."""
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        (tmp_path / "session-browser").mkdir()
+        (tmp_path / "session-browser" / "ignore").write_text("dogfood/\n")
+        fake = [
+            Session(id="k1", provider="claude", cwd="/p/keep", updated_at="2026-03-02"),
+            Session(
+                id="n1", provider="codex", cwd="/p/dogfood/a", updated_at="2026-03-01"
+            ),
+            Session(
+                id="n2", provider="codex", cwd="/p/dogfood/b", updated_at="2026-02-01"
+            ),
+        ]
+        monkeypatch.setattr("session_browser.app.discover_all", lambda: fake)
+        app = SessionBrowser()
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert [s.id for s in app._filtered] == ["k1"]
+            assert "2 ignored" in str(app._app_meta.render())
+            app.query_one("#session-table").focus()
+            await pilot.press("full_stop")
+            await pilot.pause()
+            assert [s.id for s in app._filtered] == ["k1", "n1", "n2"]
+            assert "incl. 2 ignored" in str(app._app_meta.render())
+            await pilot.press("full_stop")
+            await pilot.pause()
+            assert [s.id for s in app._filtered] == ["k1"]
+
+    async def test_ignored_notice_can_be_turned_off(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        (tmp_path / "session-browser").mkdir()
+        (tmp_path / "session-browser" / "ignore").write_text("dogfood/\n")
+        (tmp_path / "session-browser" / "config.toml").write_text(
+            "[tui]\nignored_notice = false\n"
+        )
+        fake = [
+            Session(id="k1", provider="claude", cwd="/p/keep", updated_at="2026-03-02"),
+            Session(
+                id="n1", provider="codex", cwd="/p/dogfood", updated_at="2026-03-01"
+            ),
+        ]
+        monkeypatch.setattr("session_browser.app.discover_all", lambda: fake)
+        app = SessionBrowser()
+        async with app.run_test() as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert [s.id for s in app._filtered] == ["k1"]
+            assert "ignored" not in str(app._app_meta.render())
+
     async def test_content_hit_row_shows_count_and_snippet(self):
         """The summary cell shows *why* the row matched, not the opening
         prompt of an unrelated-looking session."""

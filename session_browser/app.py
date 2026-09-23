@@ -34,6 +34,7 @@ except ImportError:
 from datetime import UTC
 
 from . import multiplexer
+from .config import ConfigError, load_ignore, load_tui_settings
 from .discovery import Session, discover_all
 from .resume import (
     build_chat_export,
@@ -1277,7 +1278,7 @@ class ShortcutHelp(ModalScreen[None]):
     #shortcut-help {
         width: 72;
         max-width: 94%;
-        height: 23;
+        height: 24;
         max-height: 94%;
         padding: 1 2;
         background: $surface;
@@ -1302,6 +1303,7 @@ class ShortcutHelp(ModalScreen[None]):
            [cyan]s[/] find in session       [cyan]m[/] matching blocks only
            [cyan]p[/] this-project scope     [cyan]f[/] filter entries
            [cyan]space[/] expand subagents   [cyan]T[/] flat / tree
+           [cyan].[/] show ignored sessions
 
 [bold]Layout[/]     [cyan]z[/] focus current pane    [cyan]Esc[/] step back
 
@@ -1453,6 +1455,7 @@ class SessionBrowser(App):
         Binding("[", "prev_tool", "Previous tool", show=False),
         Binding("r", "refresh_sessions", "Refresh", show=False),
         Binding("p", "toggle_here", "This project", show=False),
+        Binding("full_stop", "toggle_ignored", "Show ignored", show=False),
         # Vim-style navigation (hidden from footer to keep it uncluttered)
         Binding("j", "nav_down", "Down", show=False),
         Binding("k", "nav_up", "Up", show=False),
@@ -1465,6 +1468,14 @@ class SessionBrowser(App):
     def __init__(self) -> None:
         super().__init__()
         self._all_sessions: list[Session] = []
+        # Everything discovery found, and the subset the user's ignore file
+        # hides. _all_sessions is whichever of the two is in force, so every
+        # filter, search and count downstream already respects the choice.
+        self._discovered: list[Session] = []
+        self._ignored_count: int = 0
+        self._ignored_ids: frozenset[str] = frozenset()
+        self._show_ignored: bool = False
+        self._ignored_notice: bool = True
         self._filtered: list[Session] = []
         self._table_sessions: list[Session] = []
         self._selected: Session | None = None
@@ -1749,8 +1760,36 @@ class SessionBrowser(App):
         self._app_meta.update("Discovering sessions…")
         self.run_worker(self._discover_worker, thread=True)
 
-    def _discover_worker(self) -> list[Session]:
-        return discover_all()
+    def _discover_worker(
+        self,
+    ) -> tuple[list[Session], frozenset[str], bool, str | None]:
+        """Sessions, the ids the ignore file hides, whether to say so in the
+        header, and any config error.
+
+        A broken config file degrades to "nothing ignored" plus a flash,
+        never to a TUI that will not start."""
+        sessions = discover_all()
+        error = None
+        notice = True
+        try:
+            notice = load_tui_settings()["ignored_notice"]
+        except ConfigError as exc:
+            error = str(exc)
+        try:
+            rules = load_ignore()
+        except ConfigError as exc:
+            rules, error = None, str(exc)
+        ignored = frozenset(
+            s.id for s in sessions if rules is not None and rules.ignores(s.cwd)
+        )
+        return sessions, ignored, notice, error
+
+    def _apply_ignored_visibility(self) -> None:
+        if self._show_ignored or not self._ignored_ids:
+            self._all_sessions = self._discovered
+        else:
+            ignored = self._ignored_ids
+            self._all_sessions = [s for s in self._discovered if s.id not in ignored]
 
     @_teardown_safe
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
@@ -1770,8 +1809,17 @@ class SessionBrowser(App):
             return
         if event.worker.name == "_discover_worker":
             if event.worker.result is not None:
-                self._all_sessions = event.worker.result
+                (
+                    self._discovered,
+                    self._ignored_ids,
+                    self._ignored_notice,
+                    error,
+                ) = event.worker.result
+                self._ignored_count = len(self._ignored_ids)
+                self._apply_ignored_visibility()
                 self._apply_filter("")
+                if error:
+                    self._flash_status(error, ok=False)
         elif event.worker.name == "_load_content":
             result = event.worker.result
             if result is None:
@@ -1843,7 +1891,12 @@ class SessionBrowser(App):
         count = f"{len(self._filtered):,}"
         if len(self._filtered) != len(self._all_sessions):
             count = f"{count} of {len(self._all_sessions):,}"
-        self._app_meta.update(f"[bold]{count}[/] sessions  ·  {scope}")
+        ignored = ""
+        if self._ignored_count and self._show_ignored:
+            ignored = f"  ·  incl. {self._ignored_count:,} ignored"
+        elif self._ignored_count and self._ignored_notice:
+            ignored = f"  ·  [dim]{self._ignored_count:,} ignored[/]"
+        self._app_meta.update(f"[bold]{count}[/] sessions{ignored}  ·  {scope}")
 
     def _update_status_count(self) -> None:
         self._update_meta_count()
@@ -1865,6 +1918,22 @@ class SessionBrowser(App):
             f"Scope: this project ({self._cwd_base})"
             if self._here_only
             else "Scope: all projects"
+        )
+
+    def action_toggle_ignored(self) -> None:
+        if not self._ignored_count:
+            self._flash_status("The ignore file hides no sessions", ok=False)
+            return
+        self._show_ignored = not self._show_ignored
+        self._apply_ignored_visibility()
+        # The narrowing basis was computed over the other session set; reusing
+        # it would restrict the next search to hits that set happened to have.
+        self._hits_basis = None
+        self._apply_filter(self._filter_query)
+        self._flash_status(
+            f"Showing {self._ignored_count:,} ignored sessions"
+            if self._show_ignored
+            else f"Hiding {self._ignored_count:,} ignored sessions"
         )
 
     def _apply_filter(self, query: str) -> None:

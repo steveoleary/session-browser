@@ -147,6 +147,29 @@ session-browser get claude:7645 --recent 8 --budget 6000
 session-browser stats --here
 ```
 
+### Ignoring noisy paths
+
+Loop runs and dogfood worktrees can bury real history. List their paths in
+`~/.config/session-browser/ignore` (or under `$XDG_CONFIG_HOME`), in gitignore
+syntax, matched against each session's working directory:
+
+```gitignore
+# loop and dogfood runs: real work, little value as history
+~/Projects/bloodhound-dogfood/
+```
+
+It works like ripgrep's ignore handling. Ignored sessions drop out of `list`,
+`search`, `stats` and the TUI without comment, `--no-ignore` brings them back,
+and a session named directly (`get ID`) is always read. The one time it speaks
+is when a filter comes back empty and ignored sessions would have matched. In
+the TUI, `.` shows or hides them and the header counts them. Turn that count off
+in `~/.config/session-browser/config.toml`:
+
+```toml
+[tui]
+ignored_notice = false
+```
+
 Use `session-browser COMMAND --help` for filters, output formats, date ranges,
 and retrieval windows. Commands return JSON by default where it is useful for
 automation.
@@ -191,6 +214,7 @@ Press `?` in the app for the complete key map.
 | `i` | Copy the canonical session id |
 | `e` / `E` | Copy / export the conversation |
 | `p` | Toggle this-project scope |
+| `.` | Show or hide sessions your ignore file hides |
 | `?` | Show all shortcuts |
 | `q` | Quit |
 

@@ -28,6 +28,7 @@ classifiers = [
   "Topic :: Utilities",
 ]
 dependencies = [
+  "pathspec>=1.1.1",
   "rich>=15.0.0",
   "textual>=0.80.0",
 ]

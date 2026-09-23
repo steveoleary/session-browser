@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC
 from pathlib import Path
 
@@ -949,6 +950,165 @@ class TestExcludeCwd:
         artifact misreport what actually ran."""
         _, out, _ = cli("search", "wombat", "--mode", "ids", "--exclude-cwd", "projA")
         assert json.loads(out)["filters"]["exclude_cwd"] == ["projA"]
+
+
+@pytest.fixture
+def ignore_file(tmp_path, monkeypatch):
+    """Write the user's ignore file into an isolated config home."""
+    home = tmp_path / "config-home"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+
+    def write(text: str) -> Path:
+        path = home / "session-browser" / "ignore"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    return write
+
+
+def _ids(out: str, key: str = "sessions") -> list[str]:
+    return [s["id"] for s in json.loads(out)[key]]
+
+
+class TestIgnoreFile:
+    """The ignore file, on the ripgrep model: silent, --no-ignore to reach
+    past it, and anything named explicitly is never ignored."""
+
+    def test_ignored_sessions_leave_list_silently(self, cli, ignore_file):
+        ignore_file("# loop runs\n/home/u/projA/\n")
+        _, out, _ = cli("list")
+        assert _ids(out) == ["claude:ccc", "codex:bbb"]
+        assert "warnings" not in json.loads(out)
+
+    def test_no_ignore_restores_them_and_is_echoed(self, cli, ignore_file):
+        ignore_file("projA/\n")
+        _, out, _ = cli("search", "wombat", "--mode", "ids", "--no-ignore")
+        data = json.loads(out)
+        assert data["filters"]["no_ignore"] is True
+        assert {r["id"] for r in data["results"]} == {"claude:aaa", "claude:ccc"}
+
+    def test_search_and_stats_respect_it(self, cli, ignore_file):
+        ignore_file("projA/\n")
+        _, out, _ = cli("search", "wombat", "--mode", "ids")
+        assert [r["id"] for r in json.loads(out)["results"]] == ["claude:ccc"]
+        _, out, _ = cli("stats", "--format", "json")
+        assert json.loads(out)["total"] == 2
+
+    def test_get_by_id_is_never_ignored(self, cli, ignore_file):
+        """rg searches a file you name even when it is ignored; so does get."""
+        ignore_file("projA/\n")
+        code, out, _ = cli("get", "claude:aaa", "--format", "json")
+        assert code == 0
+        assert json.loads(out)["session"]["id"] == "claude:aaa"
+
+    def test_around_anchor_resolves_inside_ignored_territory(self, cli, ignore_file):
+        ignore_file("projA/\n")
+        code, out, _ = cli("list", "--around", "claude:aaa", "--window", "30d")
+        assert code == 0
+        assert _ids(out) == ["codex:bbb", "claude:ccc"]
+
+    def test_empty_result_names_what_the_ignore_file_hid(self, cli, ignore_file):
+        """ripgrep's 'No files were searched' case: the one time the ignore
+        file speaks, because silence here would read as 'no such history'."""
+        ignore_file("projA/\n")
+        _, out, _ = cli("list", "--cwd", "projA")
+        data = json.loads(out)
+        assert data["sessions"] == []
+        assert any(
+            "1 that would have are hidden by the ignore file" in w
+            and "--no-ignore" in w
+            for w in data["warnings"]
+        )
+
+    def test_empty_result_unrelated_to_ignore_stays_quiet_about_it(
+        self, cli, ignore_file
+    ):
+        ignore_file("projA/\n")
+        _, out, _ = cli("list", "--provider", "codex", "--cwd", "projC")
+        assert not any("ignore file" in w for w in json.loads(out).get("warnings", []))
+
+    def test_negation_and_home_expansion(self, cli, ignore_file, monkeypatch):
+        monkeypatch.setattr("session_browser.config.Path.home", lambda: Path("/home/u"))
+        ignore_file("~/\n!~/projC/\n")
+        _, out, _ = cli("list")
+        assert _ids(out) == ["claude:ccc"]
+
+    def test_invalid_pattern_is_a_structured_error_naming_the_line(
+        self, cli, ignore_file
+    ):
+        """A pattern skipped silently would leave noise showing while the user
+        believes it hidden."""
+        path = ignore_file("projA/\n\\\n")
+        code, _, err = cli("list", "--format", "json")
+        assert code == 1
+        error = json.loads(err)["error"]
+        assert error["code"] == "invalid_config"
+        assert f"{path}:2:" in error["message"]
+
+
+class TestConfigLoading:
+    def test_absent_comment_only_and_non_directory_homes_ignore_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        from session_browser import config
+
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "missing"))
+        assert config.load_ignore() is None
+        # The comparator's "read no config" setting.
+        monkeypatch.setenv("XDG_CONFIG_HOME", os.devnull)
+        assert config.load_ignore() is None
+        assert config.load_tui_settings() == {"ignored_notice": True}
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        (tmp_path / "session-browser").mkdir()
+        (tmp_path / "session-browser" / "ignore").write_text("# nothing yet\n\n")
+        assert config.load_ignore() is None
+
+    def test_falls_back_to_dot_config_under_home(self, tmp_path, monkeypatch):
+        from session_browser import config
+
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr("session_browser.config.Path.home", lambda: tmp_path)
+        assert config.ignore_path() == tmp_path / ".config/session-browser/ignore"
+
+    def test_rules_match_directories_and_everything_below(self, tmp_path, monkeypatch):
+        from session_browser import config
+
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        (tmp_path / "session-browser").mkdir()
+        (tmp_path / "session-browser" / "ignore").write_text("dogfood/\n")
+        rules = config.load_ignore()
+        assert rules.ignores("/Users/x/Projects/dogfood")
+        assert rules.ignores("/Users/x/Projects/dogfood/armA")
+        assert not rules.ignores("/Users/x/Projects/dogfood-notes")
+        assert not rules.ignores(None)
+        assert not rules.ignores("")
+
+    @pytest.mark.parametrize(
+        ("toml", "expected"),
+        [
+            ("", True),
+            ("[tui]\nignored_notice = false\n", False),
+            ("[other]\nx = 1\n", True),
+        ],
+    )
+    def test_tui_notice_setting(self, tmp_path, monkeypatch, toml, expected):
+        from session_browser import config
+
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        (tmp_path / "session-browser").mkdir()
+        (tmp_path / "session-browser" / "config.toml").write_text(toml)
+        assert config.load_tui_settings()["ignored_notice"] is expected
+
+    @pytest.mark.parametrize("toml", ["[tui]\nignored_notice = 'no'\n", "[tui\n"])
+    def test_bad_settings_are_errors(self, tmp_path, monkeypatch, toml):
+        from session_browser import config
+
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        (tmp_path / "session-browser").mkdir()
+        (tmp_path / "session-browser" / "config.toml").write_text(toml)
+        with pytest.raises(config.ConfigError, match=r"config\.toml"):
+            config.load_tui_settings()
 
 
 class TestListDiagnostics:

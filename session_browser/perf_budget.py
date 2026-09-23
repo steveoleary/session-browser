@@ -1355,9 +1355,12 @@ def _corpus_home(root: Path) -> Iterator[Path]:
     ``benchmarks/retrieval_compare.py`` pulls with ``--home``.
     """
     home = build_corpus(root)
-    saved = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
+    saved = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME")}
     os.environ["HOME"] = str(home)
     os.environ["USERPROFILE"] = str(home)
+    # The user's ignore file would otherwise drop corpus sessions, and the
+    # counts would depend on whose machine blessed them.
+    os.environ["XDG_CONFIG_HOME"] = str(home / ".config")
     try:
         yield home
     finally:

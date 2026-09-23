@@ -20,6 +20,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from .config import ConfigError, load_ignore
 from .discovery import ALL_SCANNERS, Session, discover_all
 from .resume import _filename_part
 from .transcript import (
@@ -70,6 +71,7 @@ _FILTER_KEYS = (
     "exclude_cwd",
     "here",
     "include_current",
+    "no_ignore",
     "since",
     "until",
     "around",
@@ -661,6 +663,15 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         "agent's session-id env var, e.g. CLAUDE_CODE_SESSION_ID)",
     )
     p.add_argument(
+        "--no-ignore",
+        action="store_true",
+        help="include sessions the user's ignore file hides "
+        "(~/.config/session-browser/ignore: gitignore patterns matched "
+        "against the working directory, for noise such as loop runs). "
+        "Silent otherwise, as ripgrep is; a filter that leaves nothing "
+        "while ignored sessions would have matched says so",
+    )
+    p.add_argument(
         "--limit",
         type=int,
         help="maximum number of results; omit it and every match is "
@@ -803,6 +814,16 @@ def apply_filters(
     is provided, advisory notes (e.g. sessions --here dropped for missing cwd)
     are appended to it."""
     out = sessions
+    ignored = False
+    if not getattr(args, "no_ignore", False):
+        try:
+            rules = load_ignore()
+        except ConfigError as exc:
+            raise CliError(str(exc), code="invalid_config") from exc
+        if rules is not None:
+            before = len(out)
+            out = [s for s in out if not rules.ignores(s.cwd)]
+            ignored = len(out) != before
     if args.provider:
         p = args.provider.lower()
         out = [s for s in out if s.provider.lower() == p]
@@ -946,6 +967,23 @@ def apply_filters(
             warnings.append(
                 f"--exclude-cwd removed {dropped} session(s) matching "
                 f"{', '.join(excluded)}"
+            )
+    if not out and ignored and warnings is not None:
+        # ripgrep's "No files were searched, which means ripgrep probably
+        # applied a filter you didn't expect", made exact. Only an empty
+        # result speaks: a count on every call invites an agent to go and
+        # check the ignored sessions each time, and a user who wrote the
+        # file already knows. Re-running the filters without the ignore file
+        # costs nothing on the path that matters, which is the non-empty one.
+        hidden = apply_filters(
+            sessions,
+            argparse.Namespace(**{**vars(args), "no_ignore": True}),
+            apply_limit=False,
+        )
+        if hidden:
+            warnings.append(
+                f"no sessions matched, but {len(hidden)} that would have are "
+                f"hidden by the ignore file; pass --no-ignore to include them"
             )
     out = sorted(out, key=lambda s: s.sort_key, reverse=True)
     if around is not None:
@@ -1947,6 +1985,7 @@ def _filters_dict(args) -> dict:
         "exclude_cwd": getattr(args, "exclude_cwd", None),
         "here": getattr(args, "here", False),
         "include_current": getattr(args, "include_current", False),
+        "no_ignore": getattr(args, "no_ignore", False),
         "since": args.since,
         "until": args.until,
         "around": getattr(args, "around", None),

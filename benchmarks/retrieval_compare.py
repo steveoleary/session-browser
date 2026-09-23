@@ -234,6 +234,11 @@ def _comparison_environment(
 ) -> dict[str, str]:
     env = os.environ.copy()
     env["HOME"] = str(home)
+    # Read no user config at all. The ignore file changes what search returns,
+    # and a revision that predates it would not apply it, so against a real
+    # $HOME with an ignore file every query would mismatch on configuration
+    # rather than code. A config home that is a file holds no config.
+    env["XDG_CONFIG_HOME"] = os.devnull
     for item in current_session_env:
         if "=" not in item:
             raise ComparatorError(

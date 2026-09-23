@@ -164,6 +164,11 @@ Judgment `--help` does not carry:
 - Judge neighbours by `offset` *and* `duration_seconds` together: a small
   offset on a very long session is a concurrent sibling, not a predecessor.
 - `--sort` is not a shared filter, and `stats` has none at all.
+- The user may keep an ignore file hiding noisy paths such as loop runs. Like
+  ripgrep's, it is silent: ignored sessions are simply absent from `list`,
+  `search` and `stats`, while `get ID` still reads one. Pass `--no-ignore`
+  when the user asks about work in those paths, or when `warnings` says a
+  filter came back empty because of it — not to double-check every result.
 - `--here` cannot see sessions with no recorded cwd. If its `warnings` says it
   excluded some and they matter, reach them with `--cwd`, a content search, or
   `--provider`.
