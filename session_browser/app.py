@@ -22,9 +22,7 @@ try:
     from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.content import Content
     from textual.css.query import NoMatches
-    from textual.driver import Driver
     from textual.message import Message
-    from textual.messages import InBandWindowResize
     from textual.screen import ModalScreen
     from textual.strip import Strip
     from textual.widgets import DataTable, Footer, Input, Label, Static
@@ -35,7 +33,7 @@ except ImportError:
 
 from datetime import UTC
 
-from . import herdr, multiplexer
+from . import multiplexer
 from .discovery import Session, discover_all
 from .resume import (
     build_chat_export,
@@ -1403,35 +1401,6 @@ class MultiplexerChoice(ModalScreen["multiplexer.Target | None"]):
 # ---------------------------------------------------------------------------
 
 
-def _without_in_band_resize(driver_class: type[Driver]) -> type[Driver]:
-    """`driver_class`, never switching the terminal to in-band resize reports.
-
-    Textual asks the terminal whether it supports in-band resize (mode 2048)
-    and, if so, enables it together with pixel mouse coordinates (mode 1016).
-    Its input parser then divides every mouse coordinate by the cell size from
-    the first resize report onward -- without checking that the terminal ever
-    agreed to report pixels. herdr 0.9.0 answers 2048 as supported and sends
-    reports, but keeps sending mouse positions in cells, so after the first
-    report every click lands near the top-left corner and does nothing, while
-    the keyboard keeps working. The report does not need a size change: one
-    arrived with the pane's unchanged 162x52 and still broke every click.
-
-    The answer to Textual's 2048 query is dropped before the driver sees it,
-    so neither mode is enabled, no report is ever requested, and resizes
-    arrive the ordinary way, through SIGWINCH -- which the driver ignores
-    only while in-band resize is on. What is lost is smooth scrolling, the
-    one feature Textual gates on in-band support.
-    """
-
-    class NoInBandResizeDriver(driver_class):
-        def process_message(self, message: Message) -> None:
-            if isinstance(message, InBandWindowResize):
-                return
-            super().process_message(message)
-
-    return NoInBandResizeDriver
-
-
 class SessionBrowser(App):
     """Lightweight agent session browser."""
 
@@ -1492,18 +1461,6 @@ class SessionBrowser(App):
         Binding("ctrl+d", "halfpage_down", "½ page down", show=False),
         Binding("ctrl+u", "halfpage_up", "½ page up", show=False),
     ]
-
-    def get_driver_class(self) -> type[Driver]:
-        """Textual's driver, minus in-band resize inside a herdr pane.
-
-        See `_without_in_band_resize` for why clicks need it there. The check
-        is herdr's own pane marker rather than the terminal's answer, since the
-        terminal's answer is exactly the part that cannot be trusted.
-        """
-        driver_class = super().get_driver_class()
-        if herdr.in_herdr():
-            return _without_in_band_resize(driver_class)
-        return driver_class
 
     def __init__(self) -> None:
         super().__init__()
