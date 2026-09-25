@@ -335,6 +335,16 @@ OPENCODE_SESSIONS = 40
 PI_SESSIONS = 40
 RARE_EVERY = 60  # one session in sixty carries the rare term
 
+# Claude subagents are separate transcripts under their root session's own
+# directory, so every one discovery finds is a file search opens and may
+# parse. Without them here the gate could not see a change that stopped
+# finding them, or one that started reading them twice. One root in thirty
+# spawns a child and a grandchild beside it (stored flat, as Claude Code does)
+# and a workflow agent a level further down; one other root in thirty has a
+# directory holding only tool results, which discovery must look past.
+CLAUDE_SUBAGENT_EVERY = 30
+CLAUDE_SUBAGENTS = 3 * len(range(0, CLAUDE_SESSIONS, CLAUDE_SUBAGENT_EVERY))
+
 # Codex records a turn under three vocabularies, and which one a rollout uses
 # is decided by the history mode it was written in -- the era note above the
 # Codex parser in transcript.py has the corpus counts. All forty rollouts used
@@ -368,6 +378,61 @@ def _filler(index: int, line: int) -> str:
         f"turn {line} of session {index} covering retries, offsets, "
         f"buffers and the ordering of parsed output"
     )
+
+
+def _claude_subagents(session_dir: Path, index: int) -> None:
+    """A child, its grandchild and a workflow agent under one root session.
+
+    The child carries the rare term when its root does, so a rare search
+    reaches a subagent through the same prefilter a root goes through.
+    """
+    subagents = session_dir / "subagents"
+    agents = (
+        (subagents, "a1", {"agentType": "Explore", "description": "survey"}),
+        (
+            subagents,
+            "a2",
+            {"agentType": "general-purpose", "parentAgentId": f"{index:04d}a1"},
+        ),
+        (
+            subagents / "workflows" / "wf_perf",
+            "w1",
+            {"agentType": "workflow-subagent", "description": "phase one"},
+        ),
+    )
+    for where, suffix, meta in agents:
+        where.mkdir(parents=True, exist_ok=True)
+        agent_id = f"{index:04d}{suffix}"
+        records = [
+            {
+                "type": "user",
+                "isSidechain": True,
+                "sessionId": session_dir.name,
+                "cwd": f"/Users/perf/project{index % 3}",
+                "timestamp": f"2026-01-{(index % 28) + 1:02d}T09:30:00.000Z",
+                "message": {"role": "user", "content": f"brief {agent_id}"},
+            }
+        ]
+        for line in range(1, 8):
+            text = _filler(index, 100 + line)
+            if _has_rare(index) and suffix == "a1" and line == 3:
+                text = f"{text} {QUERY_RARE} sighted"
+            records.append(
+                {
+                    "type": "assistant",
+                    "isSidechain": True,
+                    "sessionId": session_dir.name,
+                    "timestamp": f"2026-01-{(index % 28) + 1:02d}T09:3{line}:00.000Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": text}],
+                    },
+                }
+            )
+        (where / f"agent-{agent_id}.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n"
+        )
+        (where / f"agent-{agent_id}.meta.json").write_text(json.dumps(meta))
 
 
 def _has_rare(index: int) -> bool:
@@ -546,6 +611,12 @@ def build_corpus(root: Path) -> Path:
                 )
             )
         (project / f"perf-claude-{i:04d}.jsonl").write_text("\n".join(lines) + "\n")
+        if i % CLAUDE_SUBAGENT_EVERY == 0:
+            _claude_subagents(project / f"perf-claude-{i:04d}", i)
+        elif i % CLAUDE_SUBAGENT_EVERY == CLAUDE_SUBAGENT_EVERY // 2:
+            results = project / f"perf-claude-{i:04d}" / "tool-results"
+            results.mkdir(parents=True)
+            (results / "toolu_perf.txt").write_text(_filler(i, 0) + "\n")
 
     codex_root = home / ".codex" / "sessions" / "2026" / "01" / "05"
     codex_root.mkdir(parents=True, exist_ok=True)

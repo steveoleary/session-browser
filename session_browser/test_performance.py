@@ -277,6 +277,7 @@ class TestPrefilterInvariants:
         counts = measured["cli.search.rare.no_rg"]
         file_sessions = (
             perf_budget.CLAUDE_SESSIONS
+            + perf_budget.CLAUDE_SUBAGENTS
             + perf_budget.CODEX_SESSIONS
             + perf_budget.PI_SESSIONS
         )

@@ -70,7 +70,15 @@ class Session:
 
 
 def scan_claude() -> list[Session]:
-    """Discover Claude Code sessions from JSONL files."""
+    """Discover Claude Code sessions, and their subagents, from JSONL files.
+
+    A session is ``<project>/<session-id>.jsonl``. Its subagents are separate
+    transcripts under ``<project>/<session-id>/subagents/``: flat for the Agent
+    tool at any depth, one level further down in ``workflows/<run-id>/`` for
+    the Workflow tool. Each carries an ``agent-<id>.meta.json`` sidecar, and
+    that sidecar -- about 140 bytes -- is where the link comes from, so linking
+    reads no transcript it would not have read anyway.
+    """
     sessions: list[Session] = []
     root = Path.home() / ".claude" / "projects"
     if not root.is_dir():
@@ -78,88 +86,187 @@ def scan_claude() -> list[Session]:
     for project_dir in root.iterdir():
         if not project_dir.is_dir():
             continue
-        for f in project_dir.glob("*.jsonl"):
+        # One pass over the directory yields the transcripts and the
+        # per-session directories together; only the latter can hold
+        # subagents, and most hold none (tool-results only, or nothing).
+        transcripts: list[Path] = []
+        session_dirs: list[Path] = []
+        try:
+            with os.scandir(project_dir) as it:
+                for entry in it:
+                    # Hidden names skipped, as the ``*.jsonl`` glob this
+                    # replaced did.
+                    if entry.name.startswith("."):
+                        continue
+                    if entry.name.endswith(".jsonl"):
+                        transcripts.append(Path(entry.path))
+                    elif entry.is_dir():
+                        session_dirs.append(Path(entry.path))
+        except OSError as exc:
+            log.warning("Skipping claude project %s: %s", project_dir.name, exc)
+            continue
+        for f in transcripts:
             try:
-                session_id = f.stem
-                summary, cwd, branch, created_at = "", "", "", ""
-                # Any earlier line's cwd, kept because the first user message
-                # sometimes carries none and the decoded directory name is a
-                # lossy last resort (see below).
-                seen_cwd = ""
-                # Whether the file holds anything to show, or anything that
-                # might have been a turn before it was damaged. See the skip
-                # below the loop.
-                has_turn = undecodable = False
-                obj = None  # still None after the loop: nothing decoded
-                with open(f) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            undecodable = True
-                            continue
-                        if not seen_cwd:
-                            seen_cwd = obj.get("cwd", "")
-                        kind = obj.get("type")
-                        # Extract metadata from first user message
-                        if kind == "user" and not obj.get("isMeta"):
-                            msg = obj.get("message", {})
-                            content = msg.get("content", "")
-                            if isinstance(content, str):
-                                summary = content[:120].replace("\n", " ")
-                            cwd = obj.get("cwd", "")
-                            branch = obj.get("gitBranch", "")
-                            created_at = obj.get("timestamp", "")
-                            has_turn = True
-                            break
-                        if kind in ("user", "assistant"):
-                            has_turn = True
-                # A file Claude Code wrote with no conversation in it is not a
-                # session. The common case is a session opened only to run
-                # /resume: it gets a one-line "bridge-session" record, the
-                # resumed conversation goes on writing to its own file, and
-                # the stub is left behind. Listed, it looks exactly like the
-                # session it was opened to reach (same project, same age), and
-                # `claude --resume` on it fails with "No conversation found".
-                # Kept, though just as empty: a file with an undecodable line,
-                # or with no records at all. Either may be a transcript that
-                # was damaged or never finished being written, not one that
-                # was complete and empty, and the zero-entries warning exists
-                # to flag exactly that.
-                if obj is not None and not has_turn and not undecodable:
-                    continue
-                # Decode project path from dir name. Claude Code encodes "/"
-                # as "-", which is lossy: a directory whose real name contains
-                # a hyphen (session-browser, feed-finder-chrome) decodes into
-                # extra separators and yields a path that matches nothing, so
-                # --here and --cwd silently skip the session. Hence the order:
-                # the first user message's cwd, then any cwd seen earlier in
-                # the file, then the decode.
-                decoded_project = project_dir.name.replace("-", "/")
-                resolved_cwd = cwd or seen_cwd or decoded_project
-                sessions.append(
-                    Session(
-                        id=session_id,
-                        provider="claude",
-                        summary=summary,
-                        cwd=resolved_cwd,
-                        branch=branch,
-                        repository=_repo_name(resolved_cwd),
-                        created_at=created_at,
-                        updated_at=(
-                            _last_activity_iso(f, "claude")
-                            or created_at
-                            or _file_mtime_iso(f)
-                        ),
-                        content_path=str(f),
-                    )
-                )
+                session = _claude_session(f, project_dir)
             except Exception as exc:
                 log.warning("Skipping claude session %s: %s", f.name, exc)
+                continue
+            if session is not None:
+                sessions.append(session)
+        for session_dir in session_dirs:
+            subagents = session_dir / "subagents"
+            if not subagents.is_dir():
+                continue
+            for f in subagents.rglob("agent-*.jsonl"):
+                try:
+                    session = _claude_session(
+                        f, project_dir, subagent_of=session_dir.name
+                    )
+                except Exception as exc:
+                    log.warning("Skipping claude subagent %s: %s", f.name, exc)
+                    continue
+                if session is not None:
+                    sessions.append(session)
     return sessions
+
+
+def _claude_subagent_link(f: Path, root_session: str) -> tuple[str, str, str]:
+    """``(parent_id, subagent_kind, label)`` for the subagent transcript *f*.
+
+    The parent is the session directory the transcript sits under, unless the
+    sidecar names a spawning agent: a grandchild is stored flat beside the
+    agent that spawned it, and only ``parentAgentId`` says so. Never taken from
+    the records' ``sessionId``, which names the root session at every depth.
+
+    A missing or unreadable sidecar still leaves a subagent -- the directory
+    says so -- linked to its root session, with a generic kind.
+    """
+    meta: dict = {}
+    try:
+        with open(f.with_name(f.name.removesuffix(".jsonl") + ".meta.json")) as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            meta = loaded
+    except (OSError, ValueError) as exc:
+        log.warning("claude subagent %s has no readable sidecar: %s", f.name, exc)
+    spawner = meta.get("parentAgentId")
+    parent = f"agent-{spawner}" if isinstance(spawner, str) and spawner else ""
+    kind = meta.get("agentType")
+    label = meta.get("description")
+    return (
+        parent or root_session,
+        kind if isinstance(kind, str) and kind else "subagent",
+        label if isinstance(label, str) else "",
+    )
+
+
+def claude_root_session(session: Session) -> str | None:
+    """The top-level session a Claude subagent ran under, or None.
+
+    Read from the path, ``<project>/<root>/subagents/.../agent-<id>.jsonl``,
+    because that is the one thing a child, a grandchild and a workflow agent
+    have in common; ``parent_id`` names only the direct spawner. Claude Code
+    cannot resume a subagent, so this is also what "resume" means for one.
+    """
+    if session.provider != "claude" or not session.subagent_kind:
+        return None
+    parts = Path(session.content_path).parts
+    for i in range(len(parts) - 2, 0, -1):
+        if parts[i] == "subagents":
+            return parts[i - 1]
+    return None
+
+
+def _claude_session(
+    f: Path, project_dir: Path, *, subagent_of: str | None = None
+) -> Session | None:
+    """One Claude transcript as a Session, or None for a resume stub.
+
+    *subagent_of* is the root session id when *f* is a subagent transcript.
+    Its id is then the file stem, ``agent-<agentId>``, which is how Claude Code
+    names the file and cannot collide with a session's UUID.
+    """
+    session_id = f.stem
+    summary, cwd, branch, created_at = "", "", "", ""
+    # Any earlier line's cwd, kept because the first user message
+    # sometimes carries none and the decoded directory name is a
+    # lossy last resort (see below).
+    seen_cwd = ""
+    # Whether the file holds anything to show, or anything that
+    # might have been a turn before it was damaged. See the skip
+    # below the loop.
+    has_turn = undecodable = False
+    obj = None  # still None after the loop: nothing decoded
+    with open(f) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                undecodable = True
+                continue
+            if not seen_cwd:
+                seen_cwd = obj.get("cwd", "")
+            kind = obj.get("type")
+            # Extract metadata from first user message
+            if kind == "user" and not obj.get("isMeta"):
+                msg = obj.get("message", {})
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    summary = content[:120].replace("\n", " ")
+                cwd = obj.get("cwd", "")
+                branch = obj.get("gitBranch", "")
+                created_at = obj.get("timestamp", "")
+                has_turn = True
+                break
+            if kind in ("user", "assistant"):
+                has_turn = True
+    # A file Claude Code wrote with no conversation in it is not a
+    # session. The common case is a session opened only to run
+    # /resume: it gets a one-line "bridge-session" record, the
+    # resumed conversation goes on writing to its own file, and
+    # the stub is left behind. Listed, it looks exactly like the
+    # session it was opened to reach (same project, same age), and
+    # `claude --resume` on it fails with "No conversation found".
+    # Kept, though just as empty: a file with an undecodable line,
+    # or with no records at all. Either may be a transcript that
+    # was damaged or never finished being written, not one that
+    # was complete and empty, and the zero-entries warning exists
+    # to flag exactly that.
+    if obj is not None and not has_turn and not undecodable:
+        return None
+    # Decode project path from dir name. Claude Code encodes "/"
+    # as "-", which is lossy: a directory whose real name contains
+    # a hyphen (session-browser, feed-finder-chrome) decodes into
+    # extra separators and yields a path that matches nothing, so
+    # --here and --cwd silently skip the session. Hence the order:
+    # the first user message's cwd, then any cwd seen earlier in
+    # the file, then the decode.
+    decoded_project = project_dir.name.replace("-", "/")
+    resolved_cwd = cwd or seen_cwd or decoded_project
+    parent_id, subagent_kind = "", ""
+    if subagent_of is not None:
+        parent_id, subagent_kind, label = _claude_subagent_link(f, subagent_of)
+        # The spawner's description is a better label than the brief's first
+        # line, which for a subagent is usually boilerplate.
+        summary = label[:120] or summary
+    return Session(
+        id=session_id,
+        provider="claude",
+        summary=summary,
+        cwd=resolved_cwd,
+        branch=branch,
+        repository=_repo_name(resolved_cwd),
+        created_at=created_at,
+        updated_at=(
+            _last_activity_iso(f, "claude") or created_at or _file_mtime_iso(f)
+        ),
+        content_path=str(f),
+        parent_id=parent_id,
+        subagent_kind=subagent_kind,
+    )
 
 
 def scan_codex() -> list[Session]:

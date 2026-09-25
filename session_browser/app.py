@@ -12,6 +12,7 @@ from bisect import bisect_left
 from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
 from functools import wraps
+from pathlib import Path
 from typing import ClassVar, NamedTuple
 
 try:
@@ -35,7 +36,7 @@ from datetime import UTC
 
 from . import multiplexer
 from .config import ConfigError, load_ignore, load_tui_settings
-from .discovery import Session, discover_all
+from .discovery import Session, claude_root_session, discover_all
 from .resume import (
     build_chat_export,
     copy_to_clipboard,
@@ -2968,11 +2969,14 @@ class SessionBrowser(App):
         if not self._selected:
             self._status.update("No session selected")
             return
-        cmd = resume_command(
-            self._selected.provider, self._selected.id, self._selected.cwd or None
-        )
+        s = self._selected
+        # Claude Code resumes a conversation, not an agent inside one, so a
+        # subagent's resume command is its root session's.
+        root = claude_root_session(s)
+        cmd = resume_command(s.provider, root or s.id, s.cwd or None)
         if copy_to_clipboard(cmd):
-            self._status.update(f"Copied: {cmd}")
+            note = " (the session this subagent ran in)" if root else ""
+            self._status.update(f"Copied: {cmd}{note}")
         else:
             self._status.update(f"Clipboard failed. Command: {cmd}")
 
@@ -3024,9 +3028,18 @@ class SessionBrowser(App):
         if target is None or not self._selected:
             return
         s = self._selected
+        session_id, content_path = s.id, s.content_path
+        if root := claude_root_session(s):
+            # As for the resume command: open the session it ran in.
+            session_id = root
+            content_path = next(
+                str(p.parent / f"{root}.jsonl")
+                for p in Path(s.content_path).parents
+                if p.name == root
+            )
         try:
             plan = target.module.prepare_session(
-                s.provider, s.id, s.cwd, content_path=s.content_path
+                s.provider, session_id, s.cwd, content_path=content_path
             )
         except target.error as exc:
             self._status.update(f"{target.name}: {exc}")

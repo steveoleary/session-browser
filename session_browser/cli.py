@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .config import ConfigError, load_ignore
-from .discovery import ALL_SCANNERS, Session, discover_all
+from .discovery import ALL_SCANNERS, Session, claude_root_session, discover_all
 from .resume import _filename_part
 from .transcript import (
     FILTER_ROLES,
@@ -108,7 +108,7 @@ _SEARCH_TEXT_COLUMNS = ("id", "match_count", "updated", "summary")
 # distinction is exactly the one a reader gets wrong: null is not "no parent".
 _SUBAGENT_CONTRACT = (
     '"parent_id"/"subagent_kind" are three-state: null when the provider '
-    'exposes\nno parent-child link at all (Claude, Pi), "" when it does and '
+    'exposes\nno parent-child link at all (Pi), "" when it does and '
     "this session\nis not a subagent, otherwise the spawning session's id and "
     "the kind."
 )
@@ -927,11 +927,29 @@ def apply_filters(
     if not getattr(args, "include_current", False):
         current = _current_session_ids()
         if current:
-            dropped = [s for s in out if canonical_id(s) in current]
+            # A live Claude session's subagents are live too, and a subagent
+            # running session-browser inherits its root's id, so it would
+            # otherwise find its own brief.
+            def live(s: Session) -> bool:
+                if canonical_id(s) in current:
+                    return True
+                root = claude_root_session(s)
+                return root is not None and f"claude:{root}" in current
+
+            kept, dropped = [], []
+            for s in out:
+                (dropped if live(s) else kept).append(s)
             if dropped:
-                out = [s for s in out if canonical_id(s) not in current]
+                out = kept
                 if warnings is not None:
-                    ids = ", ".join(sorted(canonical_id(s) for s in dropped))
+                    roots = sorted(
+                        canonical_id(s) for s in dropped if canonical_id(s) in current
+                    )
+                    children = len(dropped) - len(roots)
+                    ids = ", ".join(roots)
+                    if children:
+                        ids += " and " if ids else ""
+                        ids += f"{children} subagent(s) of it"
                     warnings.append(
                         f"excluded your own live session(s): {ids} "
                         f"(pass --include-current to keep them)"

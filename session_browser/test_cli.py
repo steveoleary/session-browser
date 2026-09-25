@@ -409,11 +409,11 @@ class TestHelpOutputContracts:
                 parent_id="",
                 subagent_kind="guardian",
             ),
-            # Claude exposes no link at all: neither known to be a subagent
-            # nor known not to be, and it must not be counted as either.
+            # Pi exposes no link at all: neither known to be a subagent nor
+            # known not to be, and it must not be counted as either.
             Session(
                 id="opaque",
-                provider="claude",
+                provider="pi",
                 content_path=str(f),
                 updated_at="2026-06-01T10:03:00+00:00",
             ),
@@ -3186,6 +3186,37 @@ class TestCurrentSessionExclusion:
         monkeypatch.setenv("CODEX_THREAD_ID", "bbb")
         _, out, _ = cli("list")
         assert [s["id"] for s in json.loads(out)["sessions"]] == ["claude:aaa"]
+
+    def test_excludes_the_live_claude_sessions_subagents(
+        self, cli, monkeypatch, sessions
+    ):
+        # A subagent inherits its root's CLAUDE_CODE_SESSION_ID, so without
+        # this a subagent searching the corpus finds its own brief.
+        for sid, parent, path in (
+            ("agent-a1", "ccc", "/p/proj/ccc/subagents/agent-a1.jsonl"),
+            ("agent-a2", "agent-a1", "/p/proj/ccc/subagents/agent-a2.jsonl"),
+            ("agent-z9", "aaa", "/p/proj/aaa/subagents/agent-z9.jsonl"),
+        ):
+            sessions.append(
+                Session(
+                    id=sid,
+                    provider="claude",
+                    cwd="/home/u/projA",
+                    updated_at="2026-06-06T10:00:00+00:00",
+                    content_path=path,
+                    parent_id=parent,
+                    subagent_kind="general-purpose",
+                )
+            )
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "ccc")
+        monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+        _, out, _ = cli("list")
+        data = json.loads(out)
+        ids = {s["id"] for s in data["sessions"]}
+        assert ids == {"claude:agent-z9", "codex:bbb", "claude:aaa"}
+        assert any(
+            "claude:ccc and 2 subagent(s) of it" in w for w in data["warnings"]
+        ), data["warnings"]
 
     def test_include_current_keeps_them(self, cli, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "ccc")

@@ -236,6 +236,90 @@ class TestScanClaude:
         assert sessions[0].updated_at == _file_mtime_iso(f)
         assert sessions[0].updated_at  # non-empty
 
+    @staticmethod
+    def _turn(text, **extra):
+        return json.dumps(
+            {
+                "type": "user",
+                "message": {"role": "user", "content": text},
+                "cwd": "/Users/test/project",
+                "timestamp": "2026-09-25T10:00:00Z",
+                **extra,
+            }
+        )
+
+    def _subagent(self, where, agent_id, meta):
+        where.mkdir(parents=True, exist_ok=True)
+        # sessionId names the ROOT session on every subagent record; a scanner
+        # that took the id from it would file the child as its parent.
+        (where / f"agent-{agent_id}.jsonl").write_text(
+            self._turn("the brief", sessionId="root", isSidechain=True) + "\n"
+        )
+        if meta is not None:
+            (where / f"agent-{agent_id}.meta.json").write_text(meta)
+
+    def test_subagents_are_discovered_and_linked(self, tmp_path):
+        """Children sit under the root's own directory: flat at any depth for
+        the Agent tool, a level further down for the Workflow tool. The
+        sidecar names the spawning agent of a grandchild and the kind."""
+        project = tmp_path / ".claude" / "projects" / "-Users-test"
+        project.mkdir(parents=True)
+        (project / "root.jsonl").write_text(self._turn("top") + "\n")
+        subagents = project / "root" / "subagents"
+        self._subagent(
+            subagents,
+            "a1",
+            json.dumps({"agentType": "Explore", "description": "map the repo"}),
+        )
+        self._subagent(
+            subagents,
+            "a2",
+            json.dumps(
+                {"agentType": "general-purpose", "parentAgentId": "a1", "spawnDepth": 2}
+            ),
+        )
+        self._subagent(
+            subagents / "workflows" / "wf_1",
+            "w1",
+            json.dumps({"agentType": "workflow-subagent", "description": "zeta"}),
+        )
+        # A directory with no subagents/ in it -- tool results only -- is not
+        # a session and holds none.
+        (project / "other" / "tool-results").mkdir(parents=True)
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            got = {s.id: s for s in scan_claude()}
+
+        assert set(got) == {"root", "agent-a1", "agent-a2", "agent-w1"}
+        link = {sid: (s.parent_id, s.subagent_kind) for sid, s in got.items()}
+        assert link == {
+            "root": ("", ""),
+            "agent-a1": ("root", "Explore"),
+            "agent-a2": ("agent-a1", "general-purpose"),
+            "agent-w1": ("root", "workflow-subagent"),
+        }
+        # The spawner's description labels the row; without one, the brief.
+        assert got["agent-a1"].summary == "map the repo"
+        assert got["agent-a2"].summary == "the brief"
+        assert got["agent-a1"].cwd == "/Users/test/project"
+
+    def test_subagent_without_a_readable_sidecar_is_still_a_subagent(
+        self, tmp_path, caplog
+    ):
+        """The directory alone says it is a child of the root session."""
+        project = tmp_path / ".claude" / "projects" / "-Users-test"
+        project.mkdir(parents=True)
+        (project / "root.jsonl").write_text(self._turn("top") + "\n")
+        self._subagent(project / "root" / "subagents", "gone", None)
+        self._subagent(project / "root" / "subagents", "bad", "{not json")
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            got = {s.id: s for s in scan_claude()}
+
+        for sid in ("agent-gone", "agent-bad"):
+            assert (got[sid].parent_id, got[sid].subagent_kind) == ("root", "subagent")
+        assert "no readable sidecar" in caplog.text
+
     def _write(self, tmp_path, name, lines):
         projects = tmp_path / ".claude" / "projects" / "-Users-test-driver"
         projects.mkdir(parents=True, exist_ok=True)
@@ -1856,6 +1940,34 @@ class TestKeyBindings:
 
         assert exits == [True]
         assert updates == []
+
+    def test_a_claude_subagent_hands_off_its_root_session(self, monkeypatch):
+        """Claude Code resumes a conversation, not an agent inside one."""
+        app, plan, _updates, _exits = self._tmux_action_app()
+        app._selected = Session(
+            id="agent-a2",
+            provider="claude",
+            cwd="/tmp/proj",
+            content_path="/h/.claude/projects/-p/root/subagents/workflows/wf_1/agent-a2.jsonl",
+            parent_id="root",
+            subagent_kind="workflow-subagent",
+        )
+        calls = []
+        monkeypatch.setattr(
+            tmux, "prepare_session", lambda *a, **kw: calls.append((a, kw)) or plan
+        )
+        monkeypatch.setattr(
+            subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0)
+        )
+
+        SessionBrowser._open_in_multiplexer(app, self._tmux_target())
+
+        assert calls == [
+            (
+                ("claude", "root", "/tmp/proj"),
+                {"content_path": "/h/.claude/projects/-p/root.jsonl"},
+            )
+        ]
 
     def test_normal_launch_stays_open_after_tmux_switch(self, monkeypatch):
         app, plan, updates, exits = self._tmux_action_app()

@@ -49,8 +49,8 @@ a transcript, by design — it says so in the payload, `"transcript_health":
 `list` does open them, but it does **not** remove them: all of them stay in
 `.sessions`, and the warning names a handful of ids and then says "(N more)".
 Use its top-level `counts.readable` rather than treating the array length as a
-readable count. Also note the total is caller-relative: your own live session
-is excluded unless you pass `--include-current`.
+readable count. Also note the total is caller-relative: your own live session,
+and its subagents, are excluded unless you pass `--include-current`.
 
 ## Flags are not documented here
 
@@ -169,6 +169,11 @@ Judgment `--help` does not carry:
   `search` and `stats`, while `get ID` still reads one. Pass `--no-ignore`
   when the user asks about work in those paths, or when `warnings` says a
   filter came back empty because of it — not to double-check every result.
+- Subagents are sessions of their own (a Claude one is `claude:agent-…`),
+  and they match the same searches their parent does. A row with a
+  `parent_id` is work that session delegated: group it under its parent
+  rather than triaging both, and read the parent for why it was spawned.
+  `get ID --tail N` on a subagent shows what it was doing when it stopped.
 - `--here` cannot see sessions with no recorded cwd. If its `warnings` says it
   excluded some and they matter, reach them with `--cwd`, a content search, or
   `--provider`.
@@ -193,5 +198,5 @@ Judgment `--help` does not carry:
 | Raising `--limit` because scratch sessions fill the results | Subtract them: `--exclude-cwd <path>`, which runs before `--limit` |
 | Assuming `--repo` always recovers a worktree's parent project | OpenCode has a project root and Codex often has an origin; origin-missing Codex, Claude and Pi fall back to the *worktree directory*. Search unscoped and inspect `cwd` when completeness matters |
 | Answer found, but its artifact doesn't match the question's nouns | Wrong workstream — vocabulary recurs across projects; treat it as unconfirmed and keep searching |
-| Your own or a sibling session pollutes results | Yours is auto-excluded; for a concurrent sibling add `--until -30m` |
+| Your own or a sibling session pollutes results | Yours and its subagents are auto-excluded; for a concurrent sibling add `--until -30m` |
 | Pasting a full transcript into the final answer | Summarize it |

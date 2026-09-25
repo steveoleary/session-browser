@@ -171,20 +171,21 @@ Codex:
 
 ## States
 
-`baseline` (accepted): the OpenCode graph as `session-browser list` reports it
-matches the ground truth exactly, fork included. So does the Codex graph,
+`baseline` (historical): the OpenCode graph as `session-browser list` reports
+it matches the ground truth exactly, fork included. So does the Codex graph,
 through both discovery paths: the `state_5.sqlite` index and the rollout file
 scan. The index run must write nothing to stderr, because discovery logs there
 when it falls back to the file scan, and a silent fallback would otherwise test
-the same path twice. Claude subagents are invisible
-to discovery, so only the three parent sessions are listed, each with
-`parent_id: null`.
+the same path twice. Claude subagents are invisible to discovery, so only the
+three parent sessions are listed, each with `parent_id: null`. It fails now,
+and should: it records the behaviour before Claude subagents were discovered.
 
-`candidate`: the Claude children are listed too, the killed `epsilon` and the
-workflow's `zeta` included, each with `parent_id` set to its direct spawner. This state is deliberately red until the Claude half of
-subagent linking exists. The check matches children by agent-id suffix
-because the id a Claude subagent should be addressed by is not decided yet,
-and this fixture should not decide it.
+`candidate` (accepted): everything the baseline checks for OpenCode and Codex,
+and the Claude children are listed too, the killed `epsilon` and the
+workflow's `zeta` included. Each is addressed as `claude:agent-<agentId>`, the
+transcript's file stem, and carries `parent_id` set to its direct spawner: the
+session for a child, the spawning agent's id for a grandchild. The parent
+sessions carry `parent_id: ""`, because Claude Code now exposes the link.
 
 ```bash
 .venv/bin/python docs/fixtures/subagent-ground-truth/verify_case.py baseline

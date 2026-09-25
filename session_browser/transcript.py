@@ -277,10 +277,8 @@ def session_to_dict(s: Session) -> dict:
         "updated_at": s.updated_at,
         "duration_seconds": session_duration_seconds(s),
         # Both three-state, and the distinction is load-bearing: null means
-        # the provider exposes no parent-child link at all (Claude and Pi
-        # today -- Claude's subagent transcripts are not even discovered, so
-        # reporting "no parent" would be a claim we cannot make), while ""
-        # means the provider does expose one and this session has none.
+        # the provider exposes no parent-child link at all (Pi today), while
+        # "" means the provider does expose one and this session has none.
         # Reading null as "not a subagent" is the mistake this shape exists
         # to prevent.
         "parent_id": s.parent_id,

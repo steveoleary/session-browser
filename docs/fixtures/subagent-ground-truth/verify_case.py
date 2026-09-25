@@ -588,8 +588,10 @@ def check_opencode_graph(home: Path) -> None:
 def claude_children(listed: list[dict]) -> dict[str, dict]:
     """Listed sessions that are recorded children, keyed by agent id.
 
-    Matched by agent-id suffix on purpose: what id a Claude subagent should be
-    addressed by is not decided, and this fixture must not decide it.
+    A Claude subagent is addressed by its transcript's file stem,
+    ``agent-<agentId>``, the same rule that makes a session's id its file
+    stem. Matched by suffix so the baseline, which predates that decision,
+    can still say none are listed; the candidate pins the exact id.
     """
     out = {}
     for agent_id in (e["child_agent_id"] for e in CLAUDE_EDGES):
@@ -643,6 +645,7 @@ def check_candidate() -> None:
             assert parent["parent_id"] == "", parent
         for e in CLAUDE_EDGES:
             child = found[e["child_agent_id"]]
+            assert child["id"] == f"claude:agent-{e['child_agent_id']}", child
             if e["spawner"] in CLAUDE_PARENTS:
                 want = e["spawner"]
             else:
