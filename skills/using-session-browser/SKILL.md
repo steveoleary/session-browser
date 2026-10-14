@@ -189,6 +189,7 @@ Judgment `--help` does not carry:
 | Quoting a search hit as proof a topic was discussed | Check the snippet's `role` — `tool` means the agent read it, not said it |
 | A hit with `match_count: 1` inside the repo that owns the phrase | That is the shape of a file read, not a discussion; confirm with `role` and surrounding entries |
 | Quoting a conclusion from a mid-session snippet | Sessions self-correct; confirm against the ending with `--role assistant --tail N` |
+| Reporting how a run ended from the entry stream alone | Codex filters lifecycle text out of the entries — `<turn_aborted>`, goal-status context — so an interrupted run just stops at a tool result and every `--role` (including `system`) is silent about it. For the reason, tail its own rollout (`find ~/.codex/sessions -name '*<session-id>*'`): the closing `turn_aborted` record carries the reason and `thread_goal_updated` the goal status, which separates an intentional stop from a crash or a usage limit |
 | Reading implementation docs before trying the CLI | Use `--help`, `list` and `search` unless you are changing the tool |
 | Blind `get ID` to stdout | `--entries`/`--head`/`--tail` for a window, `--role` for one voice, `--output` for the whole thing |
 | One `get` per candidate while triaging | Batch: `get ID1 ID2 ID3 --role user --head 3` |
