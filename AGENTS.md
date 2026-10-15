@@ -3,8 +3,8 @@
 A Python CLI + TUI (`session_browser/`) that discovers and retrieves prior
 agent sessions across providers (Claude Code, Codex, OpenCode, Pi). Tests
 live alongside the code in `session_browser/`: `tests.py`, `test_cli.py`,
-`test_transcript.py`, `test_case_runner.py`, `test_retrieval_compare.py` and
-`test_performance.py`.
+`test_transcript.py`, `test_case_runner.py`, `test_retrieval_compare.py`,
+`test_deletion.py` and `test_performance.py`.
 
 Committed regression fixtures live in `docs/fixtures/`. Each has a
 `verify_case.py` and a declared accepted state; run them with

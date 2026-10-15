@@ -34,7 +34,7 @@ except ImportError:
 
 from datetime import UTC
 
-from . import multiplexer
+from . import deletion, multiplexer
 from .config import ConfigError, load_ignore, load_tui_settings
 from .discovery import Session, claude_root_session, discover_all
 from .resume import (
@@ -364,6 +364,7 @@ _EDIT_BLOCKED_ACTIONS = frozenset(
         "toggle_children",
         "toggle_tree",
         "show_help",
+        "delete_session",
     }
 )
 
@@ -1311,6 +1312,7 @@ class ShortcutHelp(ModalScreen[None]):
 [bold]Use[/]        [cyan]c[/] copy resume command  [cyan]i[/] copy canonical id
            {terminal}[cyan]e / E[/] copy / export chat
            [cyan]r[/] refresh              [cyan]q[/] quit
+           [cyan]D[/] delete session permanently
 
 [dim]On narrow screens, Enter or → opens the transcript full-width;
 Esc or ← returns to sessions. Press ? or Esc to close.[/]"""
@@ -1399,6 +1401,60 @@ class MultiplexerChoice(ModalScreen["multiplexer.Target | None"]):
         self.dismiss(None)
 
 
+class ConfirmDelete(ModalScreen["deletion.DeletePlan | None"]):
+    """Spell out what a permanent delete removes, and take ``y`` to do it.
+
+    Anything else cancels. Not Enter: it is the key most likely to arrive by
+    accident from the list underneath, and this cannot be undone.
+    """
+
+    CSS = """
+    ConfirmDelete {
+        align: center middle;
+        background: $background;
+    }
+    #confirm-delete {
+        width: 100;
+        max-width: 94%;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: round $error;
+    }
+    """
+
+    def __init__(self, plan: deletion.DeletePlan) -> None:
+        super().__init__()
+        self._plan = plan
+
+    def compose(self) -> ComposeResult:
+        s = self._plan.session
+        lines = [
+            Content.from_markup("[bold $error]Delete this session permanently?[/]"),
+            Content(""),
+            Content(f"{s.provider}  {s.id}"),
+            Content(s.summary or "(no summary)"),
+            Content(s.cwd),
+            Content(""),
+            *(Content(line) for line in self._plan.removes),
+        ]
+        if self._plan.subagents:
+            n = self._plan.subagents
+            lines.append(Content(f"and its {n} subagent{'s' if n != 1 else ''}"))
+        lines += [
+            Content(""),
+            Content.from_markup(
+                "[bold]y[/] delete   [dim]any other key cancels. This cannot be "
+                "undone.[/]"
+            ),
+        ]
+        yield Static(Content("\n").join(lines), id="confirm-delete")
+
+    def on_key(self, event: events.Key) -> None:
+        event.stop()
+        self.dismiss(self._plan if event.key == "y" else None)
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -1441,6 +1497,7 @@ class SessionBrowser(App):
         # key through, e.g. `keybind = performable:super+c=copy_to_clipboard`).
         Binding("alt+c", "screen.copy_text", "Copy selection", show=False),
         Binding("i", "copy_session_id", "Copy id", show=False),
+        Binding("D", "delete_session", "Delete session", show=False),
         Binding("t", "open_terminal", "Open in terminal", show=False),
         Binding("e", "export_chat_clipboard", "Copy chat", show=False),
         Binding("E", "export_chat_file", "Export chat", show=False),
@@ -1821,6 +1878,11 @@ class SessionBrowser(App):
                 self._apply_filter("")
                 if error:
                     self._flash_status(error, ok=False)
+        elif event.worker.name == "_delete_session":
+            # Reload first: it writes "Discovering sessions…" to the bar, and
+            # the flash must land after that or it is never seen.
+            self._load_sessions()
+            self._flash_status(event.worker.result)
         elif event.worker.name == "_load_content":
             result = event.worker.result
             if result is None:
@@ -2992,6 +3054,33 @@ class SessionBrowser(App):
             self._flash_status(f"Copied id: {sid}")
         else:
             self._flash_status(f"Clipboard failed. Id: {sid}", ok=False)
+
+    def action_delete_session(self) -> None:
+        """Permanently delete the selected session, after a confirmation that
+        names everything it removes. See ``deletion`` for what each provider
+        does and why some are refused."""
+        if not self._selected:
+            self._status.update("No session selected")
+            return
+        try:
+            plan = deletion.plan_delete(self._selected, self._discovered)
+        except deletion.DeleteRefused as exc:
+            self._flash_status(str(exc), ok=False)
+            return
+        self.push_screen(ConfirmDelete(plan), self._delete_confirmed)
+
+    def _delete_confirmed(self, plan: deletion.DeletePlan | None) -> None:
+        if plan is None:
+            self._status.update("Delete cancelled")
+            return
+        self._status.update(f"Deleting {plan.session.id}…")
+        # A thread, because Codex's delete is a subprocess. A DeleteFailed
+        # surfaces through the worker-error flash like any other worker's.
+        self.run_worker(
+            lambda: deletion.delete_session(plan),
+            name="_delete_session",
+            thread=True,
+        )
 
     def action_open_terminal(self) -> None:
         """Open the selected session's folder in a running multiplexer.
