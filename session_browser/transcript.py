@@ -1235,15 +1235,17 @@ def _prefilter_file(session: Session) -> Path | None:
     to scan, so the session goes on to a canonical parse, which reports why.
     """
     if session.provider in ("claude", "codex", "pi"):
-        if not session.content_path:
+        content_path = session.content_path
+        if not content_path:
             return None
-        path = Path(session.content_path)
-        if path.name.endswith(compressed.SUFFIX):
+        # Tested on the string: this runs for every file-backed session, several
+        # times per search, and nearly all of them are not compressed.
+        if content_path.endswith(compressed.SUFFIX):
             try:
-                return compressed.readable(path)
+                return compressed.readable(Path(content_path))
             except OSError:
                 return None
-        return path
+        return Path(content_path)
     return None
 
 
