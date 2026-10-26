@@ -170,6 +170,30 @@ in `~/.config/session-browser/config.toml`:
 ignored_notice = false
 ```
 
+### How far back your history goes
+
+Session Browser can only show what the providers still keep, and Claude Code
+deletes its own transcripts. By default it removes any session older than 30
+days, in a background sweep at startup that prints nothing, so a month-old
+investigation simply stops appearing in `list` and `search`. Raise the limit in
+`~/.claude/settings.json`:
+
+```json
+{
+  "cleanupPeriodDays": 180
+}
+```
+
+This only stops future deletions; a session the sweep already removed is gone.
+Check how far back you reach with `session-browser stats`, which prints the date
+range per provider. See Claude Code's
+[`cleanupPeriodDays`](https://code.claude.com/docs/en/settings-reference#cleanupperioddays)
+for what else the sweep removes.
+
+Codex keeps its rollouts, but recent Codex versions compress older ones to
+`.jsonl.zst`, and Session Browser does not read those yet, so they are missing
+from every command until it does.
+
 Use `session-browser COMMAND --help` for filters, output formats, date ranges,
 and retrieval windows. Commands return JSON by default where it is useful for
 automation.
