@@ -34,7 +34,7 @@ except ImportError:
 
 from datetime import UTC
 
-from . import deletion, multiplexer
+from . import compressed, deletion, multiplexer
 from .config import ConfigError, load_ignore, load_tui_settings
 from .discovery import Session, claude_root_session, discover_all
 from .resume import (
@@ -108,7 +108,7 @@ def _codex_fork_transcript(
             return []
         seen.add(current.id)
         try:
-            with open(current.content_path, "rb") as fh:
+            with open(compressed.readable(Path(current.content_path)), "rb") as fh:
                 first = json.loads(fh.readline())
             meta = first.get("payload", {})
             base = meta.get("history_base")
@@ -121,7 +121,7 @@ def _codex_fork_transcript(
                 warnings.append(f"fork history unavailable: {source_id}")
                 return []
             earlier = inherited(source)
-            with open(source.content_path, "rb") as fh:
+            with open(compressed.readable(Path(source.content_path)), "rb") as fh:
                 prefix = fh.read(byte_end)
             if len(prefix) != byte_end or (prefix and not prefix.endswith(b"\n")):
                 warnings.append(f"fork history incomplete: {source_id}")

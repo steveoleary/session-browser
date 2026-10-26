@@ -35,6 +35,7 @@ from itertools import accumulate
 from itertools import count as _count
 from pathlib import Path
 
+from session_browser import compressed
 from session_browser.discovery import Session, _codex_injected, _opencode_db_path
 
 
@@ -105,7 +106,8 @@ def lineage_ids(provider: str, session_id: str, content_path: str) -> set[str]:
     if not content_path or not os.path.isfile(content_path):
         return ids
     try:
-        with open(content_path, encoding="utf-8", errors="replace") as fh:
+        readable = compressed.readable(Path(content_path))
+        with open(readable, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if '"session_id"' not in line:
                     continue
@@ -1226,9 +1228,22 @@ def _file_may_match(path: Path, needles: list[str], provider: str) -> bool:
 
 
 def _prefilter_file(session: Session) -> Path | None:
-    """The raw file a prefilter may scan for *session*, if any."""
+    """The raw file a prefilter may scan for *session*, if any.
+
+    For a compressed rollout that is its decompressed copy, made here on the
+    first search that reaches it. A copy that cannot be made leaves no file
+    to scan, so the session goes on to a canonical parse, which reports why.
+    """
     if session.provider in ("claude", "codex", "pi"):
-        return Path(session.content_path) if session.content_path else None
+        if not session.content_path:
+            return None
+        path = Path(session.content_path)
+        if path.name.endswith(compressed.SUFFIX):
+            try:
+                return compressed.readable(path)
+            except OSError:
+                return None
+        return path
     return None
 
 
@@ -2083,7 +2098,10 @@ def _existing_file(session: Session) -> Path:
     path = Path(session.content_path)
     if not path.is_file():
         raise TranscriptUnreadable(f"content path not found: {path}")
-    return path
+    try:
+        return compressed.readable(path)
+    except OSError as exc:
+        raise TranscriptUnreadable(str(exc)) from exc
 
 
 def _parse_jsonl(

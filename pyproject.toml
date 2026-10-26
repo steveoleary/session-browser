@@ -28,6 +28,8 @@ classifiers = [
   "Topic :: Utilities",
 ]
 dependencies = [
+  # Codex compresses old rollouts with zstd; compression.zstd is stdlib from 3.14.
+  "backports.zstd>=1.0.0; python_version < '3.14'",
   "pathspec>=1.1.1",
   "rich>=15.0.0",
   "textual>=0.80.0",

@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import compressed
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -427,11 +429,14 @@ def _scan_codex_db(db_path: Path) -> list[Session] | None:
         ).fetchall()
     finally:
         conn.close()
-    sessions_root = Path.home() / ".codex" / "sessions"
     # realpath both sides: the index may store resolved paths while the
     # walk starts from a symlinked home (or vice versa), and the two must
     # not disagree for a reason that has nothing to do with the data.
-    file_paths = {os.path.realpath(p) for p in sessions_root.rglob("rollout-*.jsonl")}
+    on_disk = {
+        os.path.realpath(logical): actual
+        for logical, actual in _codex_rollout_files().items()
+    }
+    file_paths = on_disk.keys()
     rows_by_path = {
         os.path.realpath(r["rollout_path"]): r for r in rows if r["rollout_path"]
     }
@@ -444,13 +449,38 @@ def _scan_codex_db(db_path: Path) -> list[Session] | None:
             f"codex index is missing {len(missing)} rollout file(s); using file scan"
         )
         return None
-    return [
-        _codex_session_from_row(r)
-        for r in rows
-        if r["rollout_path"]
-        and os.path.realpath(r["rollout_path"]) in file_paths
-        and not r["archived"]
-    ]
+    # The index goes on naming a rollout by its .jsonl path after Codex has
+    # compressed it, so the row is matched on that spelling and then pointed
+    # at whichever file is actually there.
+    sessions = []
+    for r in rows:
+        if not r["rollout_path"] or r["archived"]:
+            continue
+        actual = on_disk.get(os.path.realpath(r["rollout_path"]))
+        if actual is None:
+            continue
+        s = _codex_session_from_row(r)
+        if actual.name.endswith(compressed.SUFFIX):
+            s.content_path = r["rollout_path"] + compressed.SUFFIX
+        sessions.append(s)
+    return sessions
+
+
+def _codex_rollout_files() -> dict[Path, Path]:
+    """Every rollout under ``~/.codex/sessions``, keyed by its .jsonl name.
+
+    The value is the file to read: the same path, or the ``.jsonl.zst`` Codex
+    compressed it into (see ``compressed``). Should both exist at once, the
+    plain file wins -- it is the one Codex writes to.
+    """
+    found: dict[Path, Path] = {}
+    for p in (Path.home() / ".codex" / "sessions").rglob("rollout-*.jsonl*"):
+        name = p.name
+        if name.endswith(".jsonl"):
+            found[p] = p
+        elif name.endswith(".jsonl" + compressed.SUFFIX):
+            found.setdefault(p.with_name(name.removesuffix(compressed.SUFFIX)), p)
+    return found
 
 
 def _codex_session_from_row(r) -> Session:
@@ -520,9 +550,10 @@ def _scan_codex_files() -> list[Session]:
     root = Path.home() / ".codex" / "sessions"
     if not root.is_dir():
         return sessions
-    for f in root.rglob("rollout-*.jsonl"):
+    for f in _codex_rollout_files().values():
         try:
-            with open(f) as fh:
+            readable = compressed.readable(f)
+            with open(readable) as fh:
                 first_line = fh.readline().strip()
             if not first_line:
                 continue
@@ -548,7 +579,7 @@ def _scan_codex_files() -> list[Session]:
             origin_url = git.get("repository_url", "")
             ts = payload.get("timestamp", obj.get("timestamp", ""))
             # Try to get first user message for summary
-            summary = _codex_first_user_message(f)
+            summary = _codex_first_user_message(readable)
             sessions.append(
                 Session(
                     id=sid,
@@ -563,7 +594,9 @@ def _scan_codex_files() -> list[Session]:
                     ),
                     created_at=ts,
                     updated_at=(
-                        _last_activity_iso(f, "codex") or ts or _file_mtime_iso(f)
+                        _last_activity_iso(readable, "codex")
+                        or ts
+                        or _file_mtime_iso(f)
                     ),
                     content_path=str(f),
                     parent_id=parent_id,

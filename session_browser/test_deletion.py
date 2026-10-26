@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from session_browser import deletion
+from session_browser import compressed, deletion
 from session_browser.deletion import DeleteFailed, DeleteRefused
 from session_browser.discovery import Session, scan_claude
 
@@ -169,6 +169,21 @@ class TestCodexDelete:
         monkeypatch.setenv("FAKE_CODEX_KEEP", "1")
         with pytest.raises(DeleteFailed, match="remains"):
             deletion.delete_session(deletion.plan_delete(session, []))
+
+    def test_a_compressed_rollout_takes_its_decompressed_copy_with_it(
+        self, fake_codex, tmp_path, monkeypatch
+    ):
+        session, _log = fake_codex
+        rollout = tmp_path / "rollout.jsonl.zst"
+        rollout.write_bytes(compressed.zstd.compress(b"{}\n"))
+        monkeypatch.setenv("FAKE_CODEX_ROLLOUT", str(rollout))
+        session.content_path = str(rollout)
+        copy = compressed.readable(rollout)
+
+        deletion.delete_session(deletion.plan_delete(session, []))
+
+        assert not rollout.exists()
+        assert not copy.exists()
 
     def test_no_codex_on_path_is_refused(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PATH", str(tmp_path))

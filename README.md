@@ -190,9 +190,11 @@ range per provider. See Claude Code's
 [`cleanupPeriodDays`](https://code.claude.com/docs/en/settings-reference#cleanupperioddays)
 for what else the sweep removes.
 
-Codex keeps its rollouts, but recent Codex versions compress older ones to
-`.jsonl.zst`, and Session Browser does not read those yet, so they are missing
-from every command until it does.
+Codex keeps its rollouts, and recent versions compress older ones to
+`.jsonl.zst`. Session Browser decompresses each one once, on the first search
+that reads it, into `~/.cache/session-browser/zst` (or under `$XDG_CACHE_HOME`).
+That copy takes about five times the compressed size, and the cache is safe to
+delete.
 
 Use `session-browser COMMAND --help` for filters, output formats, date ranges,
 and retrieval windows. Commands return JSON by default where it is useful for

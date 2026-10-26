@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from session_browser import herdr, multiplexer, tmux
+from session_browser import compressed, herdr, multiplexer, tmux
 from session_browser.discovery import (
     Session,
     _codex_repo_name,
@@ -48,6 +48,7 @@ from session_browser.transcript import (
     TranscriptEntry,
     load_session_content,
     search_session_contents,
+    search_sessions,
 )
 
 # ---------------------------------------------------------------------------
@@ -961,6 +962,152 @@ class TestScanCodexDb:
         assert db_s.updated_at == file_s.updated_at == "2026-04-10T13:05:00.000Z"
         assert db_s.summary == file_s.summary == "hello there"
         assert db_s.content_path == file_s.content_path == str(f)
+
+
+class TestCompressedCodexRollouts:
+    """Codex's background worker rewrites old rollouts as ``.jsonl.zst`` and
+    leaves its index naming the ``.jsonl``. Measured 2026-10-26 on codex-cli
+    0.164.0: 684 of 709 rollouts on one machine had been compressed, and every
+    one of them was invisible -- dropped by the index path as a row whose file
+    had gone, and never matched by the file scan's glob."""
+
+    WORD = "kookaburra"
+
+    def _rollout(self, home: Path, sid: str = "cx-z") -> Path:
+        day = home / ".codex" / "sessions" / "2026" / "07" / "31"
+        day.mkdir(parents=True, exist_ok=True)
+        f = day / f"rollout-2026-07-31T13-51-37-{sid}.jsonl"
+        lines = [
+            {
+                "type": "session_meta",
+                "timestamp": "2026-07-31T13:51:37Z",
+                "payload": {"id": sid, "cwd": "/p", "git": {"branch": "main"}},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-07-31T13:51:40Z",
+                "payload": {"type": "user_message", "message": "read the handoff"},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-07-31T13:52:00Z",
+                "payload": {
+                    "type": "agent_message",
+                    "message": f"a {self.WORD} was sighted",
+                },
+            },
+        ]
+        f.write_text("".join(json.dumps(x) + "\n" for x in lines))
+        return f
+
+    def _compress(self, f: Path) -> Path:
+        z = f.with_name(f.name + compressed.SUFFIX)
+        z.write_bytes(compressed.zstd.compress(f.read_bytes()))
+        f.unlink()
+        return z
+
+    def _index(self, home: Path, rollout: Path, sid: str = "cx-z") -> None:
+        TestScanCodexDb()._write_db(
+            home,
+            [
+                {
+                    "id": sid,
+                    "rollout_path": str(rollout),
+                    "cwd": "/p",
+                    "summary": "read the handoff",
+                    "created_ms": 1785505897000,
+                    "updated_ms": 1785505920000,
+                }
+            ],
+        )
+
+    def test_index_row_finds_its_compressed_rollout(self, tmp_path):
+        plain = self._rollout(tmp_path)
+        z = self._compress(plain)
+        self._index(tmp_path, plain)
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+            assert [s.id for s in sessions] == ["cx-z"]
+            # The index path ran (its summary), pointed at the file on disk.
+            assert sessions[0].summary == "read the handoff"
+            assert sessions[0].content_path == str(z)
+            assert search_session_contents(sessions, self.WORD) == {"cx-z"}
+            assert self.WORD in load_session_content(sessions[0])
+
+    def test_file_scan_reads_a_compressed_rollout(self, tmp_path):
+        self._compress(self._rollout(tmp_path))
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert [s.id for s in sessions] == ["cx-z"]
+        assert sessions[0].summary == "read the handoff"
+        assert sessions[0].updated_at == "2026-07-31T13:52:00Z"
+
+    def test_plain_rollout_wins_over_a_compressed_twin(self, tmp_path):
+        plain = self._rollout(tmp_path)
+        twin = plain.with_name(plain.name + compressed.SUFFIX)
+        twin.write_bytes(compressed.zstd.compress(plain.read_bytes()))
+        self._index(tmp_path, plain)
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            sessions = scan_codex()
+
+        assert [s.content_path for s in sessions] == [str(plain)]
+
+    def test_decompresses_once_then_reads_the_copy(self, tmp_path):
+        z = self._compress(self._rollout(tmp_path))
+        real = compressed._decompress
+        calls = []
+
+        def counting(path, target):
+            calls.append(path)
+            real(path, target)
+
+        with patch.object(compressed, "_decompress", counting):
+            first = compressed.readable(z)
+            compressed._known.clear()  # a fresh process: the copy on disk
+            second = compressed.readable(z)
+
+        assert first == second
+        assert calls == [z]
+        assert self.WORD in first.read_text()
+
+    def test_a_changed_source_replaces_its_stale_copy(self, tmp_path):
+        z = self._compress(self._rollout(tmp_path))
+        old = compressed.readable(z)
+        z.write_bytes(compressed.zstd.compress(b'{"type":"session_meta"}\n'))
+        os.utime(z, ns=(1, 1))
+
+        new = compressed.readable(z)
+
+        assert new != old
+        assert not old.exists()
+        assert new.read_text() == '{"type":"session_meta"}\n'
+
+    def test_a_deleted_cache_is_rebuilt(self, tmp_path):
+        z = self._compress(self._rollout(tmp_path))
+        compressed.readable(z).unlink()
+
+        assert self.WORD in compressed.readable(z).read_text()
+
+    def test_a_corrupt_rollout_is_reported_not_skipped(self, tmp_path):
+        """A file that will not decompress must surface as unreadable. Were it
+        silently dropped from the candidate scan, search would answer "no
+        match" for a session it never read."""
+        plain = self._rollout(tmp_path)
+        z = plain.with_name(plain.name + compressed.SUFFIX)
+        z.write_bytes(b"not zstd at all")
+        plain.unlink()
+        session = Session(id="cx-z", provider="codex", content_path=str(z))
+
+        [result] = search_sessions([session], self.WORD)
+
+        assert result.unreadable
+        assert any("decompress" in w for w in result.warnings)
+        assert list(compressed.cache_dir().glob(".partial-*")) == []
 
 
 class TestEpochMsToIso:

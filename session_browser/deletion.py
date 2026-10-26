@@ -39,6 +39,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import compressed
 from .discovery import Session, claude_root_session
 
 
@@ -209,6 +210,10 @@ def _run_provider_delete(plan: DeletePlan) -> str:
     rollout = plan.session.content_path
     if rollout and Path(rollout).exists():
         raise DeleteFailed(f"codex delete reported success but {rollout} remains")
+    if rollout.endswith(compressed.SUFFIX):
+        # A compressed rollout leaves its decompressed copy behind in this
+        # package's own cache, which nothing else would ever remove.
+        compressed.discard(Path(rollout))
     return f"Deleted codex session {plan.session.id}"
 
 

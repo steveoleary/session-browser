@@ -89,7 +89,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import discovery, transcript
+from . import compressed, discovery, transcript
 
 BUDGETS_PATH = Path(__file__).resolve().parent.parent / "docs" / "perf_budgets.json"
 
@@ -146,6 +146,7 @@ COUNTERS = (
     "process_pool_sessions",
     "progress_callbacks",
     "row_tick_wrappers",
+    "zst_decompressions",
 )
 
 
@@ -225,6 +226,7 @@ def instrumented(
     real_probe = transcript._probe_in_processes
     real_ticking_rows = transcript._ticking_rows
     real_rg = transcript._rg_candidate_paths
+    real_decompress = compressed._decompress
     corpus_str = str(corpus)
 
     def in_corpus(target) -> bool:
@@ -292,6 +294,12 @@ def instrumented(
         ledger.add("row_tick_wrappers")
         return real_ticking_rows(rows, progress)
 
+    def counting_decompress(path, target):
+        # The decompression itself reads through zstd's own file object, which
+        # the open() patch above never sees, so it is counted here instead.
+        ledger.add("zst_decompressions")
+        return real_decompress(path, target)
+
     def recording_probe_in_processes(pairs, query, cancelled):
         ledger.add("process_pool_sessions", len(pairs))
         return transcript._PROC_FALLBACK
@@ -308,6 +316,7 @@ def instrumented(
     transcript._search_entries = counting_search_entries
     transcript._probe_in_processes = recording_probe_in_processes
     transcript._ticking_rows = counting_ticking_rows
+    compressed._decompress = counting_decompress
     if disable_rg:
         transcript._rg_candidate_paths = no_rg
     try:
@@ -323,6 +332,7 @@ def instrumented(
         transcript._probe_in_processes = real_probe
         transcript._ticking_rows = real_ticking_rows
         transcript._rg_candidate_paths = real_rg
+        compressed._decompress = real_decompress
 
 
 # ---------------------------------------------------------------------------
@@ -910,6 +920,34 @@ def _with_extra_codex_rollout(run: Callable[[], None]) -> None:
         extra.unlink()
 
 
+def _with_compressed_codex_rollouts(run: Callable[[], None]) -> None:
+    """Run *run* with every corpus rollout compressed, as Codex compresses them.
+
+    The index keeps its ``.jsonl`` paths, which is what Codex does too. The
+    originals are read through ``io.open`` rather than ``open`` so that this
+    setup is not counted as the workload's own reading. Restored afterwards
+    even on failure, along with the cache of decompressed copies, so no other
+    workload meets a compressed rollout or a warm cache."""
+    home = _corpus_home_guard()
+    originals = sorted((home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
+    saved: dict[Path, bytes] = {}
+    for f in originals:
+        with io.open(f, "rb") as fh:  # noqa: UP020 - open() is the counted one
+            saved[f] = fh.read()
+        f.with_name(f.name + compressed.SUFFIX).write_bytes(
+            compressed.zstd.compress(saved[f])
+        )
+        f.unlink()
+    try:
+        run()
+    finally:
+        for f, data in saved.items():
+            f.with_name(f.name + compressed.SUFFIX).unlink(missing_ok=True)
+            f.write_bytes(data)
+        shutil.rmtree(compressed.cache_dir(), ignore_errors=True)
+        compressed._known.clear()
+
+
 def _tui_search(ledger: WorkLedger, query: str) -> None:
     """The TUI's shape: full entries retained, progress reported throughout."""
     sessions = discovery.discover_all()
@@ -972,6 +1010,23 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "the same candidate scan the claude files go through. A parse per "
             "session here means Pi fell out of the prefilter path.",
             lambda: _cli("search", QUERY_RARE, "--provider", "pi"),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.codex_zst",
+            "Codex compresses old rollouts to .jsonl.zst, and decompressing "
+            "them per query cost ~1s over 684 real rollouts. Each must be "
+            "decompressed once, into the on-disk cache, and the second of "
+            "these two searches -- a fresh process as far as the cache can "
+            "tell -- must read only the copies: zst_decompressions is the "
+            "rollout count, not twice it.",
+            lambda: _with_compressed_codex_rollouts(
+                lambda: (
+                    _cli("search", QUERY_RARE, "--provider", "codex"),
+                    compressed._known.clear(),
+                    _cli("search", QUERY_RARE, "--provider", "codex"),
+                )
+            ),
             needs_rg=True,
         ),
         Workload(
@@ -1426,12 +1481,18 @@ def _corpus_home(root: Path) -> Iterator[Path]:
     ``benchmarks/retrieval_compare.py`` pulls with ``--home``.
     """
     home = build_corpus(root)
-    saved = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME")}
+    saved = {
+        k: os.environ.get(k)
+        for k in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME")
+    }
     os.environ["HOME"] = str(home)
     os.environ["USERPROFILE"] = str(home)
     # The user's ignore file would otherwise drop corpus sessions, and the
-    # counts would depend on whose machine blessed them.
+    # counts would depend on whose machine blessed them. Likewise a cache of
+    # decompressed rollouts left by an earlier run would turn decompressions
+    # into cache hits.
     os.environ["XDG_CONFIG_HOME"] = str(home / ".config")
+    os.environ["XDG_CACHE_HOME"] = str(home / ".cache")
     try:
         yield home
     finally:

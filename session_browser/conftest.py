@@ -5,6 +5,10 @@
 this a developer's ignore file would silently drop fixture sessions -- a suite
 that passes or fails depending on whose machine it runs on. Subprocesses inherit
 the variable too, so CLI and capture tests are covered by the same line.
+
+``$XDG_CACHE_HOME`` gets the same treatment: ``compressed.py`` writes
+decompressed rollouts there, and a fixture must neither fill the developer's
+cache nor find a copy a previous run left behind.
 """
 
 from __future__ import annotations
@@ -16,5 +20,6 @@ import pytest
 def _isolated_config_home(tmp_path_factory):
     patch = pytest.MonkeyPatch()
     patch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("config-home")))
+    patch.setenv("XDG_CACHE_HOME", str(tmp_path_factory.mktemp("cache-home")))
     yield
     patch.undo()
