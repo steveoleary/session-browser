@@ -30,10 +30,10 @@ something the agent *read*, `user` and `assistant` mean somebody wrote it, and
 pasted reports — which can quote earlier speech and is never fresh evidence
 that anyone said it *there*. Check `role` before quoting a hit as evidence that
 a thing was discussed. `--mode ids` carries no roles, which is why ids alone
-nominate candidates and never confirm a finding. For a provenance census
-without pulling whole snippets into context, count roles over a compact
-projection — `--max-snippets 0` lifts the default cap of 20 per result, which
-otherwise silently truncates the tally you are counting.
+nominate candidates and never confirm a finding. For the census, read
+`match_roles` on each snippets result: every match counted by role, never
+capped by `--max-snippets`. Counting snippet roles yourself counts at most 20
+per result and silently truncates the tally.
 
 **3. Sessions self-correct.** A confident mid-session claim is often reversed a
 few entries later: claim → user pushback → correction. Treat any snippet or
@@ -112,8 +112,9 @@ where they disagree, `--help` describes the binary you are actually running.
 4. **Triage with `--mode snippets`.** A high `match_count` on a scoped search is
    the strongest triage signal there is: summaries can be blank or misleading,
    but a session that says the phrase 200 times is where the work happened.
-   Check each snippet's `role` (trap 2) and use `first_match`/`last_match` as
-   entry indices for step 5.
+   Check `match_roles` (trap 2) and use `first_authored_match`/
+   `last_authored_match` as entry indices for step 5 — where a person, not a
+   tool, said it. `null` there means only tools and injected text matched.
 5. **Retrieve only what you need.** Read a window with `get ID --entries A:B`,
    `--tail N` or `--head N`, or `--brief` for the usual pair — what it was
    asked to do and where it got to — in one read. To read one voice, filter by
@@ -148,7 +149,7 @@ where they disagree, `--help` describes the binary you are actually running.
 | Drop harness/scratch noise | `--exclude-cwd /private/tmp/` (repeatable, applied before `--limit`) |
 | A stable snapshot while other agents are working | add `--until -30m` |
 | Every match, not the first N | omit `--limit` entirely — it is unbounded by default |
-| Count roles without pulling snippets into context | `--mode snippets --max-snippets 0`, project to `role` only |
+| Who said it, without reading snippets | `match_roles` on each snippets result |
 
 A canonical id (`claude:76458688-…`, copyable from the TUI with `i`) goes
 straight to `get ID` — no `list`/`search` first. A unique id *prefix* resolves

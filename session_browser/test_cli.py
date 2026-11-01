@@ -2810,6 +2810,56 @@ class TestSearchTriageSignals:
         assert ccc["total_entries"] == 1
         assert ccc["first_match"] == 0 and ccc["last_match"] == 0
 
+    def test_match_roles_count_every_match_and_authored_skips_tools(self):
+        """match_roles is a census from every match, not the snippets, so it
+        survives --max-snippets; the authored indices skip tool and system
+        entries, which quote text rather than say it."""
+        import argparse
+
+        from session_browser.cli import _result_item
+        from session_browser.transcript import (
+            EntryMatch,
+            SessionSearchResult,
+            TranscriptEntry,
+        )
+
+        def match(i, role, n):
+            return EntryMatch(i, TranscriptEntry(role, "x " * n), list(range(n)))
+
+        matches = [
+            match(1, "tool", 3),
+            match(2, "user", 1),
+            match(4, "system", 1),
+            match(5, "assistant", 2),
+            match(7, "tool", 4),
+        ]
+        r = SessionSearchResult(
+            Session(id="s", provider="claude"), match_count=11, matches=matches
+        )
+        args = argparse.Namespace(
+            query=["x"], mode="snippets", max_snippets=1, context=10
+        )
+        item = _result_item(args, r, include_entries=False)
+        assert item["match_roles"] == {
+            "assistant": 2,
+            "system": 1,
+            "tool": 7,
+            "user": 1,
+        }
+        assert sum(item["match_roles"].values()) == item["match_count"]
+        assert len(item["snippets"]) == 1
+        assert (item["first_authored_match"], item["last_authored_match"]) == (2, 5)
+
+        tools_only = SessionSearchResult(
+            Session(id="t", provider="claude"),
+            match_count=3,
+            matches=[match(0, "tool", 3)],
+        )
+        item = _result_item(args, tools_only, include_entries=False)
+        assert item["match_roles"] == {"tool": 3}
+        assert item["first_authored_match"] is None
+        assert item["last_authored_match"] is None
+
     def test_sort_matches_orders_by_count(self, cli):
         # Recency order puts ccc (1 hit) first; --sort matches flips it.
         _, out, _ = cli("search", "wombat", "--mode", "ids", "--sort", "matches")

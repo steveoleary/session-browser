@@ -199,6 +199,9 @@ _SEARCH_RESULT_KEYS = _SESSION_KEYS + (
     "offset",
     "first_match",
     "last_match",
+    "match_roles",
+    "first_authored_match",
+    "last_authored_match",
     "parse_warnings",
     "snippets",
     "snippets_omitted",
@@ -215,6 +218,11 @@ Result keys are the union across stdout and manifest variants: "file" exists
 only in full-mode manifests; other conditional keys depend on matches, modes,
 warnings, and --around. A multi-phrase snippet adds "query". "role" preserves
 provenance: tool hits are observed text, not necessarily agent-authored text.
+With any match, "match_roles" counts every match by its entry's role (role ->
+count, summing to match_count, never capped by --max-snippets), and
+"first_authored_match"/"last_authored_match" are the entry indices of the
+first and last matching user or assistant entry: null when only tool or
+system text matched.
 With --output-dir, stdout is artifact_confirmation and manifest.json uses the
 artifact_manifest envelope.
 """.format(
@@ -2066,6 +2074,20 @@ def _result_item(
         # session the topic lives, and direct targets for `get --entries`.
         item["first_match"] = r.matches[0].entry_index
         item["last_match"] = r.matches[-1].entry_index
+        # Who said it, counted from every match rather than the capped
+        # snippets, and where the people in the session -- not the tools --
+        # first and last said it. Built per returned result from matches
+        # search already holds: no extra read, and outside any scan loop.
+        roles: dict[str, int] = {}
+        authored = []
+        for m in r.matches:
+            role = m.entry.role
+            roles[role] = roles.get(role, 0) + len(m.offsets)
+            if role == "user" or role == "assistant":
+                authored.append(m.entry_index)
+        item["match_roles"] = dict(sorted(roles.items()))
+        item["first_authored_match"] = authored[0] if authored else None
+        item["last_authored_match"] = authored[-1] if authored else None
     if r.warnings:
         item["parse_warnings"] = r.warnings
     multi = len(args.query) > 1
