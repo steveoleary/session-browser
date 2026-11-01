@@ -36,7 +36,13 @@ from itertools import count as _count
 from pathlib import Path
 
 from session_browser import compressed
-from session_browser.discovery import Session, _codex_injected, _opencode_db_path
+from session_browser.discovery import (
+    OPENCODE_V2,
+    Session,
+    _codex_injected,
+    _opencode_db_path,
+    opencode_execute,
+)
 
 
 class TranscriptUnreadable(Exception):
@@ -1801,11 +1807,18 @@ def _search_opencode_bulk(
     results: list[SessionSearchResult | None] = [None] * len(sessions)
     needles = _prefilter_needles(query)
 
+    schema = 0  # learnt from the first statement; see opencode_execute
+
     def emit(sid: str, rows: list[tuple]) -> None:
+        to_entries = (
+            _opencode_v2_entries_from_rows
+            if schema == OPENCODE_V2
+            else _opencode_entries_from_rows
+        )
         for i in by_sid.get(sid, ()):
             results[i] = _search_entries(
                 sessions[i],
-                _opencode_entries_from_rows(rows),
+                to_entries(rows),
                 query,
                 keep_entries=keep_entries,
             )
@@ -1828,10 +1841,8 @@ def _search_opencode_bulk(
                 # live corpus this avoids decoding/casefolding 126 MB of part
                 # data; the canonical candidate query below still receives
                 # normal strings for parsing exact hits and offsets.
-                cur = conn.execute(
-                    "SELECT session_id, CAST(data AS BLOB) FROM part "
-                    "WHERE session_id IN (SELECT value FROM json_each(?))",
-                    (json.dumps(scan_sids),),
+                cur, schema = opencode_execute(
+                    conn, _OPENCODE_PREFILTER_SQL, (json.dumps(scan_sids),)
                 )
                 if progress is not None:
                     cur = _ticking_rows(cur, progress)
@@ -1847,14 +1858,8 @@ def _search_opencode_bulk(
                         results[i] = SessionSearchResult(sessions[i])
                 scan_sids = sorted(candidates)
             if scan_sids:
-                cur = conn.execute(
-                    "SELECT m.session_id, m.id, m.data, p.data "
-                    "FROM message m "
-                    "LEFT JOIN part p ON p.message_id = m.id "
-                    "WHERE m.session_id IN (SELECT value FROM json_each(?)) "
-                    "ORDER BY m.session_id, m.time_created, m.id, "
-                    "p.time_created, p.id",
-                    (json.dumps(scan_sids),),
+                cur, schema = opencode_execute(
+                    conn, _OPENCODE_BULK_ROWS_SQL, (json.dumps(scan_sids),), schema
                 )
                 # Grouped by session now, so the remaining work is countable.
                 emitted = _count(1)
@@ -1996,22 +2001,67 @@ def iter_entries(session: Session, warnings: list[str]) -> Iterator[TranscriptEn
 # ---------------------------------------------------------------------------
 
 
+_OPENCODE_SESSION_ROWS_SQL = (
+    (
+        "SELECT m.id, m.data, p.data "
+        "FROM message m "
+        "LEFT JOIN part p ON p.message_id = m.id "
+        "WHERE m.session_id = ? "
+        "ORDER BY m.time_created, m.id, p.time_created, p.id"
+    ),
+    # v2: one row per message, every piece inside its JSON. seq is the order
+    # OpenCode itself replays them in (unique per session).
+    "SELECT type, data FROM session_message WHERE session_id = ? ORDER BY seq",
+)
+
+# The bulk search's two statements. The prefilter streams raw JSON only, with
+# no join and no ordering; the canonical one is grouped by session.
+_OPENCODE_PREFILTER_SQL = (
+    (
+        "SELECT session_id, CAST(data AS BLOB) FROM part "
+        "WHERE session_id IN (SELECT value FROM json_each(?))"
+    ),
+    (
+        "SELECT session_id, CAST(data AS BLOB) FROM session_message "
+        "WHERE session_id IN (SELECT value FROM json_each(?))"
+    ),
+)
+_OPENCODE_BULK_ROWS_SQL = (
+    (
+        "SELECT m.session_id, m.id, m.data, p.data "
+        "FROM message m "
+        "LEFT JOIN part p ON p.message_id = m.id "
+        "WHERE m.session_id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY m.session_id, m.time_created, m.id, "
+        "p.time_created, p.id"
+    ),
+    # The NULL keeps the row the same width as v1's, so one grouping loop
+    # serves both; the v2 converter ignores it.
+    (
+        "SELECT session_id, type, data, NULL FROM session_message "
+        "WHERE session_id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY session_id, seq"
+    ),
+)
+
+
 def _parse_opencode(db_path: Path, session_id: str) -> Iterator[TranscriptEntry]:
     """Read an opencode SQLite DB and yield transcript entries."""
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
-        rows = conn.execute(
-            "SELECT m.id, m.data, p.data "
-            "FROM message m "
-            "LEFT JOIN part p ON p.message_id = m.id "
-            "WHERE m.session_id = ? "
-            "ORDER BY m.time_created, m.id, p.time_created, p.id",
-            (session_id,),
-        ).fetchall()
-        conn.close()
+        try:
+            cur, schema = opencode_execute(
+                conn, _OPENCODE_SESSION_ROWS_SQL, (session_id,)
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
     except sqlite3.Error as exc:
         raise TranscriptUnreadable(f"opencode database error: {exc}") from exc
-    yield from _opencode_entries_from_rows(rows)
+    if schema == OPENCODE_V2:
+        yield from _opencode_v2_entries_from_rows(rows)
+    else:
+        yield from _opencode_entries_from_rows(rows)
 
 
 def _opencode_entries_from_rows(
@@ -2068,6 +2118,91 @@ def _opencode_part_entry(raw: str, msg_role: str) -> TranscriptEntry | None:
         return TranscriptEntry("tool", text, metadata=metadata)
     # step-start / step-finish / reasoning / snapshots: internal, skipped.
     return None
+
+
+def _opencode_v2_entries_from_rows(
+    rows: Iterable[tuple],
+) -> Iterator[TranscriptEntry]:
+    """Yield entries from (type, data, ...) session_message rows of one v2
+    session, already in seq order.
+
+    A user row carries its prompt as ``text``. An assistant row carries an
+    ordered ``content`` list of the same kinds of piece v1 stored as parts:
+    ``text``, ``tool`` and ``reasoning``. Rows of any other type (``idle``,
+    which closes a turn with its outcome, and whatever a later release adds)
+    are bookkeeping and yield nothing, as v1's step-start/step-finish do.
+    """
+    for mtype, data, *_ in rows:
+        if mtype != "user" and mtype != "assistant":
+            continue
+        try:
+            msg = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(msg, dict):
+            continue
+        if mtype == "user":
+            text = msg.get("text")
+            if isinstance(text, str) and text:
+                yield TranscriptEntry("user", text)
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for piece in content:
+            if isinstance(piece, dict):
+                entry = _opencode_v2_piece_entry(piece)
+                if entry is not None:
+                    yield entry
+
+
+def _opencode_v2_piece_entry(piece: dict) -> TranscriptEntry | None:
+    """One piece of a v2 assistant message, rendered as v1 renders its part.
+
+    The tool shape moved: ``name`` for v1's ``tool``, output as a list of
+    content blocks in ``state.content`` rather than a ``state.output`` string,
+    and a failure as ``state.error.message``. The rendered text and metadata
+    are kept identical to v1's, so a session reads the same whichever schema
+    it was stored under.
+    """
+    ptype = piece.get("type")
+    if ptype == "text":
+        text = piece.get("text")
+        return (
+            TranscriptEntry("assistant", text)
+            if isinstance(text, str) and text
+            else None
+        )
+    if ptype != "tool":
+        return None  # reasoning, and anything newer: internal, skipped
+    name = piece.get("name", "") or "?"
+    state = piece.get("state")
+    if not isinstance(state, dict):
+        state = {}
+    inp = state.get("input", {})
+    args = inp if isinstance(inp, str) else json.dumps(inp, ensure_ascii=False)
+    text = f"{name}({args})"
+    status = state.get("status", "")
+    if status:
+        text += f" [{status}]"
+    blocks = state.get("content")
+    if isinstance(blocks, list):
+        out = "\n".join(
+            b["text"]
+            for b in blocks
+            if isinstance(b, dict) and isinstance(b.get("text"), str) and b["text"]
+        )
+        if out:
+            text += f"\n{out}"
+    error = state.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            text += f"\n{message}"
+    metadata: dict = {"tool": name}
+    if status == "error":
+        metadata["is_error"] = True
+    return TranscriptEntry("tool", text, metadata=metadata)
 
 
 # ---------------------------------------------------------------------------

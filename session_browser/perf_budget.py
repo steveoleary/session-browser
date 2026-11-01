@@ -804,7 +804,73 @@ def build_corpus(root: Path) -> Path:
             )
     conn.commit()
     conn.close()
+    _opencode_v2_twin(db_path)
     return home
+
+
+# Beside the corpus's v1 database, the same sessions under OpenCode 2.x's
+# schema. It sits under a name nothing reads until a workload renames it into
+# place, and it is built here rather than by that workload so building it is
+# never counted as the workload's own SQL.
+OPENCODE_V2_TWIN = "opencode.db.v2-twin"
+
+
+def _opencode_v2_twin(v1_path: Path) -> None:
+    """Write the v1 database's sessions as a v2 one: session_v2 and
+    session_message, a row per message with its text inside the JSON."""
+    twin = v1_path.with_name(OPENCODE_V2_TWIN)
+    src = sqlite3.connect(str(v1_path))
+    dst = sqlite3.connect(str(twin))
+    dst.execute(
+        "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, "
+        "name TEXT, time_created INTEGER NOT NULL, "
+        "time_updated INTEGER NOT NULL, sandboxes TEXT NOT NULL DEFAULT '[]')"
+    )
+    dst.execute(
+        "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+        "parent_id TEXT, fork_session_id TEXT, slug TEXT NOT NULL, "
+        "directory TEXT NOT NULL, title TEXT, version TEXT NOT NULL, agent TEXT, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"
+    )
+    dst.execute(
+        "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT "
+        "NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created "
+        "INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)"
+    )
+    dst.executemany(
+        "INSERT INTO project VALUES (?, ?, ?, ?, ?, ?)",
+        src.execute("SELECT * FROM project"),
+    )
+    dst.executemany(
+        "INSERT INTO session_v2 (id, project_id, parent_id, slug, directory, "
+        "title, version, agent, time_created, time_updated) "
+        "VALUES (?, ?, ?, ?, ?, ?, '2', ?, ?, ?)",
+        src.execute(
+            "SELECT id, project_id, parent_id, slug, directory, title, agent, "
+            "time_created, time_updated FROM session"
+        ),
+    )
+    for seq, (mid, sid, created, mdata, pdata) in enumerate(
+        src.execute(
+            "SELECT m.id, m.session_id, m.time_created, m.data, p.data "
+            "FROM message m JOIN part p ON p.message_id = m.id "
+            "ORDER BY m.session_id, m.time_created"
+        )
+    ):
+        role = json.loads(mdata)["role"]
+        text = json.loads(pdata)["text"]
+        data = (
+            {"text": text, "files": [], "agents": []}
+            if role == "user"
+            else {"content": [{"type": "text", "text": text}]}
+        )
+        dst.execute(
+            "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (mid, sid, role, seq, created, created, json.dumps(data)),
+        )
+    dst.commit()
+    dst.close()
+    src.close()
 
 
 # ---------------------------------------------------------------------------
@@ -948,6 +1014,27 @@ def _with_compressed_codex_rollouts(run: Callable[[], None]) -> None:
         compressed._known.clear()
 
 
+def _with_opencode_v2(run: Callable[[], None]) -> None:
+    """Run *run* with the corpus's OpenCode database in its 2.x schema.
+
+    Swaps the prebuilt v2 twin into place by rename, which touches no counter,
+    and puts the v1 file back afterwards even on failure."""
+    home = _corpus_home_guard()
+    share = home / ".local" / "share" / "opencode"
+    v1, twin, parked = (
+        share / "opencode.db",
+        share / OPENCODE_V2_TWIN,
+        share / "opencode.db.v1-parked",
+    )
+    v1.rename(parked)
+    twin.rename(v1)
+    try:
+        run()
+    finally:
+        v1.rename(twin)
+        parked.rename(v1)
+
+
 def _tui_search(ledger: WorkLedger, query: str) -> None:
     """The TUI's shape: full entries retained, progress reported throughout."""
     sessions = discovery.discover_all()
@@ -1003,6 +1090,16 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "The thin raw-part scan must rule sessions out before the ordered "
             "join, so only survivors reach a canonical parse.",
             lambda: _cli("search", QUERY_RARE, "--provider", "opencode"),
+        ),
+        Workload(
+            "cli.search.opencode.v2",
+            "The same scan over OpenCode 2.x's schema: one thin raw pass over "
+            "session_message before the ordered read, so only survivors are "
+            "parsed. The v1 attempt each reader makes first must stay free -- "
+            "rejected while preparing, it never counts as a statement.",
+            lambda: _with_opencode_v2(
+                lambda: _cli("search", QUERY_RARE, "--provider", "opencode")
+            ),
         ),
         Workload(
             "cli.search.pi",

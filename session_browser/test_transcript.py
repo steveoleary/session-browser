@@ -1739,6 +1739,263 @@ class TestOpencodeParser:
         assert t.warnings == []
 
 
+def make_opencode_v2_db(home: Path, sessions: dict[str, dict]) -> Path:
+    """An OpenCode v2 database: session_v2 + session_message, no v1 tables.
+
+    *sessions* maps an id to ``{"messages": [(type, data), ...]}`` plus any
+    session_v2 column to override (title, parent_id, fork_session_id, agent).
+    The columns are the subset of the real 2.x schema that discovery reads;
+    a real database carries thirty more, none of them consulted.
+    """
+    db_path = home / ".local" / "share" / "opencode" / "opencode.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, "
+        "name TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, "
+        "sandboxes TEXT NOT NULL DEFAULT '[]')"
+    )
+    conn.execute(
+        "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+        "parent_id TEXT, fork_session_id TEXT, slug TEXT NOT NULL, "
+        "directory TEXT NOT NULL, title TEXT, version TEXT NOT NULL, agent TEXT, "
+        "time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT "
+        "NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created "
+        "INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO project VALUES ('p1', '/Users/test/proj', NULL, 1, 1, '[]')"
+    )
+    for n, (sid, spec) in enumerate(sessions.items()):
+        conn.execute(
+            "INSERT INTO session_v2 (id, project_id, parent_id, fork_session_id, "
+            "slug, directory, title, version, agent, time_created, time_updated) "
+            "VALUES (?, 'p1', ?, ?, ?, '/Users/test/proj', ?, '2.2.4', ?, ?, ?)",
+            (
+                sid,
+                spec.get("parent_id"),
+                spec.get("fork_session_id"),
+                f"slug-{n}",
+                spec.get("title", f"title {sid}"),
+                spec.get("agent", "build"),
+                1792348000000 + n,
+                1792348100000 + n,
+            ),
+        )
+        # Out of seq order on purpose: seq, not rowid, is the order.
+        msgs = list(enumerate(spec.get("messages", []), start=1))
+        for seq, (mtype, data) in reversed(msgs):
+            conn.execute(
+                "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (f"{sid}-{seq}", sid, mtype, seq, seq, seq, json.dumps(data)),
+            )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _v2_tool(name: str, status: str, **state) -> dict:
+    return {
+        "type": "tool",
+        "id": f"call_{name}",
+        "name": name,
+        "executed": False,
+        "state": {"status": status, **state},
+    }
+
+
+# A v2 session shaped like the real 2.x records it was taken from: a user
+# prompt, an assistant turn that reasons, calls a tool that succeeds and one
+# that fails, then answers, and the idle row that closes the turn.
+V2_TURN = [
+    (
+        "user",
+        {"time": {"created": 1}, "text": "please fix auth", "files": [], "agents": []},
+    ),
+    (
+        "assistant",
+        {
+            "agent": "build",
+            "content": [
+                {"type": "reasoning", "text": "SECRET-REASONING", "state": {}},
+                _v2_tool(
+                    "read",
+                    "completed",
+                    input={"path": "auth.py"},
+                    content=[{"type": "text", "text": "def login(): ..."}],
+                ),
+                _v2_tool(
+                    "read",
+                    "error",
+                    input={"offset": 99, "path": "auth.py"},
+                    error={"type": "unknown", "message": "Offset 99 is out of range"},
+                ),
+                {"type": "text", "text": "fixed the login check"},
+            ],
+        },
+    ),
+    ("idle", {"time": {"created": 9}, "outcome": "succeeded"}),
+]
+
+
+class TestOpencodeV2:
+    """OpenCode 2.x replaced session / message / part with session_v2 and
+    session_message. Every reader tries v1 and falls back to v2 on a missing
+    table, so a v1 database runs exactly the statements it always did."""
+
+    def _home(self, tmp_path):
+        return (
+            patch("session_browser.transcript.Path.home", return_value=tmp_path),
+            patch("session_browser.discovery.Path.home", return_value=tmp_path),
+        )
+
+    def test_discovery_reads_session_v2(self, tmp_path):
+        from session_browser.discovery import scan_opencode
+
+        make_opencode_v2_db(
+            tmp_path,
+            {
+                "ses_root": {"title": "Root work", "messages": V2_TURN},
+                "ses_child": {"parent_id": "ses_root", "agent": "general"},
+                # A fork carries fork_session_id, never parent_id. Reading the
+                # one as the other would file a continuation as a subagent.
+                "ses_fork": {"fork_session_id": "ses_root"},
+            },
+        )
+        h1, h2 = self._home(tmp_path)
+        with h1, h2:
+            found = {s.id: s for s in scan_opencode()}
+        assert set(found) == {"ses_root", "ses_child", "ses_fork"}
+        root = found["ses_root"]
+        assert (root.summary, root.cwd, root.repository) == (
+            "Root work",
+            "/Users/test/proj",
+            "proj",
+        )
+        assert (root.parent_id, root.subagent_kind) == ("", "")
+        assert (found["ses_child"].parent_id, found["ses_child"].subagent_kind) == (
+            "ses_root",
+            "general",
+        )
+        assert (found["ses_fork"].parent_id, found["ses_fork"].subagent_kind) == (
+            "",
+            "",
+        )
+
+    def test_transcript_renders_the_pieces_v1_rendered(self, tmp_path):
+        make_opencode_v2_db(tmp_path, {"ses_1": {"messages": V2_TURN}})
+        h1, h2 = self._home(tmp_path)
+        with h1, h2:
+            t = load_transcript(Session(id="ses_1", provider="opencode"))
+        assert [(e.role, e.text, e.metadata) for e in t.entries] == [
+            ("user", "please fix auth", None),
+            (
+                "tool",
+                'read({"path": "auth.py"}) [completed]\ndef login(): ...',
+                {"tool": "read"},
+            ),
+            (
+                "tool",
+                (
+                    'read({"offset": 99, "path": "auth.py"}) [error]\n'
+                    "Offset 99 is out of range"
+                ),
+                {"tool": "read", "is_error": True},
+            ),
+            ("assistant", "fixed the login check", None),
+        ]
+        # Reasoning and the idle row are bookkeeping, as v1's step parts are.
+        assert all("SECRET-REASONING" not in e.text for e in t.entries)
+
+    def test_a_tool_renders_identically_under_either_schema(self):
+        v1 = _opencode_part_entry(
+            json.dumps(
+                {
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {
+                        "status": "completed",
+                        "input": {"command": "make"},
+                        "output": "ok",
+                    },
+                }
+            ),
+            "assistant",
+        )
+        v2 = transcript_mod._opencode_v2_piece_entry(
+            _v2_tool(
+                "bash",
+                "completed",
+                input={"command": "make"},
+                content=[{"type": "text", "text": "ok"}],
+            )
+        )
+        assert (v2.role, v2.text, v2.metadata) == (v1.role, v1.text, v1.metadata)
+
+    def test_unknown_rows_and_malformed_data_are_skipped(self):
+        rows = [
+            ("user", "not json", None),
+            ("assistant", json.dumps({"content": "not a list"}), None),
+            ("assistant", json.dumps([1, 2]), None),
+            ("compaction", json.dumps({"text": "SECRET-COMPACTION"}), None),
+            ("user", json.dumps({"text": "kept"}), None),
+        ]
+        out = list(transcript_mod._opencode_v2_entries_from_rows(rows))
+        assert [(e.role, e.text) for e in out] == [("user", "kept")]
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            # Prefilter-safe: the raw scan over session_message rules oc2 out.
+            ("wombat", [("oc1", 1), ("oc2", 0), ("oc3", 2)]),
+            # Non-ASCII forces the canonical scan of every session.
+            ("café", [("oc1", 0), ("oc2", 1), ("oc3", 0)]),
+        ],
+    )
+    def test_bulk_search(self, tmp_path, query, expected):
+        def turn(text):
+            return [("user", {"text": text}), ("idle", {"outcome": "succeeded"})]
+
+        make_opencode_v2_db(
+            tmp_path,
+            {
+                "oc1": {"messages": turn("alpha wombat")},
+                "oc2": {"messages": turn("a café miss")},
+                "oc3": {
+                    "messages": [
+                        ("user", {"text": "wombat?"}),
+                        (
+                            "assistant",
+                            {"content": [{"type": "text", "text": "a wombat"}]},
+                        ),
+                    ]
+                },
+            },
+        )
+        sessions = [Session(id=s, provider="opencode") for s in ("oc1", "oc2", "oc3")]
+        h1, h2 = self._home(tmp_path)
+        with h1, h2:
+            results = search_sessions(sessions, query, keep_entries=True)
+        assert [(r.session.id, r.match_count) for r in results] == expected
+        assert not any(r.unreadable for r in results)
+
+    def test_a_database_with_neither_schema_is_unreadable_not_empty(self, tmp_path):
+        db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+        db_path.parent.mkdir(parents=True)
+        sqlite3.connect(str(db_path)).execute("CREATE TABLE unrelated (x)").close()
+        h1, h2 = self._home(tmp_path)
+        with h1, h2:
+            with pytest.raises(TranscriptUnreadable, match="session_message"):
+                load_transcript(Session(id="oc1", provider="opencode"))
+            (result,) = search_sessions(
+                [Session(id="oc1", provider="opencode")], "anything"
+            )
+        assert result.unreadable
+
+
 class TestPiParser:
     def test_user_and_assistant_text_parts(self, tmp_path):
         f = tmp_path / "s.jsonl"

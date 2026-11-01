@@ -784,21 +784,10 @@ def scan_opencode() -> list[Session]:
     try:
         conn = sqlite3.connect(_readonly_uri(db_path), uri=True, timeout=3)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            # parent_id and agent are two more columns on a query that
-            # already reads this table, so the sqlite_statements counter is
-            # unmoved. agent names the AGENT TYPE and is set on parents too
-            # (build 239, orchestrator 101, ... on a real install), so it is
-            # a label for a child rather than evidence of being one --
-            # parent_id is the only thing that says "this was spawned".
-            "SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, "
-            "       s.parent_id, s.agent, "
-            "       p.worktree, p.name AS project_name "
-            "FROM session s "
-            "LEFT JOIN project p ON s.project_id = p.id "
-            "ORDER BY s.time_updated DESC"
-        ).fetchall()
-        conn.close()
+        try:
+            rows = opencode_execute(conn, _OPENCODE_SESSIONS_SQL)[0].fetchall()
+        finally:
+            conn.close()
         for r in rows:
             sessions.append(
                 Session(
@@ -840,6 +829,70 @@ def scan_opencode() -> list[Session]:
 
 def _opencode_db_path() -> Path:
     return Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+
+
+# OpenCode keeps its sessions in one SQLite file whose schema changed at v2.
+# v1 has session / message / part, a part row per piece of a message. v2 (2.x,
+# installed from opencode.ai/v2) has session_v2 / session_message, one row per
+# message with every piece inside its JSON, and none of the v1 tables. The two
+# carry the same facts for discovery under different table names, so each
+# statement here comes as a (v1, v2) pair and opencode_execute picks one.
+OPENCODE_V1, OPENCODE_V2 = 1, 2
+
+_OPENCODE_SESSIONS_SQL = (
+    # parent_id and agent are two more columns on a query that already reads
+    # this table, so the sqlite_statements counter is unmoved. agent names the
+    # AGENT TYPE and is set on parents too (build 239, orchestrator 101, ... on
+    # a real install), so it is a label for a child rather than evidence of
+    # being one -- parent_id is the only thing that says "this was spawned".
+    (
+        "SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, "
+        "       s.parent_id, s.agent, "
+        "       p.worktree, p.name AS project_name "
+        "FROM session s "
+        "LEFT JOIN project p ON s.project_id = p.id "
+        "ORDER BY s.time_updated DESC"
+    ),
+    # Same columns from v2. fork_session_id (a fork, not a spawn) is left out
+    # on purpose: reading it as parent_id would file a fork as a subagent.
+    (
+        "SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, "
+        "       s.parent_id, s.agent, "
+        "       p.worktree, p.name AS project_name "
+        "FROM session_v2 s "
+        "LEFT JOIN project p ON s.project_id = p.id "
+        "ORDER BY s.time_updated DESC"
+    ),
+)
+
+
+def opencode_execute(
+    conn: sqlite3.Connection,
+    sql: tuple[str, str],
+    params: tuple = (),
+    schema: int = 0,
+) -> tuple[sqlite3.Cursor, int]:
+    """Run the statement of *sql* matching the database's schema.
+
+    *schema* is what an earlier call on this connection returned, or 0 when
+    nothing is known yet. Unknown tries v1 first and falls back to v2 only on
+    a missing table, so a v1 database runs exactly the statements it always
+    did. The failed attempt costs nothing measurable on a v2 one: SQLite
+    rejects it while preparing, before any row is read, which is also why the
+    perf gate's statement counter (a trace callback) never sees it.
+
+    A database carrying both sets of tables mid-migration reads as v1. OpenCode
+    replaces the v1 tables rather than keeping both, so that is a transient
+    state, and v1 is what it held until the migration finished.
+    """
+    if schema == OPENCODE_V2:
+        return conn.execute(sql[1], params), OPENCODE_V2
+    try:
+        return conn.execute(sql[0], params), OPENCODE_V1
+    except sqlite3.OperationalError as exc:
+        if schema or "no such table" not in str(exc):
+            raise
+    return conn.execute(sql[1], params), OPENCODE_V2
 
 
 def scan_pi() -> list[Session]:
