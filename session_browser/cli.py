@@ -32,6 +32,7 @@ from .transcript import (
     codex_fork_base,
     codex_prefix_entries,
     entry_matches_roles,
+    is_command_noise,
     iter_entries,
     load_transcript,
     make_snippet,
@@ -488,8 +489,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N:M",
         help="what was asked for and how it ended, in one call: the "
         "first N user turns and the last M assistant turns "
-        f"(default {_DEFAULT_BRIEF}). Both windows are stated in the "
-        "output. Cannot be combined with --role, which it sets itself",
+        f"(default {_DEFAULT_BRIEF}). A slash command with no arguments "
+        "(/clear, /effort) and a command's printed output are skipped and "
+        "not counted; one with arguments (/goal ...) is kept, as the request. "
+        "Both windows are stated in the output. Cannot be combined with "
+        "--role, which it sets itself",
     )
     p_get.add_argument(
         "--role",
@@ -1569,13 +1573,19 @@ def _brief_view(transcript: Transcript, brief: tuple[int, int]):
     role), so no de-duplication is needed, and both are returned in transcript
     order rather than intent-then-ending: a reader who sees absolute indices
     ascending can trust that ordering means what it always means.
+
+    A bare slash command and a command's printed output are not turns of
+    intent, and do not count against N. A session opened by /clear, /effort
+    and its stdout otherwise spent half the default window on them and pushed
+    the actual request out of it. A command that carries arguments stays: it
+    is the request.
     """
     intent_n, ending_n = brief
     intent: list[tuple[int, TranscriptEntry]] = []
     ending: list[tuple[int, TranscriptEntry]] = []
     for i, e in enumerate(transcript.entries):
         if e.role == "user":
-            if len(intent) < intent_n:
+            if len(intent) < intent_n and not is_command_noise(e):
                 intent.append((i, e))
         elif e.role == "assistant":
             ending.append((i, e))

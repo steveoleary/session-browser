@@ -2415,6 +2415,63 @@ class TestGetBrief:
         assert code == 0
         assert len(calls) == 1
 
+    def test_brief_skips_bare_commands_and_their_output(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        """The shape a real session opened with: /clear, /effort and the
+        stdout /effort printed, then the request. All three filled the intent
+        window and pushed the request out of it. A command that carries
+        arguments is the request, so it stays -- whichever order Claude Code
+        wrote its tags in."""
+
+        def cmd(name: str, args: str = "") -> str:
+            return (
+                f"<command-name>/{name}</command-name>\n"
+                f"            <command-message>{name}</command-message>\n"
+                f"            <command-args>{args}</command-args>"
+            )
+
+        user_texts = [
+            cmd("clear"),
+            cmd("effort"),
+            "<local-command-stdout>Set effort level to high</local-command-stdout>",
+            "would this app handle credit card interest elegantly?",
+            "<command-message>yolo</command-message>\n<command-name>/yolo</command-name>",
+            cmd("goal", "extend it for people who carry a balance"),
+            "and keep it simple for me",
+        ]
+        f = tmp_path / "opened.jsonl"
+        lines = [
+            {"type": "user", "message": {"content": t}, "timestamp": "2026-06-01Z"}
+            for t in user_texts
+        ]
+        lines.append(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "ok"}]},
+            }
+        )
+        f.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+        monkeypatch.setattr(
+            "session_browser.cli.discover_all",
+            lambda *a, **k: [
+                Session(id="opened", provider="claude", content_path=str(f))
+            ],
+        )
+
+        assert (
+            run_cli(["get", "claude:opened", "--brief", "3:1", "--format", "json"]) == 0
+        )
+        data = json.loads(capsys.readouterr().out)
+
+        assert [(e["entry_index"], e["role"]) for e in data["entries"]] == [
+            (3, "user"),
+            (5, "user"),
+            (6, "user"),
+            (7, "assistant"),
+        ]
+        assert data["entries"][1]["text"].startswith("<command-name>/goal")
+
     def test_recent_matches_combined_tail_and_reads_once(self, talky_cli, monkeypatch):
         import session_browser.cli as cli_mod
 

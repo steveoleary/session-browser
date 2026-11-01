@@ -39,6 +39,8 @@ from session_browser import compressed
 from session_browser.discovery import (
     OPENCODE_V2,
     Session,
+    _claude_command_output,
+    _claude_summary,
     _codex_injected,
     _opencode_db_path,
     opencode_execute,
@@ -2749,6 +2751,23 @@ def is_slash_command(entry: TranscriptEntry) -> bool:
     return entry.role == "user" and entry.text.lstrip().startswith(
         _CLAUDE_SLASH_COMMAND_HEADS
     )
+
+
+def is_command_noise(entry: TranscriptEntry) -> bool:
+    """True if this user entry drives the harness rather than asks for
+    anything: a slash command with no arguments (``/clear``, ``/effort``, a
+    bare ``/yolo``) or the output a command printed.
+
+    A command WITH arguments is not noise -- ``/goal fix the login bug`` is
+    the request itself, typed through a command. The same split names a
+    session in discovery (see ``_claude_summary``), so a session's summary and
+    what ``get --brief`` calls its opening request agree on what a request is.
+    """
+    if not is_slash_command(entry):
+        return False
+    if _claude_command_output(entry.text):
+        return True
+    return _claude_summary(entry.text)[1]
 
 
 def _claude_user_entry(text: str, ts: str) -> TranscriptEntry:
