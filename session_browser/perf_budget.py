@@ -1073,6 +1073,15 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             disable_rg=True,
         ),
         Workload(
+            "cli.search.rare.role",
+            "--role narrows matches search already holds, so every counter "
+            "must equal cli.search.rare's. A role filter that re-read a "
+            "transcript to learn its roles, or that skipped the prefilter to "
+            "classify candidates first, shows here as a rise over it.",
+            lambda: _cli("search", QUERY_RARE, "--role", "user,assistant"),
+            needs_rg=True,
+        ),
+        Workload(
             "cli.search.common",
             "The unavoidable upper bound -- a term in every session. Nothing "
             "may read the corpus more than once even when nothing is skipped.",

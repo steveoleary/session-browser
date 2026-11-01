@@ -29,11 +29,13 @@ something the agent *read*, `user` and `assistant` mean somebody wrote it, and
 `system` is injected or copied text — compaction summaries, task notifications,
 pasted reports — which can quote earlier speech and is never fresh evidence
 that anyone said it *there*. Check `role` before quoting a hit as evidence that
-a thing was discussed. `--mode ids` carries no roles, which is why ids alone
+a thing was discussed. `--mode ids` carries no snippets, which is why ids alone
 nominate candidates and never confirm a finding. For the census, read
-`match_roles` on each snippets result: every match counted by role, never
-capped by `--max-snippets`. Counting snippet roles yourself counts at most 20
-per result and silently truncates the tally.
+`match_roles` on each result: every match counted by role, never capped by
+`--max-snippets`. Counting snippet roles yourself counts at most 20 per result
+and silently truncates the tally. To make roles *decide* rather than report,
+search with `--role user,assistant`: matches in tool and system text are
+dropped before anything is counted, sorted or limited, in every mode.
 
 **3. Sessions self-correct.** A confident mid-session claim is often reversed a
 few entries later: claim → user pushback → correction. Treat any snippet or
@@ -109,12 +111,17 @@ where they disagree, `--help` describes the binary you are actually running.
    how the work would be *titled* are good phrases; a summary-only hit returns
    `match_count 0` with the phrases in `summary_matches`. Matching is literal
    and markdown-insensitive, never semantic.
-4. **Triage with `--mode snippets`.** A high `match_count` on a scoped search is
-   the strongest triage signal there is: summaries can be blank or misleading,
-   but a session that says the phrase 200 times is where the work happened.
-   Check `match_roles` (trap 2) and use `first_authored_match`/
-   `last_authored_match` as entry indices for step 5 — where a person, not a
-   tool, said it. `null` there means only tools and injected text matched.
+4. **Triage with `--mode snippets`.** Raw `match_count` measures how often a
+   phrase *appeared*, and tool output dominates it: a README re-read or a
+   tracker listing outscores the session where the thing was decided, and
+   `--sort oldest` then finds the earliest *quote*. In one measured run that
+   sent every "where was X decided" question to a file read. So for who-said,
+   where-decided and when-first questions, search with `--role user,assistant`:
+   sessions that only quote the phrase drop out before `--limit`, and
+   `match_count`, `--sort matches|oldest` and the snippets count only what
+   people and agents wrote. Without `--role`, check `match_roles` (trap 2) and
+   use `first_authored_match`/`last_authored_match` as entry indices for step 5
+   — `null` there means only tools and injected text matched.
 5. **Retrieve only what you need.** Read a window with `get ID --entries A:B`,
    `--tail N` or `--head N`, or `--brief` for the usual pair — what it was
    asked to do and where it got to — in one read. To read one voice, filter by
@@ -140,6 +147,7 @@ where they disagree, `--help` describes the binary you are actually running.
 | Alternate phrasings, one scan | `session-browser search "phrase a" "phrase b" --mode ids` |
 | Find and inspect a rare phrase in one scan | `session-browser search "rare phrase" --mode snippets --context 120 --limit 5` |
 | Rank by hit count, not recency | add `--sort matches` |
+| Where it was said, not where it was quoted | add `--role user,assistant` (with `--sort oldest` for when it was first said) |
 | Read the matched region | `session-browser get ID --entries 38:60` |
 | What was asked for, and how it ended | `session-browser get ID --brief` |
 | Either half on its own | `--role user`, or `--role assistant --tail 20` |
@@ -149,7 +157,7 @@ where they disagree, `--help` describes the binary you are actually running.
 | Drop harness/scratch noise | `--exclude-cwd /private/tmp/` (repeatable, applied before `--limit`) |
 | A stable snapshot while other agents are working | add `--until -30m` |
 | Every match, not the first N | omit `--limit` entirely — it is unbounded by default |
-| Who said it, without reading snippets | `match_roles` on each snippets result |
+| Who said it, without reading snippets | `match_roles` on each result |
 
 A canonical id (`claude:76458688-…`, copyable from the TUI with `i`) goes
 straight to `get ID` — no `list`/`search` first. A unique id *prefix* resolves

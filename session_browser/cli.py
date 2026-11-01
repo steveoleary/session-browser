@@ -237,6 +237,11 @@ count, summing to match_count, never capped by --max-snippets), and
 "first_authored_match"/"last_authored_match" are the entry indices of the
 first and last matching user or assistant entry: null when only tool or
 system text matched.
+With --role, a match counts only if its entry has one of those roles, and
+everything is computed from those matches alone: which sessions are returned
+(before --limit), match_count, match_roles, first/last_match, snippets and
+--sort matches. A summary match is still reported but no longer qualifies a
+session by itself, since a summary has no role. "roles" echoes the flag.
 With --output-dir, stdout is artifact_confirmation and manifest.json uses the
 artifact_manifest envelope.
 """.format(
@@ -251,7 +256,10 @@ artifact_manifest envelope.
         "appends a [summary match] column.",
     ),
     keys=_json_key_contract(
-        ("envelope", ("query", "mode", "filters", "results", "skipped", "warnings")),
+        (
+            "envelope",
+            ("query", "mode", "filters", "roles", "results", "skipped", "warnings"),
+        ),
         ("filters", _FILTER_KEYS),
         ("result", _SEARCH_RESULT_KEYS),
         ("snippet", ("role", "entry_index", "query", "text")),
@@ -267,6 +275,7 @@ artifact_manifest envelope.
                 "query",
                 "mode",
                 "filters",
+                "roles",
                 "generated_at",
                 "results",
                 "skipped",
@@ -541,6 +550,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--match-all",
         action="store_true",
         help="with multiple phrases, keep only sessions that contain every phrase",
+    )
+    p_search.add_argument(
+        "--role",
+        action="append",
+        metavar="ROLE[,ROLE]",
+        help="count only matches in entries with these roles (repeatable or "
+        "comma-separated): user, assistant, tool, system, or error. "
+        "--role user,assistant keeps what the people and agents in a session "
+        "said and drops text a tool merely printed back. Sessions with no such "
+        "match are dropped before --limit",
     )
     p_search.add_argument(
         "--sort",
@@ -1948,6 +1967,7 @@ def cmd_search(args) -> int:
         raise CliError(
             "--max-snippets must be >= 0 (0 disables the cap)", code="invalid_filter"
         )
+    roles = _parse_roles(getattr(args, "role", None))
     warnings: list[str] = []
     discovered = _discover(args)
     around = _resolve_anchor(discovered, args)
@@ -1955,16 +1975,22 @@ def cmd_search(args) -> int:
     candidates = apply_filters(discovered, args, apply_limit=False, warnings=warnings)
     keep = args.mode == "full"
     results = search_sessions(candidates, queries, keep_entries=keep)
+    if roles is not None:
+        _keep_matches_in_roles(results, set(roles))
     summary_map = {
         canonical_id(r.session): hits
         for r in results
         if not r.unreadable and (hits := _summary_matches(r.session, queries))
     }
+    # A summary has no role, so under --role it is reported but cannot
+    # qualify a session by itself: the flag asks who said it, and a summary
+    # cannot answer that.
+    qualifying_summaries = summary_map if roles is None else {}
     matched = [
         r
         for r in results
         if not r.unreadable
-        and (r.match_count > 0 or canonical_id(r.session) in summary_map)
+        and (r.match_count > 0 or canonical_id(r.session) in qualifying_summaries)
     ]
     skipped = [r for r in results if r.unreadable]
     for r in matched:
@@ -1979,7 +2005,10 @@ def cmd_search(args) -> int:
             for r in matched
             if (
                 {m.query.casefold() for m in r.matches}
-                | {q.casefold() for q in summary_map.get(canonical_id(r.session), [])}
+                | {
+                    q.casefold()
+                    for q in qualifying_summaries.get(canonical_id(r.session), [])
+                }
             )
             >= wanted
         ]
@@ -2024,6 +2053,26 @@ def cmd_search(args) -> int:
     return 0
 
 
+def _keep_matches_in_roles(results, roles: set[str]) -> None:
+    """Narrow every result's matches to entries of *roles*, in place.
+
+    Everything downstream reads ``matches`` and ``match_count``, so once this
+    has run, selection, --sort matches, first/last_match, match_roles and the
+    snippets all count only those entries without each having to be told.
+    Tool output dominates raw hits -- agents re-reading a README, a tracker
+    listing -- so without this the most-QUOTED session ranked first and
+    --sort oldest found the earliest quote: in one run, a pyproject.toml read
+    answered "the earliest session mentioning" a project.
+
+    Free: search parses every candidate and keeps every match whatever the
+    mode, so the roles are already known and nothing is read again.
+    """
+    for r in results:
+        if r.matches:
+            r.matches = [m for m in r.matches if entry_matches_roles(m.entry, roles)]
+            r.match_count = sum(len(m.offsets) for m in r.matches)
+
+
 def _write_search_artifacts(
     args, matched, skipped, warnings=None, *, anchor_ts=None, summary_map=None
 ) -> int:
@@ -2049,6 +2098,7 @@ def _write_search_artifacts(
         "query": _query_value(args),
         "mode": args.mode,
         "filters": _filters_dict(args),
+        **_roles_echo(args),
         "generated_at": datetime.now(UTC).isoformat(),
         "results": items,
     }
@@ -2089,6 +2139,15 @@ def _write_search_artifacts(
     else:
         print(f"wrote {len(planned)} file(s) to {out_dir} (manifest: {manifest_path})")
     return 0
+
+
+def _roles_echo(args) -> dict:
+    """{"roles": [...]} when search was narrowed with --role, else {}.
+
+    Its own envelope key, as on `get`, rather than a member of "filters":
+    that block is shared with stats, which has no roles to report."""
+    roles = _parse_roles(getattr(args, "role", None))
+    return {"roles": roles} if roles is not None else {}
 
 
 def _filters_dict(args) -> dict:
@@ -2222,6 +2281,7 @@ def _search_payload(
         "query": _query_value(args),
         "mode": args.mode,
         "filters": _filters_dict(args),
+        **_roles_echo(args),
         "results": [
             _result_item(
                 args,

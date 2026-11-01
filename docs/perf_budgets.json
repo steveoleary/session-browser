@@ -3,16 +3,16 @@
   "_blessed": {
     "date": "2026-11-01",
     "python": "3.14",
-    "moved": {
-      "cli.list.codex_db_stale.corpus_bytes_read": "1739487 -> 1416620 (-18.6%)",
-      "cli.list.codex_db_stale.corpus_file_opens": "667 -> 547 (-18.0%)"
-    },
-    "added": []
+    "moved": {},
+    "added": [
+      "cli.search.rare.role"
+    ]
   },
   "guards": {
     "cli.search.absent": "A term in no session must cost zero canonical parses: the prefilter, not the parser, answers a miss.",
     "cli.search.rare": "The prefilter must rule out the corpus and leave only genuine candidates to parse. This is the number that grows to the whole corpus if the native scan is dropped.",
     "cli.search.rare.no_rg": "Same, with ripgrep unavailable: the in-process byte prefilter must still read each candidate file exactly once, not once to partition and again to parse.",
+    "cli.search.rare.role": "--role narrows matches search already holds, so every counter must equal cli.search.rare's. A role filter that re-read a transcript to learn its roles, or that skipped the prefilter to classify candidates first, shows here as a rise over it.",
     "cli.search.common": "The unavoidable upper bound -- a term in every session. Nothing may read the corpus more than once even when nothing is skipped.",
     "cli.search.claude": "Provider scoping must confine the work to that provider: no SQLite connection is opened when opencode was not asked for.",
     "cli.search.opencode": "The thin raw-part scan must rule sessions out before the ordered join, so only survivors reach a canonical parse.",
@@ -234,6 +234,20 @@
       "transcripts_parsed": 8,
       "prefilter_file_scans": 278,
       "rg_subprocess_calls": 0,
+      "sqlite_connections": 3,
+      "sqlite_statements": 4,
+      "opencode_sessions_parsed": 1,
+      "process_pool_sessions": 0,
+      "progress_callbacks": 0,
+      "row_tick_wrappers": 0,
+      "zst_decompressions": 0
+    },
+    "cli.search.rare.role": {
+      "corpus_bytes_read": 1206447,
+      "corpus_file_opens": 502,
+      "transcripts_parsed": 8,
+      "prefilter_file_scans": 0,
+      "rg_subprocess_calls": 2,
       "sqlite_connections": 3,
       "sqlite_statements": 4,
       "opencode_sessions_parsed": 1,

@@ -344,6 +344,7 @@ class TestHelpOutputContracts:
                 "1w",
             ),
             ("search", "wombat", "--cwd", "projAA"),
+            ("search", "wombat", "--role", "user"),
         ):
             code, out, _ = cli(*argv)
             assert code == 0
@@ -354,6 +355,7 @@ class TestHelpOutputContracts:
         for name, argv in (
             ("full", ("search", "quokka", "--mode", "full")),
             ("warning", ("search", "wombat", "--cwd", "projAA")),
+            ("roles", ("search", "wombat", "--role", "user", "--mode", "ids")),
         ):
             out_dir = tmp_path / name
             code, out, _ = cli(*argv, "--output-dir", str(out_dir))
@@ -2964,6 +2966,170 @@ class TestCodexForkLineage:
         payload = json.loads(out)
         assert payload["forked_from"] == {"id": "codex:src1", "entries": None}
         assert any("not on this machine" in w for w in payload["warnings"])
+
+
+class TestSearchRole:
+    """`search --role` makes the roles of matching entries decide which
+    sessions come back and in what order, not merely report them. In a
+    dogfood run, tool output dominated hits: the top "adversarial review"
+    result was a README read, and the "earliest session mentioning" a
+    project was a pyproject.toml read."""
+
+    WORD = "numbat"
+
+    @pytest.fixture
+    def role_cli(self, monkeypatch, capsys, tmp_path):
+        def user(text):
+            return {"type": "user", "message": {"content": text}}
+
+        def assistant(text):
+            return {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": text}]},
+            }
+
+        def tool_read(text):
+            return {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t", "content": text}
+                    ]
+                },
+            }
+
+        w = self.WORD
+        transcripts = {
+            # The oldest, and the most hits -- every one of them a file
+            # being read back. What --sort oldest/matches found before.
+            "quoter": [
+                user("read the docs"),
+                tool_read(f"{w} {w} {w} {w} {w}"),
+                assistant("done"),
+            ],
+            # Where somebody actually said it.
+            "decider": [
+                user(f"should the {w} index be a count?"),
+                assistant(f"yes: count the {w}, do not time it"),
+                tool_read(w),
+            ],
+            # The agent alone said it, most recently.
+            "echo": [user("carry on"), assistant(f"the {w} rule holds")],
+        }
+        updated = {
+            "quoter": "2026-06-01T10:00:00+00:00",
+            "decider": "2026-06-02T10:00:00+00:00",
+            "echo": "2026-06-03T10:00:00+00:00",
+        }
+        sessions = []
+        for sid, records in transcripts.items():
+            f = tmp_path / f"{sid}.jsonl"
+            f.write_text("".join(json.dumps(r) + "\n" for r in records))
+            sessions.append(
+                Session(
+                    id=sid,
+                    provider="claude",
+                    summary=sid,
+                    updated_at=updated[sid],
+                    content_path=str(f),
+                )
+            )
+        # A session whose summary names the word and whose transcript does
+        # not: it can match by summary alone.
+        f = tmp_path / "titled.jsonl"
+        f.write_text(json.dumps(user("unrelated")) + "\n")
+        sessions.append(
+            Session(
+                id="titled",
+                provider="claude",
+                summary=f"{w} planning",
+                updated_at="2026-05-01T10:00:00+00:00",
+                content_path=str(f),
+            )
+        )
+
+        def run(*argv: str):
+            monkeypatch.setattr(
+                "session_browser.cli.discover_all", lambda *a, **k: sessions
+            )
+            code = run_cli(list(argv))
+            captured = capsys.readouterr()
+            return code, captured.out, captured.err
+
+        return run
+
+    def _results(self, role_cli, *argv):
+        code, out, err = role_cli("search", self.WORD, *argv)
+        assert code == 0, err
+        return json.loads(out)
+
+    def test_without_role_the_quote_wins(self, role_cli):
+        """The baseline the flag exists to change."""
+        data = self._results(role_cli, "--mode", "ids", "--sort", "matches")
+        assert data["results"][0]["id"] == "claude:quoter"
+        assert "roles" not in data
+
+    def test_authored_roles_drop_sessions_that_only_quote(self, role_cli):
+        data = self._results(
+            role_cli, "--role", "user,assistant", "--mode", "ids", "--sort", "matches"
+        )
+        assert data["roles"] == ["user", "assistant"]
+        rows = {r["id"]: r for r in data["results"]}
+        assert list(rows) == ["claude:decider", "claude:echo"]
+        decider = rows["claude:decider"]
+        # Counts are of the kept roles only: the tool read at entry 2 is gone
+        # from match_count, match_roles and the span alike.
+        assert decider["match_count"] == 2
+        assert decider["match_roles"] == {"assistant": 1, "user": 1}
+        assert (decider["first_match"], decider["last_match"]) == (0, 1)
+
+    def test_oldest_finds_the_earliest_saying_not_the_earliest_quote(self, role_cli):
+        data = self._results(
+            role_cli, "--role", "user,assistant", "--sort", "oldest", "--mode", "ids"
+        )
+        assert data["results"][0]["id"] == "claude:decider"
+
+    def test_role_applies_before_limit(self, role_cli):
+        """The quote would otherwise take the one slot and be filtered out
+        after it, returning nothing."""
+        data = self._results(
+            role_cli,
+            "--role",
+            "user,assistant",
+            "--sort",
+            "oldest",
+            "--limit",
+            "1",
+            "--mode",
+            "ids",
+        )
+        assert [r["id"] for r in data["results"]] == ["claude:decider"]
+
+    def test_user_alone_is_what_the_human_said(self, role_cli):
+        data = self._results(role_cli, "--role", "user")
+        assert [r["id"] for r in data["results"]] == ["claude:decider"]
+        snippets = data["results"][0]["snippets"]
+        assert [s["role"] for s in snippets] == ["user"]
+
+    def test_tool_role_finds_the_quotes(self, role_cli):
+        data = self._results(role_cli, "--role", "tool", "--mode", "ids")
+        assert [r["id"] for r in data["results"]] == [
+            "claude:decider",
+            "claude:quoter",
+        ]
+
+    def test_a_summary_alone_does_not_qualify(self, role_cli):
+        """A summary has no role, so under --role it cannot say who said
+        anything. Without --role it still qualifies, as before."""
+        plain = self._results(role_cli, "--mode", "ids")
+        assert "claude:titled" in [r["id"] for r in plain["results"]]
+        roled = self._results(role_cli, "--role", "user", "--mode", "ids")
+        assert "claude:titled" not in [r["id"] for r in roled["results"]]
+
+    def test_unknown_role_is_refused(self, role_cli):
+        code, out, err = role_cli("search", self.WORD, "--role", "human")
+        assert code == 1 and out == ""
+        assert json.loads(err)["error"]["code"] == "invalid_role"
 
 
 class TestSearchTriageSignals:
