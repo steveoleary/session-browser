@@ -294,24 +294,22 @@ def scan_codex() -> list[Session]:
 
     Codex keeps its own session index in ``~/.codex/state_*.sqlite``, one
     ``threads`` row per rollout. Reading it replaces hundreds of file opens
-    with one query. The file scan remains the fallback for when the index is
-    absent, renamed by an upgrade, locked, or lagging a just-written rollout
-    -- the DB must never make a session that exists on disk invisible, so the
-    DB path is wrapped broadly enough that any failure of it degrades to the
-    file scan rather than to zero sessions.
+    with one query. The whole-tree file scan remains the fallback for when the
+    index is absent, renamed by an upgrade, locked or unreadable -- the DB must
+    never make a session that exists on disk invisible, so the DB path is
+    wrapped broadly enough that any failure of it degrades to the file scan
+    rather than to zero sessions. An index that is merely incomplete costs
+    only the files it lacks; see ``_codex_index_gap``.
     """
     db_path = _codex_db_path()
     if db_path is not None:
         try:
-            sessions = _scan_codex_db(db_path)
+            return _scan_codex_db(db_path)
         except Exception as exc:
             # Deliberately broad: the promise above is absolute, and an
             # unexpected exception (a schema surprise, a sqlite3.Warning,
             # anything) must cost the fast path, not the sessions.
             log.warning("codex discovery via %s failed: %s", db_path.name, exc)
-        else:
-            if sessions is not None:
-                return sessions
     return _scan_codex_files()
 
 
@@ -359,16 +357,17 @@ def _warn_codex_fallback_once(message: str) -> None:
         log.warning(message)
 
 
-def _scan_codex_db(db_path: Path) -> list[Session] | None:
+def _scan_codex_db(db_path: Path) -> list[Session]:
     """Build sessions from Codex's own ``threads`` index.
 
-    Returns None when a rollout on disk is missing from the index, so the
-    caller falls back to the file scan: Codex writes the rollout file before
-    it records the thread, and a file the index has never heard of must not
-    be dropped by discovery. The check is one-directional coverage, not
-    identity -- a row whose file is gone is simply dropped, since the file
-    scan could not have found it either, and an archived thread whose file
-    remains in the tree costs the filter, not the fast path.
+    A rollout on disk that the index has no row for is read from the file
+    instead (see ``_codex_index_gap``): Codex writes the rollout before it
+    records the thread, and some it never records at all, and a file the index
+    has never heard of must not be dropped by discovery. The check is
+    one-directional coverage, not identity -- a row whose file is gone is
+    simply dropped, since the file scan could not have found it either, and an
+    archived thread whose file remains in the tree costs the filter, not the
+    fast path.
 
     The columns this query depends on (``first_user_message``,
     ``created_at_ms``, ``updated_at_ms``) are migration-added to ``threads``.
@@ -471,14 +470,6 @@ def _scan_codex_db(db_path: Path) -> list[Session] | None:
         os.path.realpath(r["rollout_path"]): r for r in rows if r["rollout_path"]
     }
     missing = file_paths - rows_by_path.keys()
-    if missing:
-        # The fast path turning itself off, and the repo treats retrieval
-        # speed as a gate. A silent fallback reads as "the tool got slow for
-        # no reason"; deduped so a persistent gap is said once, not shouted.
-        _warn_codex_fallback_once(
-            f"codex index is missing {len(missing)} rollout file(s); using file scan"
-        )
-        return None
     # The index goes on naming a rollout by its .jsonl path after Codex has
     # compressed it, so the row is matched on that spelling and then pointed
     # at whichever file is actually there.
@@ -493,7 +484,48 @@ def _scan_codex_db(db_path: Path) -> list[Session] | None:
         if actual.name.endswith(compressed.SUFFIX):
             s.content_path = r["rollout_path"] + compressed.SUFFIX
         sessions.append(s)
+    if missing:
+        sessions.extend(_codex_index_gap(sessions, [on_disk[p] for p in missing]))
     return sessions
+
+
+# Above this share of the tree unindexed, reading the gap from disk stops
+# being cheap: at the whole tree it IS the full file scan, ~1.5 s on a real
+# 1,447-rollout corpus against 86 ms for the index path.
+_CODEX_GAP_WARN_SHARE = 0.1
+
+
+def _codex_index_gap(indexed: list[Session], unindexed: list[Path]) -> list[Session]:
+    """Sessions for the rollouts Codex's index has no row for, read from disk.
+
+    Two kinds of gap reach here. A just-written rollout lags its row by a
+    moment, and Codex also leaves some rollouts out for good: on one real
+    machine 5 of 1,447 had never been indexed, the oldest for six weeks.
+    Answering either by file-scanning the WHOLE tree, as this once did, put
+    ~1.5 s on every call for as long as the gap lasted, which for the
+    permanent kind is forever -- and no warning reads as that.
+
+    Reading only the gap keeps the guarantee that an unindexed file is never
+    dropped, at the cost of those few files. It is said once per process,
+    quietly unless the gap is large enough to be slow in its own right, since
+    then the index is probably broken rather than lagging.
+    """
+    known = {s.id for s in indexed}
+    found = [
+        s for s in _codex_sessions_from_files(sorted(unindexed)) if s.id not in known
+    ]
+    share = len(unindexed) / (len(indexed) + len(unindexed))
+    names = ", ".join(p.name for p in sorted(unindexed)[:3])
+    more = f" and {len(unindexed) - 3} more" if len(unindexed) > 3 else ""
+    message = (
+        f"codex index has no row for {len(unindexed)} rollout file(s), read "
+        f"from disk instead: {names}{more}"
+    )
+    if share > _CODEX_GAP_WARN_SHARE:
+        _warn_codex_fallback_once(f"{message} ({share:.0%} of the tree)")
+    else:
+        log.debug(message)
+    return found
 
 
 def _codex_rollout_files() -> dict[Path, Path]:
@@ -590,71 +622,81 @@ def _codex_subagent(payload: dict) -> tuple[str, str]:
 
 def _scan_codex_files() -> list[Session]:
     """Discover Codex CLI sessions from dated JSONL tree."""
-    sessions: list[Session] = []
     root = Path.home() / ".codex" / "sessions"
     if not root.is_dir():
-        return sessions
-    for f in _codex_rollout_files().values():
+        return []
+    return _codex_sessions_from_files(_codex_rollout_files().values())
+
+
+def _codex_sessions_from_files(files: Iterable[Path]) -> list[Session]:
+    """One Session per readable rollout in *files*, each read from disk.
+
+    The whole of the file scan, and also how the index path covers the few
+    rollouts Codex never indexed. A file that cannot be read is logged and
+    skipped rather than allowed to cost the others."""
+    sessions: list[Session] = []
+    for f in files:
         try:
-            readable = compressed.readable(f)
-            with open(readable) as fh:
-                first_line = fh.readline().strip()
-            if not first_line:
-                continue
-            obj = json.loads(first_line)
-            if obj.get("type") != "session_meta":
-                continue
-            payload = obj.get("payload", {})
-            # payload["id"], never payload["session_id"] -- they are different
-            # fields and on a subagent rollout the latter is the PARENT's uuid.
-            # Measured on this machine 2026-09-08: of 74 Codex subagent
-            # rollouts, 71 had session_id != id, and in every one session_id
-            # named the parent. Reading it would file a child under its
-            # parent's identity, so `codex resume` on the child would resume
-            # the parent and search would report one session twice. The same
-            # rule holds for the DB fast path, which selects threads.id.
-            # agent-sessions shipped that bug and documents the fix; we are
-            # correct here by one identifier, which is why this says so.
-            sid = payload.get("id", f.stem)
-            kind, parent_id = _codex_subagent(payload)
-            cwd = payload.get("cwd", "")
-            git = payload.get("git", {})
-            branch = git.get("branch", "")
-            origin_url = git.get("repository_url", "")
-            ts = payload.get("timestamp", obj.get("timestamp", ""))
-            if "subagent_history_start_ordinal" in payload:
-                # A child whose rollout opens with its spawner's history: the
-                # first user message in the file is the ROOT's prompt, not
-                # this session's. Named as the index names it instead.
-                summary = _codex_child_label(payload)
-            else:
-                summary = _codex_first_user_message(readable)
-            sessions.append(
-                Session(
-                    id=sid,
-                    provider="codex",
-                    summary=summary,
-                    cwd=cwd,
-                    branch=branch,
-                    repository=(
-                        _codex_repo_name(cwd, origin_url)
-                        if origin_url
-                        else _repo_name(cwd)
-                    ),
-                    created_at=ts,
-                    updated_at=(
-                        _last_activity_iso(readable, "codex")
-                        or ts
-                        or _file_mtime_iso(f)
-                    ),
-                    content_path=str(f),
-                    parent_id=parent_id,
-                    subagent_kind=kind,
-                )
-            )
+            session = _codex_session_from_file(f)
         except Exception as exc:
             log.warning("Skipping codex session %s: %s", f.name, exc)
+            continue
+        if session is not None:
+            sessions.append(session)
     return sessions
+
+
+def _codex_session_from_file(f: Path) -> Session | None:
+    """A Session from one rollout's own lines, or None if it opens with no
+    ``session_meta`` record."""
+    readable = compressed.readable(f)
+    with open(readable) as fh:
+        first_line = fh.readline().strip()
+    if not first_line:
+        return None
+    obj = json.loads(first_line)
+    if obj.get("type") != "session_meta":
+        return None
+    payload = obj.get("payload", {})
+    # payload["id"], never payload["session_id"] -- they are different
+    # fields and on a subagent rollout the latter is the PARENT's uuid.
+    # Measured on this machine 2026-09-08: of 74 Codex subagent
+    # rollouts, 71 had session_id != id, and in every one session_id
+    # named the parent. Reading it would file a child under its
+    # parent's identity, so `codex resume` on the child would resume
+    # the parent and search would report one session twice. The same
+    # rule holds for the DB fast path, which selects threads.id.
+    # agent-sessions shipped that bug and documents the fix; we are
+    # correct here by one identifier, which is why this says so.
+    sid = payload.get("id", f.stem)
+    kind, parent_id = _codex_subagent(payload)
+    cwd = payload.get("cwd", "")
+    git = payload.get("git", {})
+    branch = git.get("branch", "")
+    origin_url = git.get("repository_url", "")
+    ts = payload.get("timestamp", obj.get("timestamp", ""))
+    if "subagent_history_start_ordinal" in payload:
+        # A child whose rollout opens with its spawner's history: the
+        # first user message in the file is the ROOT's prompt, not
+        # this session's. Named as the index names it instead.
+        summary = _codex_child_label(payload)
+    else:
+        summary = _codex_first_user_message(readable)
+    return Session(
+        id=sid,
+        provider="codex",
+        summary=summary,
+        cwd=cwd,
+        branch=branch,
+        repository=(
+            _codex_repo_name(cwd, origin_url) if origin_url else _repo_name(cwd)
+        ),
+        created_at=ts,
+        updated_at=(_last_activity_iso(readable, "codex") or ts or _file_mtime_iso(f)),
+        content_path=str(f),
+        parent_id=parent_id,
+        subagent_kind=kind,
+    )
 
 
 # The Codex record vocabulary is shared by this module's summary/activity

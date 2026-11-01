@@ -3,10 +3,11 @@
   "_blessed": {
     "date": "2026-11-01",
     "python": "3.14",
-    "moved": {},
-    "added": [
-      "tui.search.unordered"
-    ]
+    "moved": {
+      "cli.list.codex_db_stale.corpus_bytes_read": "1739487 -> 1416620 (-18.6%)",
+      "cli.list.codex_db_stale.corpus_file_opens": "667 -> 547 (-18.0%)"
+    },
+    "added": []
   },
   "guards": {
     "cli.search.absent": "A term in no session must cost zero canonical parses: the prefilter, not the parser, answers a miss.",
@@ -21,7 +22,7 @@
     "cli.list": "Listing is metadata only. It must never parse a transcript, and its read volume must stay bounded by the discovery window rather than by session length.",
     "cli.list.preview": "Ending previews must reuse the listing's count scan, limited to the returned sessions, rather than load transcripts again.",
     "cli.list.no_codex_db": "The file-scan fallback is the safety net for a missing or stale Codex index. It must stay budgeted so a regression in it cannot hide behind the DB fast path. It is also the only workload that reads rollout files, so it is where a Codex vocabulary the head or tail scan no longer recognises shows up -- as a rise, since finding no turn means reading the whole file to discover it.",
-    "cli.list.codex_db_stale": "The disagreement fallback pays the file scan *plus* the failed DB query (extra sqlite_statement). Budgeted so a change cannot make the slowest path silently pay more.",
+    "cli.list.codex_db_stale": "A Codex index lacking one rollout must cost that rollout's read and no more: corpus_file_opens is cli.list's plus one file's worth. Codex leaves some rollouts unindexed for good, and when a gap fell back to scanning the whole tree it put ~1.5 s on every call on a real machine. If this rises to cli.list.no_codex_db's opens, the whole-tree fallback is back.",
     "cli.stats": "Statistics come from discovery metadata alone; no transcript may be parsed to produce them.",
     "cli.get": "Retrieving one session must read one transcript, on top of the discovery pass that located it.",
     "cli.get.recent": "A recent conversation and its text budget must use one transcript read, not separate user and assistant retrievals.",
@@ -74,8 +75,8 @@
       "zst_decompressions": 0
     },
     "cli.list.codex_db_stale": {
-      "corpus_bytes_read": 1739487,
-      "corpus_file_opens": 667,
+      "corpus_bytes_read": 1416620,
+      "corpus_file_opens": 547,
       "transcripts_parsed": 0,
       "prefilter_file_scans": 0,
       "rg_subprocess_calls": 0,

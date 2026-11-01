@@ -769,11 +769,17 @@ class TestScanCodexDb:
         assert sessions[0].id == "cx-1"
         assert sessions[0].summary == "hello"
 
-    def test_falls_back_when_index_lags_a_just_written_rollout(self, tmp_path):
-        """A rollout file with no matching row yet must not be invisible."""
+    def test_unindexed_rollout_is_read_from_disk_alone(self, tmp_path):
+        """A rollout file with no matching row must not be invisible -- and
+        must cost only its own read, not a file scan of the whole tree. Codex
+        leaves some rollouts out of its index for good, and treating that as
+        "fall back to the file scan" put ~1.5 s on every call on a real
+        machine for as long as the gap lasted."""
         sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
         self._write_rollout(sessions_dir, "cx-1", summary="hello", day="10")
-        self._write_rollout(sessions_dir, "cx-2", summary="newest", day="11")
+        unindexed = self._write_rollout(
+            sessions_dir, "cx-2", summary="newest", day="11"
+        )
         self._write_db(
             tmp_path,
             [
@@ -782,17 +788,53 @@ class TestScanCodexDb:
                     "rollout_path": str(
                         sessions_dir / "rollout-2026-04-10T13-00-00-cx-1.jsonl"
                     ),
-                    "summary": "hello",
+                    "summary": "hello from the index",
                     "created_ms": 1775826000000,
                     "updated_ms": 1775826005000,
                 }
             ],
         )
 
+        from session_browser import discovery
+
+        read: list[str] = []
+        real = discovery._codex_session_from_file
+
+        def recording(f):
+            read.append(f.name)
+            return real(f)
+
+        with (
+            patch("session_browser.discovery.Path.home", return_value=tmp_path),
+            patch.object(discovery, "_codex_session_from_file", recording),
+        ):
+            sessions = scan_codex()
+
+        by_id = {s.id: s for s in sessions}
+        assert set(by_id) == {"cx-1", "cx-2"}
+        # The indexed session still came from its row, so the fast path ran...
+        assert by_id["cx-1"].summary == "hello from the index"
+        # ...and the unindexed one from its own file, the only one opened.
+        assert by_id["cx-2"].summary == "newest"
+        assert by_id["cx-2"].content_path == str(unindexed)
+        assert read == [unindexed.name]
+
+    def test_unindexed_twin_of_an_indexed_thread_is_not_listed_twice(self, tmp_path):
+        """A file the index has no row for, carrying a thread id the index
+        does have under another path, is the same session: the row wins."""
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        f = self._write_rollout(sessions_dir, "cx-1", summary="hello", day="10")
+        twin = sessions_dir / "rollout-2026-04-12T13-00-00-cx-1.jsonl"
+        twin.write_bytes(f.read_bytes())
+        self._write_db(
+            tmp_path,
+            [{"id": "cx-1", "rollout_path": str(f), "summary": "from the index"}],
+        )
+
         with patch("session_browser.discovery.Path.home", return_value=tmp_path):
             sessions = scan_codex()
 
-        assert {s.id for s in sessions} == {"cx-1", "cx-2"}
+        assert [(s.id, s.summary) for s in sessions] == [("cx-1", "from the index")]
 
     def test_phantom_row_is_dropped_without_fallback(self, tmp_path):
         """A row whose rollout file is gone must not invent a session -- and
@@ -970,12 +1012,12 @@ class TestScanCodexDb:
         assert [s.id for s in sessions] == ["cx-1"]
         assert sessions[0].summary == "live from db"
 
-    def test_fallback_warns_once(self, tmp_path, caplog):
-        """The one user-visible signal that the fast path turned off must
-        actually be emitted -- and only once per message per process."""
+    def test_large_index_gap_warns_once(self, tmp_path, caplog, monkeypatch):
+        """An index missing a large share of the tree is probably broken, and
+        reading that share from disk is slow in its own right: said, and only
+        once per message per process."""
         from session_browser import discovery
 
-        monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(discovery, "_warned_codex_fallbacks", set())
         sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
         self._write_rollout(sessions_dir, "cx-1", summary="hello", day="10")
@@ -988,9 +1030,34 @@ class TestScanCodexDb:
             assert {s.id for s in scan_codex()} == {"cx-1"}
             assert {s.id for s in scan_codex()} == {"cx-1"}
 
-        misses = [r for r in caplog.records if "codex index is missing" in r.message]
-        assert len(misses) == 1
-        monkeypatch.undo()
+        gaps = [r for r in caplog.records if "codex index has no row" in r.message]
+        assert len(gaps) == 1
+        assert "rollout-2026-04-10T13-00-00-cx-1.jsonl" in gaps[0].message
+        assert "100% of the tree" in gaps[0].message
+
+    def test_small_index_gap_is_quiet(self, tmp_path, caplog, monkeypatch):
+        """A handful of unindexed rollouts costs a handful of reads, so it is
+        not worth a line on stderr: four fresh agents in a row read the old
+        per-call warning as noise and were right to."""
+        from session_browser import discovery
+
+        monkeypatch.setattr(discovery, "_warned_codex_fallbacks", set())
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        rows = []
+        for i in range(10):
+            sid = f"cx-{i}"
+            f = self._write_rollout(sessions_dir, sid, summary="hi", day=f"{i + 10}")
+            rows.append({"id": sid, "rollout_path": str(f), "summary": "hi"})
+        self._write_rollout(sessions_dir, "cx-new", summary="newest", day="28")
+        self._write_db(tmp_path, rows)
+
+        with (
+            caplog.at_level("WARNING"),
+            patch("session_browser.discovery.Path.home", return_value=tmp_path),
+        ):
+            assert len(scan_codex()) == 11
+
+        assert not [r for r in caplog.records if "codex index" in r.message]
 
     def test_db_and_file_paths_agree_on_stable_fields(self, tmp_path):
         """The two paths must converge on the fields where agreement is

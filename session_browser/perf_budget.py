@@ -946,9 +946,10 @@ def _without_codex_db(run: Callable[[], None]) -> None:
 def _with_extra_codex_rollout(run: Callable[[], None]) -> None:
     """Run *run* with one unindexed rollout added, exercising the stale path.
 
-    The index-present-but-disagreeing fallback is the one that fires in real
-    life (archive, backfill, a just-written session), and it pays the file
-    scan *plus* the failed DB query. Removed afterwards even on failure."""
+    An index present but incomplete is the case that fires in real life (a
+    just-written session, or one Codex never indexed at all), and the extra
+    file is the only one the index path should have to read. Removed
+    afterwards even on failure."""
     home = _corpus_home_guard()
     extra = (
         home
@@ -1151,9 +1152,12 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
         ),
         Workload(
             "cli.list.codex_db_stale",
-            "The disagreement fallback pays the file scan *plus* the failed "
-            "DB query (extra sqlite_statement). Budgeted so a change cannot "
-            "make the slowest path silently pay more.",
+            "A Codex index lacking one rollout must cost that rollout's read "
+            "and no more: corpus_file_opens is cli.list's plus one file's "
+            "worth. Codex leaves some rollouts unindexed for good, and when a "
+            "gap fell back to scanning the whole tree it put ~1.5 s on every "
+            "call on a real machine. If this rises to cli.list.no_codex_db's "
+            "opens, the whole-tree fallback is back.",
             lambda: _with_extra_codex_rollout(lambda: _cli("list", "--limit", "50")),
         ),
         Workload(
