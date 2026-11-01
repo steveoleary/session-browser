@@ -89,7 +89,12 @@ where they disagree, `--help` describes the binary you are actually running.
    - **Other agents are writing to the corpus while you read it.** Hit counts
      and roles move under you, and a sibling answering your question can put
      its answer into your results. `--until -30m` gives a stable snapshot;
-     without one, a measurement is not reproducible even by you.
+     without one, a measurement is not reproducible even by you. A Claude row
+     with `live: true` is still being written, so its counts and ending are
+     as of your read.
+   - **One conversation can be two files.** A Claude session resumed into a
+     new one copies its history there: `continued_in`/`continued_from` link
+     the pair. Read the newer one and count them once.
 
    Then: never dismiss a session from its `summary` alone
    — the summary is often just the first user message, so a bare `/model` or

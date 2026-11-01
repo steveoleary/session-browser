@@ -294,6 +294,9 @@ def session_to_dict(s: Session) -> dict:
         # to prevent.
         "parent_id": s.parent_id,
         "subagent_kind": s.subagent_kind,
+        "continued_in": s.continued_in,
+        "continued_from": s.continued_from,
+        "live": s.live,
     }
 
 

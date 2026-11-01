@@ -106,6 +106,98 @@ class TestSessionModel:
         assert s.matches("")  # empty string matches everything
 
 
+class TestClaudeContinuationAndLiveness:
+    """One conversation resumed into a new file is linked both ways, and a
+    session a running Claude Code process holds says so."""
+
+    @staticmethod
+    def _transcript(path, sid, *, tail=()):
+        records = [
+            {
+                "type": "user",
+                "sessionId": sid,
+                "uuid": "u-1",
+                "message": {"role": "user", "content": "plan the blockside work"},
+                "cwd": "/Users/test/blockside",
+                "timestamp": "2026-10-15T18:57:20Z",
+            },
+            {
+                "type": "assistant",
+                "sessionId": sid,
+                "message": {"content": [{"type": "text", "text": "ok"}]},
+                "timestamp": "2026-10-15T19:00:00Z",
+            },
+            *tail,
+        ]
+        path.write_text("".join(json.dumps(r) + "\n" for r in records))
+
+    def test_a_continued_session_is_linked_both_ways(self, tmp_path):
+        """The record exists only at the end of the OLD file, after its last
+        turn. The new file -- a copy of the old history plus more -- learns
+        its predecessor by inversion. A successor no longer on disk is still
+        named, with nothing to point back."""
+        project = tmp_path / ".claude" / "projects" / "-Users-test-blockside"
+        project.mkdir(parents=True)
+
+        def continued(target):
+            return {
+                "type": "continued-in",
+                "timestamp": "2026-10-15T21:52:42Z",
+                "sessionId": "x",
+                "continuedInSessionId": target,
+            }
+
+        self._transcript(project / "old.jsonl", "old", tail=[continued("new")])
+        self._transcript(project / "new.jsonl", "new")
+        self._transcript(project / "orphan.jsonl", "orphan", tail=[continued("gone")])
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            by_id = {s.id: s for s in scan_claude()}
+
+        links = {sid: (s.continued_in, s.continued_from) for sid, s in by_id.items()}
+        assert links == {
+            "old": ("new", None),
+            "new": (None, "old"),
+            "orphan": ("gone", None),
+        }
+        # Still the last TURN, not the continued-in record after it.
+        assert by_id["old"].updated_at == "2026-10-15T19:00:00Z"
+
+    def test_live_comes_from_the_running_process_registry(self, tmp_path):
+        """~/.claude/sessions/<pid>.json names the session each running
+        process holds. A file left by a process that has gone does not make
+        its session live, and a subagent's liveness is its root's, so it is
+        not claimed either way."""
+        project = tmp_path / ".claude" / "projects" / "-Users-test-blockside"
+        project.mkdir(parents=True)
+        for sid in ("running", "finished", "crashed"):
+            self._transcript(project / f"{sid}.jsonl", sid)
+        sub = project / "running" / "subagents"
+        sub.mkdir(parents=True)
+        self._transcript(sub / "agent-a1.jsonl", "running")
+
+        registry = tmp_path / ".claude" / "sessions"
+        registry.mkdir()
+        (registry / f"{os.getpid()}.json").write_text(
+            json.dumps({"pid": os.getpid(), "sessionId": "running"})
+        )
+        # A pid far above any the OS hands out: its process is gone.
+        (registry / "999999.json").write_text(
+            json.dumps({"pid": 999999, "sessionId": "crashed"})
+        )
+        (registry / "garbage.json").write_text("{not json")
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            live = {s.id: s.live for s in scan_claude()}
+
+        assert live == {
+            "running": True,
+            "finished": False,
+            "crashed": False,
+            "agent-a1": None,
+        }
+
+
 class TestScanClaude:
     def test_scan_claude_sessions(self, tmp_path):
         projects = tmp_path / ".claude" / "projects" / "-Users-test"

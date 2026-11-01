@@ -9,7 +9,7 @@ import re
 import sqlite3
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -57,6 +57,26 @@ class Session:
     # writes it only on assistant records past the head, OpenCode 1.x only
     # per message -- so None is "not known", never "no model".
     model: str | None = None
+    # One conversation in two files. When Claude Code resumes a session into
+    # a new one, it copies the history into the new file and writes a
+    # "continued-in" record at the end of the old one -- the only place the
+    # link exists. continued_in is set on the old session, continued_from on
+    # the new, as raw ids of the same provider, like parent_id. None means no
+    # record of a link, not proof there is none.
+    #
+    # These three are init=False on purpose. A defaulted init=False field is
+    # never assigned in __init__ -- reads fall through to the class attribute
+    # -- so a session that never has one costs nothing to construct. As
+    # ordinary fields they put 6 opcodes on every Session built, which the
+    # loop.codex_db_rows probe caught on a provider that never sets them.
+    continued_in: str | None = field(default=None, init=False)
+    continued_from: str | None = field(default=None, init=False)
+    # True when a running process holds this session, so its transcript may
+    # still grow and any count or ending read from it is as of this read.
+    # False when no running process claims it. None where the provider keeps
+    # no record of its running processes (Codex, OpenCode, Pi) or for a
+    # Claude subagent, whose process is its root's.
+    live: bool | None = field(default=None, init=False)
 
     @property
     def sort_key(self) -> str:
@@ -135,7 +155,59 @@ def scan_claude() -> list[Session]:
                     continue
                 if session is not None:
                     sessions.append(session)
+    _link_claude_continuations(sessions)
+    live = _claude_live_session_ids()
+    for s in sessions:
+        if not s.subagent_kind:
+            s.live = s.id in live
     return sessions
+
+
+def _link_claude_continuations(sessions: list[Session]) -> None:
+    """Set continued_from on each session another one names as continued_in.
+
+    The record exists only in the old file, so the new session learns its
+    predecessor here, by inverting the link over what discovery found. A
+    successor that has aged out of the tree is still named on the old
+    session; it just has nothing to point back."""
+    by_id = {s.id: s for s in sessions if not s.subagent_kind}
+    for s in sessions:
+        if s.continued_in and (successor := by_id.get(s.continued_in)):
+            successor.continued_from = s.id
+
+
+def _claude_live_session_ids() -> set[str]:
+    """Session ids a running Claude Code process holds right now.
+
+    Claude Code keeps one ``~/.claude/sessions/<pid>.json`` per running
+    process, naming the session it is writing, and removes it on exit. A
+    crash can leave one behind, so the pid must also still be running. A few
+    files of a few hundred bytes, read once per discovery."""
+    live: set[str] = set()
+    registry = Path.home() / ".claude" / "sessions"
+    try:
+        entries = list(registry.glob("*.json"))
+    except OSError:
+        return live
+    for f in entries:
+        try:
+            with open(f) as fh:
+                record = json.load(fh)
+            pid, sid = record.get("pid"), record.get("sessionId")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if not isinstance(pid, int) or not isinstance(sid, str) or pid <= 0:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass  # running, under another user
+        except OSError:
+            continue
+        live.add(sid)
+    return live
 
 
 def _claude_subagent_link(f: Path, root_session: str) -> tuple[str, str, str]:
@@ -278,7 +350,11 @@ def _claude_session(
         # The spawner's description is a better label than the brief's first
         # line, which for a subagent is usually boilerplate.
         summary = label[:120] or summary
-    return Session(
+    # The tail read finds the last turn walking backwards, and a
+    # continued-in record is written after it, so the walk passes it first.
+    tail: dict[str, str] = {}
+    last_activity = _last_activity_iso(f, "claude", seen=tail)
+    session = Session(
         id=session_id,
         provider="claude",
         summary=summary,
@@ -286,13 +362,14 @@ def _claude_session(
         branch=branch,
         repository=_repo_name(resolved_cwd),
         created_at=created_at,
-        updated_at=(
-            _last_activity_iso(f, "claude") or created_at or _file_mtime_iso(f)
-        ),
+        updated_at=last_activity or created_at or _file_mtime_iso(f),
         content_path=str(f),
         parent_id=parent_id,
         subagent_kind=subagent_kind,
     )
+    if tail:
+        session.continued_in = tail["continued_in"]
+    return session
 
 
 def scan_codex() -> list[Session]:
@@ -1252,7 +1329,9 @@ def _is_turn(obj: dict, provider: str) -> bool:
     return False
 
 
-def _last_activity_iso(path: Path, provider: str, *, window: int = 16384) -> str:
+def _last_activity_iso(
+    path: Path, provider: str, *, window: int = 16384, seen: dict | None = None
+) -> str:
     """Timestamp of the last genuine conversation turn in a JSONL transcript.
 
     Reads the file tail backwards so a bumped mtime (a read/sync/resume that
@@ -1260,6 +1339,11 @@ def _last_activity_iso(path: Path, provider: str, *, window: int = 16384) -> str
     timestamp) can't masquerade as recent activity. Widens the read window if
     the last turn sits deeper than the initial tail. Returns "" when no
     timestamped turn is found; callers fall back to created_at, then mtime.
+
+    *seen*, when given, collects facts recorded after the last turn, which
+    this walk passes on the way to it: a Claude "continued-in" record lands
+    there as ``seen["continued_in"]``. Records the walk never reaches are not
+    looked for, so this costs no read of its own.
     """
     try:
         size = path.stat().st_size
@@ -1291,6 +1375,10 @@ def _last_activity_iso(path: Path, provider: str, *, window: int = 16384) -> str
             ts = obj.get("timestamp")
             if ts and _is_turn(obj, provider):
                 return ts
+            if seen is not None and obj.get("type") == "continued-in":
+                target = obj.get("continuedInSessionId")
+                if isinstance(target, str) and target:
+                    seen.setdefault("continued_in", target)
         if read >= size:
             return ""  # whole file scanned, no timestamped turn found
         window *= 4  # last turn is deeper than the tail — widen and retry

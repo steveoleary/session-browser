@@ -58,6 +58,9 @@ _SESSION_KEYS = (
     "duration_seconds",
     "parent_id",
     "subagent_kind",
+    "continued_in",
+    "continued_from",
+    "live",
 )
 _ENTRY_KEYS = ("entry_index", "role", "text", "timestamp", "metadata")
 
@@ -119,7 +122,15 @@ _SUBAGENT_CONTRACT = (
     "the kind.\n"
     '"model" is spelled as that tool\'s --model flag takes it, and is null '
     "when it is not\nrecorded where discovery reads: always for Claude and "
-    'OpenCode, so null is\n"not known", never "no model".'
+    'OpenCode, so null is\n"not known", never "no model".\n'
+    '"continued_in"/"continued_from" link one Claude conversation resumed into '
+    "a new\nfile: the new session holds a copy of the old one's history, so "
+    "read the newer\nand treat the pair as one. Raw ids, null when no link is "
+    "recorded.\n"
+    '"live" is true when a running Claude Code process holds the session: its\n'
+    "transcript may still grow, so counts and endings are as of this read. "
+    "null\nwhere the provider records no running processes (Codex, OpenCode, "
+    "Pi) and\nfor Claude subagents."
 )
 
 
