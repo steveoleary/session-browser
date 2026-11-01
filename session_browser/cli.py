@@ -580,7 +580,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="N",
         help="cap snippets per result (default 20; 0 = "
-        "unlimited); omitted snippets are reported "
+        "unlimited); refused with --mode ids, which has none. Omitted "
+        "snippets, and a passage repeated within one entry, are counted "
         "in snippets_omitted",
     )
     p_search.add_argument(
@@ -1999,6 +2000,13 @@ def cmd_search(args) -> int:
         raise CliError(
             "--max-snippets must be >= 0 (0 disables the cap)", code="invalid_filter"
         )
+    if args.max_snippets is not None and args.mode == "ids":
+        # Accepted and ignored, it read as a bound on something; it is not.
+        raise CliError(
+            "--max-snippets caps snippets, and --mode ids returns none: drop it, "
+            "or use --mode snippets",
+            code="invalid_filter",
+        )
     roles = _parse_roles(getattr(args, "role", None))
     warnings: list[str] = []
     discovered = _discover(args)
@@ -2234,6 +2242,32 @@ def _snippet_cap(args) -> int:
     return args.max_snippets
 
 
+def _shown_snippets(args, r) -> list[tuple]:
+    """(match, snippet text) for each snippet a result shows, in match order.
+
+    At most --max-snippets of them, and never the same passage twice from
+    one entry. A tool output that prints a file twice -- AGENTS.md read once
+    by name and once through its CLAUDE.md symlink -- matches twice, and the
+    two windows around those matches are character-for-character identical:
+    the second says nothing the first did not and spends a slot of the cap.
+    Both still count in match_count, so the repeat lands in snippets_omitted.
+    Built per returned result, outside any scan loop.
+    """
+    cap = _snippet_cap(args)
+    shown: list[tuple] = []
+    seen: set[tuple[int, str]] = set()
+    for m in r.matches:
+        for off in m.offsets:
+            if cap and len(shown) >= cap:
+                return shown
+            text = make_snippet(m.entry.text, off, len(m.query), args.context)
+            if (m.entry_index, text) in seen:
+                continue
+            seen.add((m.entry_index, text))
+            shown.append((m, text))
+    return shown
+
+
 def _result_item(
     args, r, *, include_entries: bool, anchor_ts=None, summary_map=None
 ) -> dict:
@@ -2271,25 +2305,15 @@ def _result_item(
         item["parse_warnings"] = r.warnings
     multi = len(args.query) > 1
     if args.mode in ("snippets", "full"):
-        cap = _snippet_cap(args)
-        snippets = []
-        for m in r.matches:
-            for off in m.offsets:
-                if cap and len(snippets) >= cap:
-                    break
-                snippets.append(
-                    {
-                        "role": m.entry.role,
-                        "entry_index": m.entry_index,
-                        **({"query": m.query} if multi else {}),
-                        "text": make_snippet(
-                            m.entry.text, off, len(m.query), args.context
-                        ),
-                    }
-                )
-            else:
-                continue
-            break
+        snippets = [
+            {
+                "role": m.entry.role,
+                "entry_index": m.entry_index,
+                **({"query": m.query} if multi else {}),
+                "text": text,
+            }
+            for m, text in _shown_snippets(args, r)
+        ]
         item["snippets"] = snippets
         omitted = r.match_count - len(snippets)
         if omitted > 0:
@@ -2344,22 +2368,13 @@ def _print_search_text(args, matched, *, anchor_ts=None, summary_map=None) -> No
         tag = "\t[summary match]" if summary_hits else ""
         print(f"{line}\t{r.session.summary or '-'}{tag}")
         if args.mode == "snippets":
-            cap = _snippet_cap(args)
-            shown = 0
-            for m in r.matches:
-                for off in m.offsets:
-                    if cap and shown >= cap:
-                        break
-                    snip = make_snippet(m.entry.text, off, len(m.query), args.context)
-                    print(f"  [{m.entry.role}] {snip}")
-                    shown += 1
-                else:
-                    continue
-                break
-            if r.match_count > shown:
+            shown = _shown_snippets(args, r)
+            for m, snip in shown:
+                print(f"  [{m.entry.role}] {snip}")
+            if r.match_count > len(shown):
                 print(
-                    f"  … {r.match_count - shown} more snippet(s) "
-                    f"omitted (--max-snippets)"
+                    f"  … {r.match_count - len(shown)} more snippet(s) "
+                    f"omitted (--max-snippets, or a passage already shown)"
                 )
             print()
         elif args.mode == "full":

@@ -1992,7 +1992,9 @@ class TestSnippetCap:
     @pytest.fixture
     def dense_cli(self, monkeypatch, capsys, tmp_path):
         f = tmp_path / "dense.jsonl"
-        write_claude(f, ["tok " * 25])  # 25 occurrences in one entry
+        # 25 occurrences in one entry, each in its own surroundings: windows
+        # that were character-for-character identical would be shown once.
+        write_claude(f, ["".join(f"tok {i:03d} {'x' * 500} " for i in range(25))])
         sessions = [
             Session(
                 id="dense",
@@ -2013,7 +2015,7 @@ class TestSnippetCap:
         return run
 
     def test_default_cap_and_omitted_count(self, dense_cli):
-        _, out, _ = dense_cli("search", "tok", "--context", "0")
+        _, out, _ = dense_cli("search", "tok", "--context", "8")
         r = json.loads(out)["results"][0]
         assert r["match_count"] == 25
         assert len(r["snippets"]) == 20
@@ -2037,9 +2039,47 @@ class TestSnippetCap:
 
     def test_text_mode_reports_omission(self, dense_cli):
         _, out, _ = dense_cli(
-            "search", "tok", "--format", "text", "--max-snippets", "2", "--context", "0"
+            "search", "tok", "--format", "text", "--max-snippets", "2", "--context", "8"
         )
         assert "23 more snippet(s) omitted" in out
+
+    def test_a_passage_repeated_in_one_entry_is_shown_once(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        """A tool output that printed a file twice matches twice, and the two
+        windows are identical. The repeat spends no slot of the cap and is
+        counted as omitted; the same passage in another entry still shows."""
+        # A whole block printed twice, so each window sees identical
+        # surroundings, as when one file is read under two names.
+        passage = "-" * 40 + "\nthe perf gate counts work and does not time anything\n"
+        f = tmp_path / "twice.jsonl"
+        write_claude(f, [passage * 2, passage])
+        monkeypatch.setattr(
+            "session_browser.cli.discover_all",
+            lambda *a, **k: [
+                Session(id="twice", provider="claude", content_path=str(f))
+            ],
+        )
+
+        assert run_cli(["search", "perf gate", "--context", "20"]) == 0
+        r = json.loads(capsys.readouterr().out)["results"][0]
+        assert r["match_count"] == 3
+        assert [s["entry_index"] for s in r["snippets"]] == [0, 1]
+        assert r["snippets_omitted"] == 1
+
+        assert run_cli(["search", "perf gate", "--format", "text"]) == 0
+        out = capsys.readouterr().out
+        assert out.count("[user]") == 2
+        assert "1 more snippet(s) omitted" in out
+
+    def test_cap_is_refused_where_there_are_no_snippets(self, dense_cli):
+        """Accepted and ignored in --mode ids, it read as a bound on
+        something. It bounds nothing there."""
+        code, out, err = dense_cli(
+            "search", "tok", "--mode", "ids", "--max-snippets", "5"
+        )
+        assert code == 1 and out == ""
+        assert json.loads(err)["error"]["code"] == "invalid_filter"
 
 
 class TestMarkdownInsensitiveCli:

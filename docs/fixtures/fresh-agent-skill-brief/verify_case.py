@@ -147,14 +147,17 @@ def check_role_provenance() -> None:
         "ids mode now carries snippets; the task's point is that ids alone "
         "cannot tell a quotation from a statement"
     )
-    # --max-snippets 0 lifts the per-result cap, so the role tally is complete
-    # rather than truncated at the default 20.
-    snippets = sb(
-        "search", task["phrase"], "--mode", "snippets", "--max-snippets", "0"
-    )["results"][0]["snippets"]
-    roles = collections.Counter(s["role"] for s in snippets)
+    # The census the skill teaches is match_roles: every match counted by
+    # role. Tallying snippet roles by hand was the recipe before it, and it
+    # undercounts twice over -- snippets stop at --max-snippets, and a passage
+    # repeated within one entry is shown once.
+    result = sb("search", task["phrase"], "--mode", "snippets")["results"][0]
+    roles = collections.Counter(result["match_roles"])
     assert roles == collections.Counter(task["roles"]), (
         f"role tally {dict(roles)}, brief says {task['roles']}"
+    )
+    assert {s["role"] for s in result["snippets"]} == set(task["roles"]), (
+        "the snippets no longer show both a reading and a saying"
     )
     assert roles["tool"] > roles[task["proposed_by_role"]], (
         "most occurrences are no longer material the agent read, so the task "
