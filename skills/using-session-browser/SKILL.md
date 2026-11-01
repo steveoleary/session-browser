@@ -168,6 +168,13 @@ Judgment `--help` does not carry:
 
 - Whenever `--limit` drops results, `list` and `search` say so in `warnings`
   with a count and date range. **A listing with no such warning is complete.**
+- **To read results, ask for `--format text`; keep JSON for keys you will
+  compute on.** `search --format text` prints one header per result and each
+  snippet as `[role] …`; `list --format text` is one tab-separated row per
+  session, entries and duration included. That is the projection agents
+  otherwise write by hand over `--format json`. Its warnings go to stderr —
+  read them, do not discard them. Reach for JSON when the answer depends on a
+  key text omits, such as `match_roles` or `first_authored_match`.
 - **Never cut `--format json` with `head`, `tail` or `sed`.** It is
   pretty-printed, so the cut lands mid-object and you get invalid JSON with
   exit 0. To cap lines, use `--format jsonl` (`list`, `search`): line 1 is the
