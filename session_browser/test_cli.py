@@ -512,6 +512,38 @@ class TestHelpOutputContracts:
         assert stats["total"] == 2
         assert stats["subagents"]["total"] == 0
 
+    def test_model_filter_and_its_unknowns(self, monkeypatch, capsys, tmp_path):
+        """--model matches the model's spelling as a substring. A session
+        that records none is not known to have run on anything, so it never
+        matches -- and when that leaves nothing, the warning says so rather
+        than letting "no such model" stand."""
+        f = tmp_path / "s.jsonl"
+        write_claude(f, ["work"])
+        corpus = [
+            Session(
+                id="cx", provider="codex", model="gpt-6.1-sol", content_path=str(f)
+            ),
+            Session(
+                id="pi",
+                provider="pi",
+                model="opencode-go/deepseek-v4.1-flash",
+                content_path=str(f),
+            ),
+            Session(id="cl", provider="claude", content_path=str(f)),
+        ]
+        monkeypatch.setattr("session_browser.cli.discover_all", lambda *a, **k: corpus)
+
+        assert run_cli(["list", "--model", "DeepSeek"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert [(r["id"], r["model"]) for r in data["sessions"]] == [
+            ("pi:pi", "opencode-go/deepseek-v4.1-flash")
+        ]
+
+        assert run_cli(["list", "--model", "opus"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert data["sessions"] == []
+        assert any("1 session(s) record no model" in w for w in data["warnings"])
+
     def test_stats_counts_subagents_and_declares_their_shape(
         self, monkeypatch, capsys, sessions, tmp_path
     ):

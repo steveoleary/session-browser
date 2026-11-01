@@ -278,6 +278,7 @@ def session_to_dict(s: Session) -> dict:
     return {
         "id": canonical_id(s),
         "provider": s.provider,
+        "model": s.model,
         "session_id": s.id,
         "summary": s.summary,
         "cwd": s.cwd,

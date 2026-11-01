@@ -47,6 +47,7 @@ from .transcript import (
 _SESSION_KEYS = (
     "id",
     "provider",
+    "model",
     "session_id",
     "summary",
     "cwd",
@@ -76,6 +77,7 @@ _FILTER_KEYS = (
     "include_current",
     "no_ignore",
     "no_subagents",
+    "model",
     "since",
     "until",
     "around",
@@ -114,7 +116,10 @@ _SUBAGENT_CONTRACT = (
     '"parent_id"/"subagent_kind" are three-state: null when the provider '
     'exposes\nno parent-child link at all (Pi), "" when it does and '
     "this session\nis not a subagent, otherwise the spawning session's id and "
-    "the kind."
+    "the kind.\n"
+    '"model" is spelled as that tool\'s --model flag takes it, and is null '
+    "when it is not\nrecorded where discovery reads: always for Claude and "
+    'OpenCode, so null is\n"not known", never "no model".'
 )
 
 
@@ -757,6 +762,15 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         "while ignored sessions would have matched says so",
     )
     p.add_argument(
+        "--model",
+        action=_Once,
+        metavar="SUBSTR",
+        help="case-insensitive substring of the session's model, as that "
+        "tool's own --model flag spells it (gpt-6.1-sol, "
+        "opencode-go/deepseek-v4.1-flash). Recorded for Codex and Pi; Claude "
+        "and OpenCode sessions carry model null and never match",
+    )
+    p.add_argument(
         "--no-subagents",
         action="store_true",
         help="drop sessions known to be subagents (subagent_kind set), to "
@@ -921,6 +935,19 @@ def apply_filters(
     if args.provider:
         p = args.provider.lower()
         out = [s for s in out if s.provider.lower() == p]
+    if getattr(args, "model", None):
+        q = args.model.lower()
+        unknown = sum(1 for s in out if s.model is None)
+        out = [s for s in out if q in (s.model or "").lower()]
+        # Same reasoning as --repo's blank count: "no session ran on that
+        # model" and "no session says which model it ran on" must not read
+        # alike, and for Claude and OpenCode it is always the second.
+        if not out and unknown and warnings is not None:
+            warnings.append(
+                f"--model matched nothing, and {unknown} session(s) record no "
+                f"model where discovery reads (Claude and OpenCode never do); "
+                f"a content search for the model name can still reach them"
+            )
     if getattr(args, "no_subagents", False):
         # Opt-in only. Subagents are real work -- a median 49% of a child's
         # vocabulary is absent from its parent -- so nothing hides them by
@@ -2221,6 +2248,7 @@ def _filters_dict(args) -> dict:
         "include_current": getattr(args, "include_current", False),
         "no_ignore": getattr(args, "no_ignore", False),
         "no_subagents": getattr(args, "no_subagents", False),
+        "model": getattr(args, "model", None),
         "since": args.since,
         "until": args.until,
         "around": getattr(args, "around", None),

@@ -644,15 +644,15 @@ def build_corpus(root: Path) -> Path:
         "git_branch TEXT, git_origin_url TEXT, source TEXT, "
         "first_user_message TEXT NOT NULL DEFAULT '', "
         "created_at_ms INTEGER, updated_at_ms INTEGER, "
-        "archived INTEGER NOT NULL DEFAULT 0)"
+        "archived INTEGER NOT NULL DEFAULT 0, model TEXT)"
     )
     for i in range(CODEX_SESSIONS):
         sid = f"perf-codex-{i:04d}"
         rollout = codex_root / f"rollout-2026-01-05T09-00-00-{sid}.jsonl"
         conn.execute(
             "INSERT INTO threads (id, rollout_path, cwd, git_branch, git_origin_url, "
-            "first_user_message, created_at_ms, updated_at_ms, archived) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            "first_user_message, created_at_ms, updated_at_ms, archived, model) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
             (
                 sid,
                 str(rollout),
@@ -662,6 +662,8 @@ def build_corpus(root: Path) -> Path:
                 f"start session {i} {_filler(i, 0)}",
                 1767603600000,
                 1767603600000,
+                # Older Codex left it empty, which the query reads as NULL.
+                "gpt-5.5" if i % 4 else "",
             ),
         )
     conn.commit()
@@ -1495,6 +1497,7 @@ def loop_probes(root: Path) -> list[LoopProbe]:
                 # of whichever branch a varying fixture would select.
                 "subagent_kind": "",
                 "parent_thread_id": None,
+                "model": "gpt-5.5",
             }
             for i in range(40)
         ]

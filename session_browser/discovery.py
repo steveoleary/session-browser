@@ -51,6 +51,12 @@ class Session:
     # and "has a known parent" are different facts, and collapsing them
     # would file those 11 as ordinary sessions.
     subagent_kind: str | None = None
+    # The model the session ran on, spelled as that tool's own --model flag
+    # takes it: "gpt-6.1-sol" for Codex, "opencode-go/deepseek-v4.1-flash"
+    # for Pi. None when it is not recorded anywhere discovery reads -- Claude
+    # writes it only on assistant records past the head, OpenCode 1.x only
+    # per message -- so None is "not known", never "no model".
+    model: str | None = None
 
     @property
     def sort_key(self) -> str:
@@ -390,7 +396,7 @@ def _scan_codex_db(db_path: Path) -> list[Session]:
         # character and therefore leaves the string through its last slash or
         # colon. The final CASE removes the transport-only .git suffix and
         # falls back to cwd before Python applies the usual final-segment rule.
-        rows = conn.execute(
+        query = (
             "WITH base AS ("
             "  SELECT threads.*, "
             "         rtrim(COALESCE(git_origin_url, ''), '/') AS origin "
@@ -453,9 +459,26 @@ def _scan_codex_db(db_path: Path) -> list[Session]:
             "         ELSE '' END AS subagent_kind, "
             "       CASE WHEN json_valid(source) THEN json_extract("
             "         source, '$.subagent.thread_spawn.parent_thread_id') "
-            "       END AS parent_thread_id "
+            "       END AS parent_thread_id, "
+            # The latest model the thread ran on (a thread that switched
+            # mid-session records the last). '' on rows older Codex wrote,
+            # which is "not recorded", so NULL in SQL keeps the Python row
+            # loop to a plain read.
+            "       {MODEL} AS model "
             "FROM names"
-        ).fetchall()
+        )
+        try:
+            rows = conn.execute(
+                query.replace("{MODEL}", "NULLIF(model, '')")
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            # model is migration-added. An index from before it still serves
+            # every other column, so its absence must not cost the fast path;
+            # SQLite rejects the first attempt while preparing, before any
+            # row is read.
+            if "no such column: model" not in str(exc):
+                raise
+            rows = conn.execute(query.replace("{MODEL}", "NULL")).fetchall()
     finally:
         conn.close()
     # realpath both sides: the index may store resolved paths while the
@@ -564,6 +587,7 @@ def _codex_session_from_row(r) -> Session:
         content_path=r["rollout_path"],
         parent_id=r["parent_thread_id"] or "",
         subagent_kind=r["subagent_kind"],
+        model=r["model"],
     )
 
 
@@ -1037,6 +1061,18 @@ def opencode_execute(
     return conn.execute(sql[1], params), OPENCODE_V2
 
 
+def _pi_model(record: dict) -> str | None:
+    """'<provider>/<model>' from a Pi ``model_change`` record, as pi's own
+    --model flag takes it, or the bare model id when no provider is named."""
+    model_id = record.get("modelId")
+    if not isinstance(model_id, str) or not model_id:
+        return None
+    provider = record.get("provider")
+    return (
+        f"{provider}/{model_id}" if isinstance(provider, str) and provider else model_id
+    )
+
+
 def scan_pi() -> list[Session]:
     """Discover Pi sessions from JSONL files.
 
@@ -1057,6 +1093,7 @@ def scan_pi() -> list[Session]:
         for f in project_dir.glob("*.jsonl"):
             try:
                 session_id, cwd, created_at, summary = "", "", "", ""
+                model = None
                 with open(f) as fh:
                     for line in fh:
                         line = line.strip()
@@ -1073,6 +1110,10 @@ def scan_pi() -> list[Session]:
                             session_id = obj.get("id", "") or session_id
                             cwd = obj.get("cwd", "") or cwd
                             created_at = obj.get("timestamp", "") or created_at
+                        elif otype == "model_change" and model is None:
+                            # Line 2 of a Pi session, above the first user turn
+                            # this scan stops at, so it costs no extra read.
+                            model = _pi_model(obj)
                         elif otype == "message":
                             msg = obj.get("message")
                             if not isinstance(msg, dict):
@@ -1104,6 +1145,7 @@ def scan_pi() -> list[Session]:
                             or _file_mtime_iso(f)
                         ),
                         content_path=str(f),
+                        model=model,
                     )
                 )
             except Exception as exc:

@@ -975,6 +975,37 @@ class TestScanCodexDb:
         assert s.summary == "fix the login bug"
         assert s.updated_at == "2026-04-10T14:00:00.000Z"
 
+    def test_model_comes_from_the_index(self, tmp_path):
+        """threads.model, migration-added: its value when present, None when
+        an older Codex left it empty -- and an index from before the column
+        existed still serves every other field from the fast path."""
+        sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        f1 = self._write_rollout(sessions_dir, "cx-1", summary="hi", day="10")
+        f2 = self._write_rollout(sessions_dir, "cx-2", summary="hi", day="11")
+        rows = [
+            {"id": "cx-1", "rollout_path": str(f1), "summary": "one from db"},
+            {"id": "cx-2", "rollout_path": str(f2), "summary": "two from db"},
+        ]
+        self._write_db(tmp_path, rows)
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            before = {s.id: (s.summary, s.model) for s in scan_codex()}
+        assert before == {"cx-1": ("one from db", None), "cx-2": ("two from db", None)}
+
+        conn = sqlite3.connect(str(tmp_path / ".codex" / "state_5.sqlite"))
+        conn.execute("ALTER TABLE threads ADD COLUMN model TEXT")
+        conn.execute("UPDATE threads SET model = 'gpt-6.1-sol' WHERE id = 'cx-1'")
+        conn.execute("UPDATE threads SET model = '' WHERE id = 'cx-2'")
+        conn.commit()
+        conn.close()
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            after = {s.id: (s.summary, s.model) for s in scan_codex()}
+        assert after == {
+            "cx-1": ("one from db", "gpt-6.1-sol"),
+            "cx-2": ("two from db", None),
+        }
+
     def test_archived_rows_are_excluded(self, tmp_path):
         """An archived thread whose rollout file is still in the tree must be
         excluded -- and the exclusion must not cost the fast path (the file
@@ -1786,6 +1817,29 @@ class TestScanPi:
         assert s.repository == "game"
         assert s.created_at == "2026-08-18T17:52:48.324Z"
         assert s.updated_at == "2026-08-18T17:53:10.000Z"
+
+    def test_model_comes_from_the_first_model_change(self, tmp_path):
+        """Spelled provider/model, as pi's own --model flag takes it. A later
+        switch is past the head this scan reads, so the first one names the
+        session; a session with no model_change at all is not known, not
+        modelless."""
+        lines = self._session_lines()
+        lines.append({"type": "model_change", "provider": "x", "modelId": "later"})
+        self._write(tmp_path, lines)
+        unrecorded = [
+            {**line, "id": "02b"} if line["type"] == "session" else line
+            for line in self._session_lines()
+            if line["type"] != "model_change"
+        ]
+        self._write(tmp_path, unrecorded, name="2026-08-18T18-00-00-000Z_02b.jsonl")
+
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            models = {s.id: s.model for s in scan_pi()}
+
+        assert models == {
+            "01a01601-22c4-7973-bf04-2698dd8d19ca": "qwen-lab/qwen38-local",
+            "02b": None,
+        }
 
     def test_branch_is_absent_not_empty(self, tmp_path):
         """pi records no branch anywhere in its format, which is a different
