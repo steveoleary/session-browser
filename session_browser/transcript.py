@@ -1983,7 +1983,15 @@ def iter_entries(session: Session, warnings: list[str]) -> Iterator[TranscriptEn
         yield from _parse_jsonl(path, warnings, _claude_entries)
     elif session.provider == "codex":
         path = _existing_file(session)
-        yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, _codex_entries))
+        # Decided once per session, not per record: only a spawned child can
+        # open with a copy of its spawner's history, so every other rollout
+        # keeps the plain record parser and pays nothing for this.
+        event_fn = (
+            _codex_own_records()
+            if session.subagent_kind == "thread_spawn"
+            else _codex_entries
+        )
+        yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, event_fn))
     elif session.provider == "pi":
         path = _existing_file(session)
         yield from _parse_jsonl(path, warnings, _pi_entries)
@@ -2648,6 +2656,74 @@ def _dedupe_codex_turns(
         yield e
     if pending is not None and not _codex_injected(pending.text):
         yield pending
+
+
+def _codex_own_records() -> Callable[[dict], Iterable[TranscriptEntry]]:
+    """A Codex record parser that skips a spawned child's copied history.
+
+    Newer Codex builds (0.154.0 in the ground-truth fixture) start a
+    thread_spawn child's rollout with a copy of its spawner's history: the
+    child's own session_meta, then the spawner's session_meta, then the
+    spawner's turns up to the one that spawned it. Parsed as the child's own,
+    that put the root's prompt in every descendant -- a search for it
+    returned the root and all four of its descendants.
+
+    The copy is marked by ``subagent_history_start_ordinal`` on the child's
+    own (first) session_meta; a rollout without it is parsed exactly as any
+    other. The field is an ordinal in the spawner's in-memory history, not a
+    line number, so it cannot be used to cut the file. The boundary is the
+    first ``task_started`` that began no earlier than the child itself
+    (``started_at`` against the child's creation time, at the one-second
+    grain started_at has): the copied block is written in one burst at spawn
+    time, and the turns in it started 8-58 s before the spawn in every
+    fixture child. The records' own timestamps are the copy time, so they
+    cannot separate the halves.
+
+    Each uncertainty errs towards keeping text: a creation time that will not
+    parse, or a task_started without started_at, ends the skip at once, so a
+    shape this has not seen reads as it did before rather than losing the
+    child's own turns. A spawn in the same second as its spawning turn began
+    keeps that one spawner turn.
+    """
+    state = [0, 0]  # phase (0 first record, 1 in the copy, 2 own), spawn second
+
+    def event_fn(obj: dict) -> Iterable[TranscriptEntry]:
+        phase = state[0]
+        if phase == 2:
+            return _codex_entries(obj)
+        payload = obj.get("payload")
+        if type(payload) is not dict:
+            payload = {}
+        if phase == 0:
+            if (
+                obj.get("type") == "session_meta"
+                and "subagent_history_start_ordinal" in payload
+            ):
+                state[0], state[1] = 1, _epoch_second(payload.get("timestamp"))
+                return ()
+            state[0] = 2
+            return _codex_entries(obj)
+        if obj.get("type") == "event_msg" and payload.get("type") == "task_started":
+            started = payload.get("started_at")
+            if type(started) is not int or started >= state[1]:
+                state[0] = 2
+                return _codex_entries(obj)
+        return ()
+
+    return event_fn
+
+
+def _epoch_second(ts) -> int:
+    """Whole seconds since the epoch for an ISO timestamp, or 0."""
+    if not isinstance(ts, str):
+        return 0
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return 0
+    # Codex writes UTC with a Z. A naive one is read as UTC too: as local
+    # time, west of Greenwich it would land later and skip the child's turns.
+    return int((dt if dt.tzinfo else dt.replace(tzinfo=UTC)).timestamp())
 
 
 def _codex_entries(obj: dict) -> Iterator[TranscriptEntry]:

@@ -141,6 +141,12 @@ def list_sessions(home: Path, provider: str, *, quiet: bool = False) -> list[dic
     it abandons the Codex index for the file scan, so a quiet run is proof
     the index path produced the result, not a silent fallback.
     """
+    payload = cli_json(home, ["list", "--provider", provider], quiet=quiet)
+    return payload["sessions"] if isinstance(payload, dict) else payload
+
+
+def cli_json(home: Path, argv: list[str], *, quiet: bool = False):
+    """``session-browser <argv> --format json`` against *home*, parsed."""
     env = os.environ.copy()
     env["HOME"] = str(home)
     for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"):
@@ -150,9 +156,7 @@ def list_sessions(home: Path, provider: str, *, quiet: bool = False) -> list[dic
             sys.executable,
             "-m",
             "session_browser.app",
-            "list",
-            "--provider",
-            provider,
+            *argv,
             "--format",
             "json",
         ],
@@ -164,10 +168,9 @@ def list_sessions(home: Path, provider: str, *, quiet: bool = False) -> list[dic
     )
     if result.returncode:
         sys.stderr.write(result.stderr)
-        raise SystemExit(f"session-browser list --provider {provider} failed")
+        raise SystemExit(f"session-browser {' '.join(argv)} failed")
     assert not (quiet and result.stderr), result.stderr
-    payload = json.loads(result.stdout)
-    return payload["sessions"] if isinstance(payload, dict) else payload
+    return json.loads(result.stdout)
 
 
 # ----------------------------------------------------------------- raw facts
@@ -571,6 +574,37 @@ def check_codex_graph() -> None:
                 assert s["parent_id"] == "" and s["subagent_kind"] == "", (where, s)
 
 
+def check_codex_inherited_history() -> None:
+    """A spawned child reads as its own work, not its spawner's.
+
+    Its rollout opens with a copy of the spawner's history (see the raw
+    facts), so the root's prompt is in every descendant's file. Through
+    session-browser it must not be: the root's marker finds the root alone,
+    and each child is named by the task path its spawner gave it rather than
+    by the root's prompt. Both discovery paths, since the file scan reads the
+    copied prompt straight off the rollout and the index never stored one.
+    """
+    root = CODEX["edges"][0]["spawner"]
+    path_of = {e["child"]: e["agent_path"] for e in CODEX["edges"]}
+    for use_index in (True, False):
+        where = "index" if use_index else "file scan"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = build_home(Path(tmp), codex_index=use_index)
+            listed = {
+                s["id"].removeprefix("codex:"): s
+                for s in list_sessions(home, "codex", quiet=use_index)
+            }
+            found = cli_json(
+                home,
+                ["search", "sb-fixture-parent", "--provider", "codex", "--mode", "ids"],
+                quiet=use_index,
+            )["results"]
+        assert [r["session_id"] for r in found] == [root], (where, found)
+        for child, agent_path in path_of.items():
+            summary = listed[child]["summary"]
+            assert summary.startswith(agent_path + " · "), (where, child, summary)
+
+
 def check_opencode_graph(home: Path) -> None:
     listed = {s["id"]: s for s in list_sessions(home, "opencode")}
     expected_ids = {f"opencode:{r['id']}" for r in OPENCODE_ROWS}
@@ -633,6 +667,7 @@ def check_candidate() -> None:
     check_codex_raw_facts()
     check_codex_review_raw_facts()
     check_codex_graph()
+    check_codex_inherited_history()
     with tempfile.TemporaryDirectory() as tmp:
         home = build_home(Path(tmp))
         check_opencode_graph(home)

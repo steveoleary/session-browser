@@ -422,7 +422,19 @@ def _scan_codex_db(db_path: Path) -> list[Session] | None:
             # FORKED session also carries a parent id but has source "cli",
             # so an unguarded read would misfile forks as subagents;
             # agent-sessions guards the same way and their tests say why.
-            "SELECT id, rollout_path, cwd, git_branch, first_user_message, "
+            # A spawned child with copied history has no first user message
+            # of its own (the index stores ''), so it is named by the task
+            # path its spawner gave it, read from source like the parent is.
+            # Kept in SQL so the per-row Python loop does not change; the
+            # file scan builds the same label in _codex_child_label.
+            "SELECT id, rollout_path, cwd, git_branch, "
+            "       CASE WHEN first_user_message = '' AND json_valid(source) "
+            "         THEN COALESCE(json_extract("
+            "           source, '$.subagent.thread_spawn.agent_path') || "
+            "           COALESCE(' · ' || json_extract("
+            "             source, '$.subagent.thread_spawn.agent_nickname'), ''), "
+            "           '') "
+            "         ELSE first_user_message END AS first_user_message, "
             "       CASE "
             "         WHEN origin_name = '' THEN cwd "
             "         WHEN origin_name LIKE '%.git' "
@@ -523,6 +535,20 @@ def _codex_session_from_row(r) -> Session:
     )
 
 
+def _codex_child_label(payload: dict) -> str:
+    """'<agent_path> · <nickname>' for a spawned child, as the index query
+    builds it, or '' when the rollout records neither."""
+    spawn = payload.get("source")
+    spawn = spawn.get("subagent") if isinstance(spawn, dict) else None
+    spawn = spawn.get("thread_spawn") if isinstance(spawn, dict) else None
+    if not isinstance(spawn, dict) or not isinstance(spawn.get("agent_path"), str):
+        return ""
+    nickname = spawn.get("agent_nickname")
+    if isinstance(nickname, str):
+        return _summary_text(f"{spawn['agent_path']} · {nickname}")
+    return _summary_text(spawn["agent_path"])
+
+
 def _codex_subagent(payload: dict) -> tuple[str, str]:
     """(subagent_kind, parent_id) from a rollout's session_meta payload.
 
@@ -596,8 +622,13 @@ def _scan_codex_files() -> list[Session]:
             branch = git.get("branch", "")
             origin_url = git.get("repository_url", "")
             ts = payload.get("timestamp", obj.get("timestamp", ""))
-            # Try to get first user message for summary
-            summary = _codex_first_user_message(readable)
+            if "subagent_history_start_ordinal" in payload:
+                # A child whose rollout opens with its spawner's history: the
+                # first user message in the file is the ROOT's prompt, not
+                # this session's. Named as the index names it instead.
+                summary = _codex_child_label(payload)
+            else:
+                summary = _codex_first_user_message(readable)
             sessions.append(
                 Session(
                     id=sid,

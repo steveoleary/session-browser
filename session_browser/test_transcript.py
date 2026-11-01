@@ -913,6 +913,82 @@ class TestCodexCommandFailures:
         assert entry.metadata == meta
 
 
+class TestCodexCopiedHistory:
+    """A spawned child's rollout opens with its spawner's history. Only the
+    child's own turns are its transcript; the end-to-end case is pinned by
+    the subagent-ground-truth fixture."""
+
+    SPAWN = "2026-09-13T20:48:43.124Z"  # 1789332523
+
+    def _rollout(self, tmp_path, *, marker=True, own_started=1789332523, ts=SPAWN):
+        meta = {"id": "child", "timestamp": ts}
+        if marker:
+            meta["subagent_history_start_ordinal"] = 20
+        records = [
+            {"type": "session_meta", "payload": meta},
+            {"type": "session_meta", "payload": {"id": "spawner"}},
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_started",
+                    "turn_id": "t-old",
+                    "started_at": 1789332515,
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "the root's prompt"},
+            },
+            {
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "t-own"}
+                | ({"started_at": own_started} if own_started is not None else {}),
+            },
+            {
+                "type": "event_msg",
+                "payload": {"type": "agent_message", "message": "the child's answer"},
+            },
+        ]
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(f, records)
+        return f
+
+    def _texts(self, f, kind="thread_spawn"):
+        s = Session(
+            id="child", provider="codex", content_path=str(f), subagent_kind=kind
+        )
+        return [e.text for e in load_transcript(s).entries]
+
+    def test_only_the_childs_own_turns_are_its_transcript(self, tmp_path):
+        assert self._texts(self._rollout(tmp_path)) == ["the child's answer"]
+
+    def test_a_child_without_the_marker_reads_whole(self, tmp_path):
+        """Older children copy nothing; the field is what says a copy exists."""
+        f = self._rollout(tmp_path, marker=False)
+        assert self._texts(f) == ["the root's prompt", "the child's answer"]
+
+    def test_only_spawned_children_are_filtered(self, tmp_path):
+        f = self._rollout(tmp_path)
+        assert self._texts(f, kind="") == ["the root's prompt", "the child's answer"]
+
+    @pytest.mark.parametrize(
+        ("own_started", "ts"),
+        [(None, SPAWN), (1789332523, "not a time")],
+    )
+    def test_an_unreadable_boundary_keeps_text_rather_than_losing_it(
+        self, tmp_path, own_started, ts
+    ):
+        """A task_started without started_at, or a creation time that will not
+        parse, ends the skip at once: the copy shows, as it did before, and
+        the child's own turns are never the ones lost."""
+        texts = self._texts(self._rollout(tmp_path, own_started=own_started, ts=ts))
+        assert texts[-1] == "the child's answer"
+
+    def test_a_naive_creation_time_is_utc(self):
+        assert transcript_mod._epoch_second("2026-09-13T20:48:43.124") == 1789332523
+        assert transcript_mod._epoch_second(self.SPAWN) == 1789332523
+
+
 class TestCodexParser:
     def codex_session(self, path: Path) -> Session:
         return Session(id="cx-1", provider="codex", content_path=str(path))
