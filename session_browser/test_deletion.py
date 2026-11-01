@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -211,10 +213,110 @@ class TestCodexDelete:
             deletion.plan_delete(child, [])
 
 
-@pytest.mark.parametrize("provider", ["opencode", "pi"])
-def test_unproven_providers_are_refused(provider):
+OPENCODE_ID = "ses_e6912efd2ffe3UsWZKvr7Xx1Km"
+
+
+@pytest.fixture
+def fake_opencode(tmp_path, monkeypatch):
+    """An ``opencode`` on PATH that records its argv and does what the real
+    2.x one was measured to do -- remove the session row and its children --
+    steered by environment, over a v2 database in a fake home."""
+    from session_browser.test_transcript import make_opencode_v2_db
+
+    db = make_opencode_v2_db(
+        tmp_path,
+        {
+            OPENCODE_ID: {"messages": [("user", {"text": "hello"})]},
+            "ses_child": {"parent_id": OPENCODE_ID},
+            "ses_keep": {},
+        },
+    )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "opencode-argv"
+    script = bindir / "opencode"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sqlite3, sys\n"
+        f"open({str(log)!r}, 'a').write(' '.join(sys.argv[1:]))\n"
+        "if os.environ.get('FAKE_OPENCODE_FAIL'):\n"
+        "    print('Session not found: ' + sys.argv[3], file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+        "if not os.environ.get('FAKE_OPENCODE_KEEP'):\n"
+        f"    c = sqlite3.connect({str(db)!r})\n"
+        "    c.execute('DELETE FROM session_v2 WHERE id = ? OR parent_id = ?',\n"
+        "              (sys.argv[3], sys.argv[3]))\n"
+        "    c.commit()\n"
+        "print('Session ' + sys.argv[3] + ' deleted')\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+        yield Session(id=OPENCODE_ID, provider="opencode"), log, db
+
+
+class TestOpencodeDelete:
+    def test_hands_the_whole_job_to_opencode_session_delete(self, fake_opencode):
+        session, log, db = fake_opencode
+        child = Session(id="ses_child", provider="opencode", parent_id=OPENCODE_ID)
+        plan = deletion.plan_delete(session, [session, child])
+
+        assert (plan.paths, plan.subagents) == ((), 1)
+        assert plan.command[1:] == ("session", "delete", OPENCODE_ID)
+        message = deletion.delete_session(plan)
+
+        assert log.read_text() == f"session delete {OPENCODE_ID}"
+        assert OPENCODE_ID in message
+        left = sqlite3.connect(db).execute("SELECT id FROM session_v2").fetchall()
+        assert left == [("ses_keep",)]
+
+    def test_a_failed_delete_says_why(self, fake_opencode, monkeypatch):
+        session, _log, _db = fake_opencode
+        monkeypatch.setenv("FAKE_OPENCODE_FAIL", "1")
+        with pytest.raises(DeleteFailed, match="opencode session exited 1: Session"):
+            deletion.delete_session(deletion.plan_delete(session, []))
+
+    def test_success_with_the_session_still_there_is_a_failure(
+        self, fake_opencode, monkeypatch
+    ):
+        session, _log, _db = fake_opencode
+        monkeypatch.setenv("FAKE_OPENCODE_KEEP", "1")
+        with pytest.raises(DeleteFailed, match="still there"):
+            deletion.delete_session(deletion.plan_delete(session, []))
+
+    def test_an_id_that_is_not_a_session_id_never_reaches_argv(self, fake_opencode):
+        _session, log, _db = fake_opencode
+        for bad in ("--help", "ses_../x", "not-a-session"):
+            with pytest.raises(DeleteRefused, match="Not an OpenCode session id"):
+                deletion.plan_delete(Session(id=bad, provider="opencode"), [])
+        assert not log.exists()
+
+    def test_a_session_opencode_does_not_hold_is_refused(self, fake_opencode):
+        with pytest.raises(DeleteRefused, match="no session ses_gone"):
+            deletion.plan_delete(Session(id="ses_gone", provider="opencode"), [])
+
+    def test_a_1x_database_is_refused(self, fake_opencode):
+        session, log, db = fake_opencode
+        db.unlink()
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE session (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO session VALUES (?)", (OPENCODE_ID,))
+        conn.commit()
+        conn.close()
+        with pytest.raises(DeleteRefused, match=r"predates 2\.x"):
+            deletion.plan_delete(session, [])
+        assert not log.exists()
+
+    def test_no_opencode_on_path_is_refused(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PATH", str(tmp_path))
+        session = Session(id=OPENCODE_ID, provider="opencode")
+        with pytest.raises(DeleteRefused, match="opencode CLI"):
+            deletion.plan_delete(session, [])
+
+
+def test_pi_is_refused_until_proven():
     with pytest.raises(DeleteRefused, match="not supported yet"):
-        deletion.plan_delete(Session(id="x", provider=provider), [])
+        deletion.plan_delete(Session(id="x", provider="pi"), [])
 
 
 # ---------------------------------------------------------------------------

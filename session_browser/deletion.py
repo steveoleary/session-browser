@@ -20,8 +20,14 @@ was proven against the real tool:
   which ``claude purge`` leaves too. Claude Code ages transcripts out on its
   own retention timer, so a missing transcript is a state it already handles.
 
-OpenCode and Pi are refused: neither was installed where this was built, so
-no deletion of theirs has been proven.
+- **OpenCode** 2.x ships ``opencode session delete <id>``, which removes the
+  session's row, its messages, its event sequence and instruction state, and
+  every child session with it -- verified on OpenCode 2.2.4 with a throwaway
+  session that spawned one subagent; afterwards the id survived only in
+  OpenCode's own shared log. So it gets the whole job, as Codex does. A
+  database still in the 1.x schema is refused: no 1.x delete was proven.
+
+Pi is refused: no deletion of its sessions has been proven yet.
 
 A subagent is never deleted on its own -- its parent's transcript still holds
 the spawning call -- and a Claude session that is still running is refused,
@@ -32,7 +38,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import sqlite3
 import subprocess
 import uuid
 from collections.abc import Iterable
@@ -40,7 +48,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import compressed
-from .discovery import Session, claude_root_session
+from .discovery import (
+    OPENCODE_V2,
+    Session,
+    _opencode_db_path,
+    _readonly_uri,
+    claude_root_session,
+    opencode_execute,
+)
 
 
 class DeleteRefused(Exception):
@@ -82,6 +97,8 @@ def plan_delete(session: Session, sessions: Iterable[Session]) -> DeletePlan:
         return _plan_claude(session, subagents)
     if session.provider == "codex":
         return _plan_codex(session, subagents)
+    if session.provider == "opencode":
+        return _plan_opencode(session, subagents)
     raise DeleteRefused(f"Deleting {session.provider} sessions is not supported yet")
 
 
@@ -188,6 +205,7 @@ def _plan_codex(session: Session, subagents: int) -> DeletePlan:
 
 
 def _run_provider_delete(plan: DeletePlan) -> str:
+    tool = f"{Path(plan.command[0]).name} {plan.command[1]}"
     try:
         done = subprocess.run(
             plan.command,
@@ -198,23 +216,98 @@ def _run_provider_delete(plan: DeletePlan) -> str:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise DeleteFailed(f"codex delete did not run: {exc}") from exc
+        raise DeleteFailed(f"{tool} did not run: {exc}") from exc
     if done.returncode != 0:
         detail = (done.stderr or done.stdout).strip().splitlines()
         raise DeleteFailed(
-            f"codex delete exited {done.returncode}"
-            + (f": {detail[-1]}" if detail else "")
+            f"{tool} exited {done.returncode}" + (f": {detail[-1]}" if detail else "")
         )
-    # Trust the result, not the exit code alone: a rollout still on disk is a
-    # session that will be rediscovered on the next refresh.
-    rollout = plan.session.content_path
+    # Trust the result, not the exit code alone: whatever the provider left
+    # behind is a session that will be rediscovered on the next refresh.
+    provider = plan.session.provider
+    if provider == "codex":
+        _check_codex_gone(plan.session, tool)
+    elif provider == "opencode":
+        _check_opencode_gone(plan.session, tool)
+    return f"Deleted {provider} session {plan.session.id}"
+
+
+def _check_codex_gone(session: Session, tool: str) -> None:
+    rollout = session.content_path
     if rollout and Path(rollout).exists():
-        raise DeleteFailed(f"codex delete reported success but {rollout} remains")
+        raise DeleteFailed(f"{tool} reported success but {rollout} remains")
     if rollout.endswith(compressed.SUFFIX):
         # A compressed rollout leaves its decompressed copy behind in this
         # package's own cache, which nothing else would ever remove.
         compressed.discard(Path(rollout))
-    return f"Deleted codex session {plan.session.id}"
+
+
+# ---------------------------------------------------------------------------
+# OpenCode
+# ---------------------------------------------------------------------------
+
+# OpenCode's own validation, seen refusing anything else: 'Expected a string
+# starting with "ses"'. Checked here too, so nothing that is not a session id
+# ever reaches its argv.
+_OPENCODE_ID = re.compile(r"ses_[A-Za-z0-9]+")
+
+_OPENCODE_HAS_SESSION_SQL = (
+    "SELECT count(*) FROM session WHERE id = ?",
+    "SELECT count(*) FROM session_v2 WHERE id = ?",
+)
+
+
+def _opencode_session_rows(session_id: str) -> tuple[int, int]:
+    """(rows holding *session_id*, schema) in OpenCode's database."""
+    db = _opencode_db_path()
+    if not db.is_file():
+        return 0, OPENCODE_V2
+    try:
+        conn = sqlite3.connect(_readonly_uri(db), uri=True, timeout=3)
+        try:
+            cur, schema = opencode_execute(
+                conn, _OPENCODE_HAS_SESSION_SQL, (session_id,)
+            )
+            return cur.fetchone()[0], schema
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise DeleteRefused(f"Could not read OpenCode's database: {exc}") from exc
+
+
+def _plan_opencode(session: Session, subagents: int) -> DeletePlan:
+    opencode = shutil.which("opencode")
+    if opencode is None:
+        raise DeleteRefused(
+            "Deleting an OpenCode session needs the opencode CLI on PATH"
+        )
+    if not _OPENCODE_ID.fullmatch(session.id):
+        raise DeleteRefused(f"Not an OpenCode session id: {session.id}")
+    rows, schema = _opencode_session_rows(session.id)
+    if schema != OPENCODE_V2:
+        raise DeleteRefused(
+            "This OpenCode database predates 2.x; deleting from it is not "
+            "supported (only OpenCode 2.x's delete has been proven)"
+        )
+    if not rows:
+        raise DeleteRefused(f"OpenCode has no session {session.id}")
+    removes = (
+        f"session     {session.id}, from OpenCode's database",
+        "            its messages and event history, by OpenCode's own delete",
+    )
+    command = (opencode, "session", "delete", session.id)
+    return DeletePlan(session, (), command, subagents, removes)
+
+
+def _check_opencode_gone(session: Session, tool: str) -> None:
+    try:
+        rows, _schema = _opencode_session_rows(session.id)
+    except DeleteRefused as exc:
+        raise DeleteFailed(
+            f"{tool} ran, but the result could not be checked: {exc}"
+        ) from exc
+    if rows:
+        raise DeleteFailed(f"{tool} reported success but the session is still there")
 
 
 # ---------------------------------------------------------------------------
