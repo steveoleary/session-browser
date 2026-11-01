@@ -19,19 +19,28 @@ was proven against the real tool:
   ``claude`` appends to, and ``backups/``, which rotates out by itself and
   which ``claude purge`` leaves too. Claude Code ages transcripts out on its
   own retention timer, so a missing transcript is a state it already handles.
-
 - **OpenCode** 2.x ships ``opencode session delete <id>``, which removes the
   session's row, its messages, its event sequence and instruction state, and
   every child session with it -- verified on OpenCode 2.2.4 with a throwaway
   session that spawned one subagent; afterwards the id survived only in
   OpenCode's own shared log. So it gets the whole job, as Codex does. A
   database still in the 1.x schema is refused: no 1.x delete was proven.
-
-Pi is refused: no deletion of its sessions has been proven yet.
+- **Pi** has no delete command, so the files are removed here. A session is
+  one ``<stamp>_<id>.jsonl`` under ``~/.pi/agent/sessions/<encoded-cwd>/``;
+  nothing in Pi itself references the id anywhere else (verified on Pi 1.4.0
+  with throwaway sessions). Extensions can keep per-session state named for
+  the id -- pi-blackhole writes ``<id>-pending.json`` cursors -- so a file
+  directly inside an ``~/.pi/agent/<extension>/`` directory whose name starts
+  with the id goes too, and is listed. Session ids are UUIDv7s, so a name
+  that starts with one belongs to that session and nothing else. Pi appends
+  to its file by path after the first write, so a running session would
+  recreate a headerless fragment of itself: a delete is refused while any
+  ``pi`` process is running in the session's directory.
 
 A subagent is never deleted on its own -- its parent's transcript still holds
-the spawning call -- and a Claude session that is still running is refused,
-since its process would go on appending to a transcript that no longer exists.
+the spawning call -- and a Claude or Pi session that is still running is
+refused, since its process would go on appending to a transcript that no
+longer exists.
 """
 
 from __future__ import annotations
@@ -109,6 +118,8 @@ def plan_delete(session: Session, sessions: Iterable[Session]) -> DeletePlan:
         return _plan_codex(session, subagents)
     if session.provider == "opencode":
         return _plan_opencode(session, subagents)
+    if session.provider == "pi":
+        return _plan_pi(session, subagents)
     raise DeleteRefused(f"Deleting {session.provider} sessions is not supported yet")
 
 
@@ -320,6 +331,101 @@ def _check_opencode_gone(session: Session, tool: str) -> None:
         ) from exc
     if rows:
         raise DeleteFailed(f"{tool} reported success but the session is still there")
+
+
+# ---------------------------------------------------------------------------
+# Pi
+# ---------------------------------------------------------------------------
+
+
+def _plan_pi(session: Session, subagents: int) -> DeletePlan:
+    agent = Path.home() / ".pi" / "agent"
+    transcript = Path(session.content_path)
+    # Checked against the one shape a Pi transcript has rather than trusted:
+    # <home>/.pi/agent/sessions/<encoded-cwd>/<stamp>_<id>.jsonl, with an id
+    # that really is a UUID so the extension sweep below matches nothing else.
+    try:
+        uuid.UUID(session.id)
+    except ValueError:
+        raise DeleteRefused(f"Not a Pi session id: {session.id}") from None
+    if (
+        not transcript.name.endswith(f"_{session.id}.jsonl")
+        or transcript.parent.parent != agent / "sessions"
+    ):
+        raise DeleteRefused(f"Unexpected transcript location: {transcript}")
+    if session.cwd and _pi_running_in(session.cwd):
+        raise DeleteRefused("pi is running in this session's directory; exit it first")
+    sidecars = sorted(_pi_extension_files(agent, session.id))
+    # Extension state first and the transcript last, as for Claude: a
+    # failure part-way leaves the session listed, where it can be retried.
+    paths = (*sidecars, transcript)
+    removes = [Removal("transcript", str(transcript))]
+    removes += [Removal("extension", str(p)) for p in sidecars]
+    return DeletePlan(session, paths, (), subagents, tuple(removes))
+
+
+def _pi_extension_files(agent: Path, session_id: str) -> Iterable[Path]:
+    """Files directly inside ~/.pi/agent/<dir>/ whose name starts with the
+    session id. One level only, and never the sessions tree itself."""
+    try:
+        dirs = [d for d in agent.iterdir() if d.is_dir() and d.name != "sessions"]
+    except OSError:
+        return
+    for d in dirs:
+        try:
+            for f in d.iterdir():
+                if f.name.startswith(session_id) and f.is_file():
+                    yield f
+        except OSError:
+            continue
+
+
+def _pi_running_in(cwd: str) -> bool:
+    """Whether a ``pi`` process has *cwd* as its working directory.
+
+    Pi leaves no marker naming the session it has open, so this is the
+    closest honest answer: any pi working in the session's directory might
+    be that session. A machine without ps or lsof answers no, as the Claude
+    check does when there is no marker to read.
+    """
+    try:
+        ps = subprocess.run(
+            ["ps", "-axo", "pid=,args="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    pids = []
+    for line in ps.stdout.splitlines():
+        pid, _, args = line.strip().partition(" ")
+        argv = [Path(a).name for a in args.split()[:2]]
+        # Pi runs as `node .../bin/pi ...` (its shebang is env node), or as
+        # `pi` itself where the kernel reports the script. An argument named
+        # pi to some other program (`vim pi`) is not a pi process.
+        if argv[:1] == ["pi"] or (
+            argv[:1] in (["node"], ["bun"]) and argv[1:] == ["pi"]
+        ):
+            pids.append(pid)
+    if not pids:
+        return False
+    try:
+        lsof = subprocess.run(
+            ["lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(pids)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    want = os.path.realpath(cwd)
+    return any(
+        line.startswith("n") and os.path.realpath(line[1:]) == want
+        for line in lsof.stdout.splitlines()
+    )
 
 
 # ---------------------------------------------------------------------------

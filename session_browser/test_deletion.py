@@ -314,9 +314,106 @@ class TestOpencodeDelete:
             deletion.plan_delete(session, [])
 
 
-def test_pi_is_refused_until_proven():
-    with pytest.raises(DeleteRefused, match="not supported yet"):
-        deletion.plan_delete(Session(id="x", provider="pi"), [])
+PI_ID = "01a196f8-a776-76f7-9f00-4a7342c8d2cb"
+
+
+def _pi_session(home: Path, sid: str = PI_ID) -> Session:
+    from session_browser.discovery import scan_pi
+
+    project = home / ".pi" / "agent" / "sessions" / "--Users-test-project--"
+    project.mkdir(parents=True, exist_ok=True)
+    lines = [
+        {
+            "type": "session",
+            "id": sid,
+            "cwd": "/Users/test/project",
+            "timestamp": "2026-11-01T11:57:20.630Z",
+        },
+        {"type": "message", "message": {"role": "user", "content": "hello"}},
+    ]
+    (project / f"2026-11-01T11-57-20-630Z_{sid}.jsonl").write_text(
+        "\n".join(json.dumps(x) for x in lines) + "\n"
+    )
+    return next(s for s in scan_pi() if s.id == sid)
+
+
+class TestPiDelete:
+    @pytest.fixture(autouse=True)
+    def _nothing_running(self, monkeypatch):
+        monkeypatch.setattr(deletion, "_pi_running_in", lambda cwd: False)
+
+    def test_removes_the_transcript_and_extension_state_named_for_it(self, home):
+        session = _pi_session(home)
+        other = _pi_session(home, "01a196f8-f2f9-742d-8b88-c8635725ebb4")
+        ext = home / ".pi" / "agent" / "pi-blackhole"
+        ext.mkdir(parents=True)
+        mine = [ext / f"{PI_ID}-pending.json", ext / f"{PI_ID}-pending.stale.json"]
+        theirs = ext / f"{other.id}-pending.json"
+        shared = ext / "pi-blackhole-config.json"
+        for f in (*mine, theirs, shared):
+            f.write_text("{}")
+
+        plan = deletion.plan_delete(session, [session, other])
+
+        assert plan.paths[-1] == Path(session.content_path)  # transcript last
+        assert sorted(plan.paths[:-1]) == sorted(mine)
+        assert [r.label for r in plan.removes] == [
+            "transcript",
+            "extension",
+            "extension",
+        ]
+        deletion.delete_session(plan)
+        assert not Path(session.content_path).exists()
+        assert not any(f.exists() for f in mine)
+        assert Path(other.content_path).exists()
+        assert theirs.exists() and shared.exists()
+
+    def test_a_running_pi_in_its_directory_refuses(self, home, monkeypatch):
+        session = _pi_session(home)
+        seen = []
+        monkeypatch.setattr(
+            deletion, "_pi_running_in", lambda cwd: seen.append(cwd) or True
+        )
+        with pytest.raises(DeleteRefused, match="pi is running"):
+            deletion.plan_delete(session, [])
+        assert seen == ["/Users/test/project"]
+
+    def test_a_transcript_outside_the_sessions_tree_is_refused(self, home):
+        stray = Session(
+            id=PI_ID,
+            provider="pi",
+            content_path=str(home / "elsewhere" / f"x_{PI_ID}.jsonl"),
+        )
+        with pytest.raises(DeleteRefused, match="Unexpected transcript location"):
+            deletion.plan_delete(stray, [])
+
+    def test_an_id_that_is_not_a_uuid_is_refused(self, home):
+        """The extension sweep matches names by the id's prefix, so an id
+        that could be a prefix of something else never gets that far."""
+        with pytest.raises(DeleteRefused, match="Not a Pi session id"):
+            deletion.plan_delete(Session(id="01", provider="pi"), [])
+
+
+def test_pi_running_in_reads_ps_then_lsof(monkeypatch, tmp_path):
+    """Only processes whose program is pi are asked about, and a cwd match
+    is judged on resolved paths (/tmp vs /private/tmp on macOS)."""
+    calls = []
+
+    def fake_run(argv, **_kw):
+        calls.append(argv)
+        out = (
+            "  101 node /opt/homebrew/bin/pi -p hello\n"
+            "  102 node /usr/lib/other/server.js\n"
+            "  103 /usr/bin/vim pi\n"
+            if argv[0] == "ps"
+            else f"p101\nn{tmp_path}\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(deletion.subprocess, "run", fake_run)
+    assert deletion._pi_running_in(str(tmp_path))
+    assert calls[1][-1] == "101"
+    assert not deletion._pi_running_in(str(tmp_path / "elsewhere"))
 
 
 # ---------------------------------------------------------------------------

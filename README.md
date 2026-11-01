@@ -239,7 +239,7 @@ Press `?` in the app for the complete key map.
 | `c` | Copy a resume command |
 | `i` | Copy the canonical session id |
 | `e` / `E` | Copy / export the conversation |
-| `D` | Delete the session permanently, after a confirmation naming what goes (Claude Code, Codex and OpenCode 2.x; subagents go with their parent) |
+| `D` | Delete the session permanently, after a confirmation naming what goes (every provider, OpenCode from 2.x; subagents go with their parent) |
 | `p` | Toggle this-project scope |
 | `.` | Show or hide sessions your ignore file hides |
 | `?` | Show all shortcuts |
