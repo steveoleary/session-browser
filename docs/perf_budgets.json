@@ -3,10 +3,10 @@
   "_blessed": {
     "date": "2026-11-01",
     "python": "3.14",
-    "moved": {
-      "loop_opcodes.loop.codex_entries": "56518 -> 56758 (+0.4%)"
-    },
-    "added": []
+    "moved": {},
+    "added": [
+      "tui.search.unordered"
+    ]
   },
   "guards": {
     "cli.search.absent": "A term in no session must cost zero canonical parses: the prefilter, not the parser, answers a miss.",
@@ -26,6 +26,7 @@
     "cli.get": "Retrieving one session must read one transcript, on top of the discovery pass that located it.",
     "cli.get.recent": "A recent conversation and its text budget must use one transcript read, not separate user and assistant retrievals.",
     "tui.search.rare": "The progress readout the TUI displays. Callback volume is capped by design -- per session and per 4096 database rows, never per row or per entry.",
+    "tui.search.unordered": "The TUI's words-in-any-order wave. It must cost ONE literal scan for its anchor term (the longest, here the rare one) plus a window check on that scan's matches -- never a scan per term, which would read the corpus once for each word typed.",
     "lib.search.process_route": "The ids/snippets shape above the candidate threshold must be routed to worker processes, and the prefiltered-out majority must not be sent with it.",
     "lib.search.keep_entries": "The entries-retaining shape must stay in this process: shipping whole transcripts back from workers would pickle the corpus."
   },
@@ -288,6 +289,20 @@
       "transcripts_parsed": 8,
       "prefilter_file_scans": 0,
       "rg_subprocess_calls": 2,
+      "sqlite_connections": 3,
+      "sqlite_statements": 4,
+      "opencode_sessions_parsed": 1,
+      "process_pool_sessions": 0,
+      "progress_callbacks": 11,
+      "row_tick_wrappers": 1,
+      "zst_decompressions": 0
+    },
+    "tui.search.unordered": {
+      "corpus_bytes_read": 1206447,
+      "corpus_file_opens": 502,
+      "transcripts_parsed": 8,
+      "prefilter_file_scans": 0,
+      "rg_subprocess_calls": 6,
       "sqlite_connections": 3,
       "sqlite_statements": 4,
       "opencode_sessions_parsed": 1,

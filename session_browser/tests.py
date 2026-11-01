@@ -6309,3 +6309,159 @@ class TestSelectionCopy:
             footer = app.query_one(Footer)
             assert status.region.height == 1
             assert not status.region.overlaps(footer.region)
+
+
+# ---------------------------------------------------------------------------
+# Unordered word matching (TUI global search fallback)
+# ---------------------------------------------------------------------------
+
+TARGET_TURN = "there is a sibling codex pane you can ask for a second opinion or review"
+
+
+def _claude_file(path, *turns):
+    path.write_text(
+        "".join(
+            json.dumps({"type": role, "message": {"role": role, "content": text}})
+            + "\n"
+            for role, text in turns
+        )
+    )
+    return str(path)
+
+
+class TestUnorderedTerms:
+    def test_terms_are_normalized_words_without_repeats_or_single_letters(self):
+        from session_browser.transcript import unordered_terms
+
+        assert unordered_terms("Codex  PANE review pane") == ["codex", "pane", "review"]
+        assert unordered_terms("a pane") == []  # one usable term is no fallback
+        assert unordered_terms('"codex pane" review') == []  # quoted = literal
+
+    def test_reordered_words_in_one_entry_match(self):
+        from session_browser.transcript import (
+            normalize_match_text,
+            unordered_terms,
+            unordered_window,
+        )
+
+        folded = normalize_match_text(TARGET_TURN)
+        assert unordered_window(folded, unordered_terms("review codex pane"))
+
+    def test_words_too_far_apart_do_not(self):
+        from session_browser.transcript import unordered_terms, unordered_window
+
+        far = "codex pane " + "x " * 120 + "review"
+        assert unordered_window(far, unordered_terms("codex pane review")) is None
+
+    def test_the_tightest_window_wins(self):
+        from session_browser.transcript import unordered_terms, unordered_window
+
+        text = "review this. " + "filler " * 5 + "then codex pane review"
+        start, end, spans = unordered_window(text, unordered_terms("codex pane review"))
+        assert text[start:end] == "codex pane review"
+        assert [text[s:e] for s, e in spans] == ["codex", "pane", "review"]
+
+
+class TestUnorderedSearch:
+    def test_finds_words_in_one_entry_and_not_words_scattered_across_a_session(
+        self, tmp_path
+    ):
+        from session_browser.transcript import search_session_unordered_hits
+
+        one_entry = Session(
+            id="target",
+            provider="claude",
+            content_path=_claude_file(tmp_path / "t.jsonl", ("user", TARGET_TURN)),
+        )
+        scattered = Session(
+            id="scattered",
+            provider="claude",
+            content_path=_claude_file(
+                tmp_path / "s.jsonl",
+                ("user", "open a codex session"),
+                ("assistant", "the pane is ready"),
+                ("user", "now review it"),
+            ),
+        )
+        hits = search_session_unordered_hits(
+            [one_entry, scattered], "review codex pane"
+        )
+        assert set(hits) == {"target"}
+        hit = hits["target"]
+        assert hit.role == "user" and hit.count == 1
+        assert hit.match.startswith("codex") and hit.match.endswith("review")
+
+
+@pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
+@pytest.mark.asyncio
+class TestUnorderedGlobalSearch:
+    async def _search(self, app, pilot, query):
+        search = app.query_one("#global-search")
+        search.value = query
+        app._apply_filter(query)
+        # The literal wave, then the unordered wave it launches.
+        for _ in range(3):
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+
+    async def test_literal_hits_rank_first_and_unordered_ones_open_with_matches(
+        self, tmp_path
+    ):
+        app = SessionBrowser()
+        literal = Session(
+            id="literal",
+            provider="claude",
+            summary="older",
+            updated_at="2026-01-01",
+            content_path=_claude_file(
+                tmp_path / "l.jsonl", ("user", "the codex pane review step")
+            ),
+        )
+        loose = Session(
+            id="loose",
+            provider="claude",
+            summary="newer",
+            updated_at="2026-02-01",
+            content_path=_claude_file(tmp_path / "u.jsonl", ("user", TARGET_TURN)),
+        )
+        neither = Session(
+            id="neither",
+            provider="claude",
+            summary="unrelated",
+            updated_at="2026-03-01",
+            content_path=_claude_file(tmp_path / "n.jsonl", ("user", "codex only")),
+        )
+        async with app.run_test(size=(160, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, [neither, loose, literal])
+            await self._search(app, pilot, "codex pane review")
+            # The phrase hit outranks the newer unordered one.
+            assert [s.id for s in app._filtered] == ["literal", "loose"]
+            assert "loose" in app._unordered_hits
+            assert "literal" not in app._unordered_hits
+
+            # Reordered: the phrase is in neither, so both come from the
+            # fallback, and recency orders them as it does any one tier.
+            await self._search(app, pilot, "review codex pane")
+            assert [s.id for s in app._filtered] == ["loose", "literal"]
+            assert set(app._unordered_hits) == {"loose", "literal"}
+
+            # Opening the unordered hit never shows "0 matches": each term
+            # is highlighted inside the window that matched.
+            app._select_session(str([s.id for s in app._table_sessions].index("loose")))
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app._selected.id == "loose"
+            words = [app._detail_text[s:e].lower() for s, e in app._matches]
+            assert sorted(words) == ["codex", "pane", "review"]
+
+    async def test_a_quoted_query_gets_no_unordered_wave(self, tmp_path):
+        app = SessionBrowser()
+        loose = Session(
+            id="loose",
+            provider="claude",
+            content_path=_claude_file(tmp_path / "u.jsonl", ("user", TARGET_TURN)),
+        )
+        async with app.run_test() as pilot:
+            await _install_fake_sessions(app, pilot, [loose])
+            await self._search(app, pilot, '"review codex pane"')
+            assert app._filtered == [] and app._unordered_hits == {}

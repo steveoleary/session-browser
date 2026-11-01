@@ -19,7 +19,7 @@ import subprocess
 import sys
 import threading
 from bisect import bisect_right
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import (
     FIRST_COMPLETED,
@@ -1906,6 +1906,214 @@ def session_contains(session: Session, query: str) -> bool:
     except (TranscriptUnreadable, OSError):
         return False
     return False
+
+
+# ---------------------------------------------------------------------------
+# Unordered word matching (TUI only)
+# ---------------------------------------------------------------------------
+#
+# Literal phrase search misses an entry whose words were typed in another
+# order or with other words between them: "codex pane review" did not find a
+# user turn saying "there is a sibling codex pane you can ask for a second
+# opinion or review". The TUI therefore runs a second, lower-ranked wave for
+# a multi-word query. The rules, stated once here because the global search,
+# its ranking and the detail pane all depend on them agreeing:
+#
+#   * Terms are the query's whitespace-separated words after the same
+#     normalization literal search uses, so matching is substring and
+#     markdown-insensitive as it is there ("pane" also matches "panes").
+#     Repeated terms count once. One-character terms are dropped: on their
+#     own they match nearly every entry. Stop words are not special.
+#   * A query containing a double quote is a literal phrase and gets no
+#     unordered wave: quoting is how to ask for exactly that.
+#   * Every term must occur in ONE entry, within UNORDERED_WINDOW characters
+#     of normalized text, measured as the smallest window holding them all.
+#     Words scattered across an hours-long session are not one match.
+#   * Literal phrase hits always outrank unordered ones; the CLI's search
+#     contract does not change.
+#
+# 200 was the proximity measured to keep the reported target while cutting
+# 111 candidate sessions to 12; 160 also kept it. The wider is the safer
+# miss rate for a fallback whose job is recall.
+UNORDERED_WINDOW = 200
+# Occurrences of one term considered per entry. A term repeated thousands of
+# times in a tool dump would otherwise make the window scan quadratic-ish;
+# the first few hundred decide the minimal window in any realistic entry.
+_UNORDERED_MAX_HITS = 256
+
+
+def unordered_terms(query: str) -> list[str]:
+    """The terms an unordered match needs, or [] when the query gets none."""
+    if '"' in query:
+        return []
+    seen: list[str] = []
+    for word in normalize_match_text(query).split():
+        if len(word) > 1 and word not in seen:
+            seen.append(word)
+    return seen if len(seen) > 1 else []
+
+
+def unordered_window(
+    folded: str, terms: list[str], limit: int = UNORDERED_WINDOW
+) -> tuple[int, int, list[tuple[int, int]]] | None:
+    """Smallest (start, end) in *folded* holding every term, within *limit*.
+
+    Also returns the term occurrences inside it as (start, end) pairs in
+    *folded*, for highlighting. None when some term is absent or the
+    tightest window is wider than *limit*.
+    """
+    hits: list[tuple[int, int]] = []  # (position, term index)
+    for t, term in enumerate(terms):
+        start, found = 0, 0
+        while found < _UNORDERED_MAX_HITS:
+            i = folded.find(term, start)
+            if i < 0:
+                break
+            hits.append((i, t))
+            found += 1
+            start = i + 1
+        if not found:
+            return None
+    hits.sort()
+    ends = [p + len(terms[t]) for p, t in hits]
+    need = len(terms)
+    have = [0] * need
+    covered = 0
+    best: tuple[int, int] | None = None
+    left = 0
+    # Indices into hits whose ends decrease: the front is the furthest end in
+    # the current window, so its right edge is known without rescanning it.
+    tail: deque[int] = deque()
+    for right, (_pos, t) in enumerate(hits):
+        if not have[t]:
+            covered += 1
+        have[t] += 1
+        while tail and ends[tail[-1]] <= ends[right]:
+            tail.pop()
+        tail.append(right)
+        while covered == need:
+            lpos, lt = hits[left]
+            end = ends[tail[0]]
+            if best is None or end - lpos < best[1] - best[0]:
+                best = (lpos, end)
+            have[lt] -= 1
+            if not have[lt]:
+                covered -= 1
+            if tail[0] == left:
+                tail.popleft()
+            left += 1
+    if best is None or best[1] - best[0] > limit:
+        return None
+    inside = [
+        (p, p + len(terms[k]))
+        for p, k in hits
+        if best[0] <= p and p + len(terms[k]) <= best[1]
+    ]
+    return best[0], best[1], inside
+
+
+def unordered_spans(
+    text: str, terms: list[str], norm: tuple[str, _OffsetMap] | None = None
+) -> list[tuple[int, int]]:
+    """Original-text spans of each term inside *text*'s tightest window."""
+    if norm is None:
+        folded = normalize_match_text(text)
+        idx_map = _offset_map(text, folded)
+    else:
+        folded, idx_map = norm
+    found = unordered_window(folded, terms)
+    if found is None:
+        return []
+    spans = []
+    for start, end in found[2]:
+        if idx_map is None:
+            spans.append((start, end))
+        else:
+            spans.append(
+                (
+                    _original_index(text, start, idx_map),
+                    _original_index(text, end - 1, idx_map) + 1,
+                )
+            )
+    return spans
+
+
+def search_session_unordered_hits(
+    sessions: list[Session],
+    query: str,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+    progress: ProgressFn | None = None,
+) -> dict[str, ContentHit]:
+    """Sessions with an entry holding every term of *query*, unordered.
+
+    Parsing is what costs, so the work is arranged to parse as little as
+    possible. First the native candidate scan runs once per term -- ripgrep
+    over raw bytes, about 0.25 s a term on a 2,367-session corpus -- and a
+    file session is kept only if it can contain EVERY term. Then the literal
+    search for one anchor term (the longest) parses just those survivors, and
+    each entry that matched the anchor is checked for the rest within the
+    window. Callers pass only sessions the literal phrase did not already
+    find. Without ripgrep the intersection is skipped and the anchor scan's
+    own in-process prefilter decides, as it would for any search.
+
+    The intersection is only as selective as the words are rare. Measured
+    2026-11-01 on that corpus, "codex pane review" -- three words nearly every
+    session there contains -- still left 1,686 sessions (5.5 GB) to parse:
+    about 20 s against 4 s for the literal scan. Two native proximity scans
+    were tried and dropped: a same-line PCRE2 lookahead (0.5 s, 1,478 files,
+    barely better) and a bounded-gap regex over every term order (20 s for
+    the scan alone). Hence the TUI's gate: it runs this wave only when the
+    literal phrase came up short.
+    """
+    terms = unordered_terms(query)
+    if not terms:
+        return {}
+    anchor = max(terms, key=len)
+    files = [s for s in sessions if s.provider != "opencode"]
+    candidates: set[Path] | None = None
+    for term in terms:
+        needles = _prefilter_needles(term)
+        if needles is None or any("/" in n for n in needles):
+            candidates = None
+            break
+        if cancelled is not None and cancelled():
+            return {}
+        found = _rg_candidate_paths(files, needles)
+        if found is None:
+            candidates = None
+            break
+        candidates = found if candidates is None else candidates & found
+        if not candidates:
+            break
+    if candidates is not None:
+        sessions = [
+            s
+            for s in sessions
+            if s.provider == "opencode" or _prefilter_file(s) in candidates
+        ]
+    hits: dict[str, ContentHit] = {}
+    for r in search_sessions(sessions, anchor, cancelled=cancelled, progress=progress):
+        if r.unreadable or not r.matches:
+            continue
+        best = None
+        count = 0
+        for m in r.matches:
+            folded = normalize_match_text(m.entry.text)
+            if unordered_window(folded, terms) is None:
+                continue
+            count += 1
+            key = (_snippet_role_rank(m.entry.role), m.entry_index)
+            if best is None or key < best[0]:
+                best = (key, m.entry)
+        if best is None:
+            continue
+        entry = best[1]
+        spans = unordered_spans(entry.text, terms)
+        hits[r.session.id] = _make_hit(
+            entry.text, entry.role, (spans[0][0], spans[-1][1]), count
+        )
+    return hits
 
 
 def search_session_contents(

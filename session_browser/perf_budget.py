@@ -1183,6 +1183,19 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             needs_rg=True,
         ),
         Workload(
+            "tui.search.unordered",
+            "The TUI's words-in-any-order wave. It must cost ONE literal scan "
+            "for its anchor term (the longest, here the rare one) plus a "
+            "window check on that scan's matches -- never a scan per term, "
+            "which would read the corpus once for each word typed.",
+            lambda: transcript.search_session_unordered_hits(
+                discovery.discover_all(),
+                f"sighted {QUERY_RARE}",
+                progress=lambda *_a: ledger.add("progress_callbacks"),
+            ),
+            needs_rg=True,
+        ),
+        Workload(
             "lib.search.process_route",
             "The ids/snippets shape above the candidate threshold must be "
             "routed to worker processes, and the prefiltered-out majority "

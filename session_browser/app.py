@@ -65,6 +65,9 @@ from .transcript import (
     normalize_match_text,
     render_text,
     search_session_hits,
+    search_session_unordered_hits,
+    unordered_spans,
+    unordered_terms,
 )
 
 # ---------------------------------------------------------------------------
@@ -82,6 +85,14 @@ PROVIDER_COLOURS = {
 # content-search worker isn't launched on every character. Short enough to feel
 # instant.
 _FILTER_DEBOUNCE = 0.15
+
+# The words-in-any-order wave is a recall fallback for a phrase that came up
+# short, so it runs only below this many literal results. When the words are
+# common it is the expensive half of a search (measured at ~20 s against ~4 s
+# for the literal scan on a 2,367-session corpus; see
+# search_session_unordered_hits), and a phrase that already found this many
+# sessions has not left the user short of something to read.
+_UNORDERED_BELOW = 10
 
 # The detail pane renders at most this many characters at once. This is
 # strictly a presentation bound: search, match counts, and exports always
@@ -1620,6 +1631,10 @@ class SessionBrowser(App):
         self._tree: bool = True
         self._row_meta: dict[str, RowMeta] = {}
         self._content_hits: dict[str, ContentHit] = {}
+        # Sessions found only by the unordered-words wave, ranked below every
+        # literal hit; see transcript.unordered_terms for the rules.
+        self._unordered_hits: dict[str, ContentHit] = {}
+        self._literal_added = 0
         # (normalized query, hit ids) of the last *completed* content
         # search. Extending a query can only shrink its hit set (any text
         # containing the longer phrase contains the shorter one), so the
@@ -1949,10 +1964,42 @@ class SessionBrowser(App):
             added = sum(
                 1 for s in self._all_sessions if s.id in hits and not s.matches(query)
             )
-            self._stop_deep_search(found=added)
             self._content_hits = hits
             self._hits_basis = (normalize_match_text(query.strip()), frozenset(hits))
             self._rebuild_filtered(query)
+            literal = sum(
+                1 for s in self._all_sessions if s.id in hits or s.matches(query)
+            )
+            if unordered_terms(query) and literal < _UNORDERED_BELOW:
+                # Literal results are on screen; now the words-in-any-order
+                # wave, over what neither metadata nor the phrase found. The
+                # spinner keeps running, and one count lands at the end.
+                self._literal_added = added
+                rest = [
+                    s
+                    for s in self._all_sessions
+                    if s.id not in hits and not s.matches(query)
+                ]
+                self.run_worker(
+                    lambda q=query, ss=rest: self._unordered_search_worker(q, ss),
+                    thread=True,
+                    exclusive=True,
+                    group="content_search",
+                    name="_unordered_search",
+                )
+            else:
+                self._stop_deep_search(found=added)
+        elif event.worker.name == "_unordered_search":
+            result = event.worker.result
+            if result is None:
+                return
+            query, hits = result
+            if query != self._filter_query:
+                return
+            self._stop_deep_search(found=self._literal_added + len(hits))
+            if hits:
+                self._unordered_hits = hits
+                self._rebuild_filtered(query)
 
     # -- Global search / filter --------------------------------------------
 
@@ -2044,6 +2091,7 @@ class SessionBrowser(App):
     def _apply_filter(self, query: str) -> None:
         self._filter_query = query
         self._content_hits = {}
+        self._unordered_hits = {}
         if not query:
             self._stop_deep_search()
             self._filtered = self._cwd_scope(self._all_sessions)
@@ -2083,6 +2131,21 @@ class SessionBrowser(App):
             sessions,
             query,
             cache=self._content_search_cache,
+            cancelled=lambda: worker.is_cancelled,
+            progress=lambda phase, done, total: self._note_search_progress(
+                generation, phase, done, total
+            ),
+        )
+        return query, hits
+
+    def _unordered_search_worker(
+        self, query: str, sessions: list[Session]
+    ) -> tuple[str, dict[str, ContentHit]]:
+        worker = get_current_worker()
+        generation = self._search_generation
+        hits = search_session_unordered_hits(
+            sessions,
+            query,
             cancelled=lambda: worker.is_cancelled,
             progress=lambda phase, done, total: self._note_search_progress(
                 generation, phase, done, total
@@ -2205,13 +2268,23 @@ class SessionBrowser(App):
         if s.matches(query):
             return 0
         hit = self._content_hits.get(s.id)
-        if hit is None or hit.role not in ("user", "assistant"):
+        if hit is None:
+            # Unordered words rank below every literal hit, keeping the same
+            # conversation-over-tool-traffic split among themselves.
+            loose = self._unordered_hits.get(s.id)
+            return 2 if loose is not None and loose.role in ("user", "assistant") else 3
+        if hit.role not in ("user", "assistant"):
             return 1
         return 0
 
     def _rebuild_filtered(self, query: str) -> None:
         hits = self._content_hits
-        matched = [s for s in self._all_sessions if s.matches(query) or s.id in hits]
+        loose = self._unordered_hits
+        matched = [
+            s
+            for s in self._all_sessions
+            if s.matches(query) or s.id in hits or s.id in loose
+        ]
         # Stable sort: _all_sessions is newest-first, so recency still
         # orders sessions within the same evidence tier.
         matched.sort(key=lambda s: self._match_tier(s, query))
@@ -2254,8 +2327,17 @@ class SessionBrowser(App):
             )
             project = f"[dim]{_escape_markup(_project_name(s.cwd))}[/]"
             hit = self._content_hits.get(s.id) if self._filter_query else None
+            loose = (
+                self._unordered_hits.get(s.id)
+                if self._filter_query and hit is None
+                else None
+            )
             if hit is not None:
                 summary = _format_content_hit(hit)
+            elif loose is not None:
+                # "≈" marks words found in another order or apart, so a row
+                # whose snippet does not show the typed phrase explains itself.
+                summary = "[dim]≈ [/]" + _format_content_hit(loose)
             else:
                 summary = (
                     _escape_markup(_ellipsize(s.summary, 120))
@@ -2861,6 +2943,21 @@ class SessionBrowser(App):
                     ):
                         for s, e in self._entry_matches(i, entry, needle, query):
                             self._matches.append((start + s, start + e))
+                    terms = unordered_terms(query) if not self._matches else []
+                    if terms:
+                        # Exact first: only when the phrase is nowhere in the
+                        # session, fall back to its words in any order within
+                        # one entry -- the same rule that found it globally,
+                        # so an unordered hit never opens on "0 matches".
+                        for i, ((start, _end), entry) in enumerate(
+                            zip(
+                                self._entry_spans,
+                                self._transcript.entries,
+                                strict=True,
+                            )
+                        ):
+                            for s, e in self._entry_unordered(i, entry, terms):
+                                self._matches.append((start + s, start + e))
             else:
                 # Legacy flat path (no entry structure to lean on).
                 if self._detail_norm is None:
@@ -2897,6 +2994,23 @@ class SessionBrowser(App):
             cached[1] = idx_map
             cached[2] = True
         return find_text_spans(entry.text, query, norm=(folded, idx_map))
+
+    def _entry_unordered(
+        self, index: int, entry: TranscriptEntry, terms: list[str]
+    ) -> list[tuple[int, int]]:
+        """Term spans in one entry's tightest all-terms window, sharing the
+        fold cache _entry_matches fills."""
+        cached = self._entry_norms[index]
+        if cached is None:
+            cached = [normalize_match_text(entry.text), None, False]
+            self._entry_norms[index] = cached
+        folded = cached[0]
+        if not all(t in folded for t in terms):
+            return []
+        if not cached[2]:
+            cached[1] = _offset_map(entry.text, folded)
+            cached[2] = True
+        return unordered_spans(entry.text, terms, norm=(folded, cached[1]))
 
     def _set_match_counter(self, text: str = "") -> None:
         counter = self.query_one("#match-counter", Label)
