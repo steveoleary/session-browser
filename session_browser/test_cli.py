@@ -1977,7 +1977,7 @@ class TestSearch:
         # Header line for claude:ccc (the newest match): canonical_id, count, date, summary
         assert any(l.startswith("claude:ccc\t1\t") for l in lines)
         # At least one indented snippet line for the match
-        snippet_lines = [l for l in lines if l.startswith("  [user]")]
+        snippet_lines = [l for l in lines if l.startswith("  [0] user: ")]
         assert len(snippet_lines) > 0
         assert "wombat" in snippet_lines[0]
 
@@ -2214,8 +2214,39 @@ class TestSnippetCap:
 
         assert run_cli(["search", "perf gate", "--format", "text"]) == 0
         out = capsys.readouterr().out
-        assert out.count("[user]") == 2
+        assert out.count("] user: ") == 2
         assert "1 more snippet(s) omitted" in out
+
+    def test_a_match_already_on_screen_is_not_shown_again(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        """Two phrases OR'd together, close in one entry: the second is inside
+        the first's window, so its snippet would re-show the same passage. A
+        match far enough away still gets its own."""
+        f = tmp_path / "near.jsonl"
+        write_claude(
+            f,
+            ["the SIM105 noqa stays: suppress measured 4.85x " + "x" * 300 + " 4.85x"],
+        )
+        monkeypatch.setattr(
+            "session_browser.cli.discover_all",
+            lambda *a, **k: [
+                Session(id="near", provider="claude", content_path=str(f))
+            ],
+        )
+
+        assert run_cli(["search", "SIM105", "4.85x", "--context", "60"]) == 0
+        r = json.loads(capsys.readouterr().out)["results"][0]
+        assert r["match_count"] == 3
+        assert len(r["snippets"]) == 2
+        assert r["snippets_omitted"] == 1
+
+    def test_empty_text_output_says_so_on_stderr(self, cli):
+        """No output at all read as success. stdout stays record-only."""
+        for argv in (("search", "notthere"), ("list", "--cwd", "nowhere")):
+            code, out, err = cli(*argv, "--format", "text")
+            assert code == 0 and out == ""
+            assert "no sessions matched" in err
 
     def test_cap_is_refused_where_there_are_no_snippets(self, dense_cli):
         """Accepted and ignored in --mode ids, it read as a bound on

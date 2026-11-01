@@ -275,7 +275,8 @@ artifact_manifest envelope.
         "search",
         _SEARCH_TEXT_COLUMNS,
         "Result headers only: in snippets mode each is followed by INDENTED "
-        "snippet lines and a blank line, and full mode follows it with a "
+        "snippet lines, '[entry_index] role: text' as get prints them, and a "
+        "blank line; full mode follows it with a "
         "Markdown transcript, so a header line is a record but a line is not. "
         "With --around an offset column follows updated; a summary-only hit "
         "appends a [summary match] column.",
@@ -596,9 +597,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--sort",
         choices=["recent", "matches", "oldest"],
         default="recent",
-        help="result order: last activity (default), "
-        "match count, or oldest-first (for targets "
-        "buried under newer matches)",
+        help="result order: last activity, newest first (default); "
+        "match count; or oldest, by that same last-activity time, not by "
+        "when a session started (for targets buried under newer matches)",
     )
     p_search.add_argument(
         "--context",
@@ -612,8 +613,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="cap snippets per result (default 20; 0 = "
         "unlimited); refused with --mode ids, which has none. Omitted "
-        "snippets, and a passage repeated within one entry, are counted "
-        "in snippets_omitted",
+        "snippets are counted in snippets_omitted, including a match already "
+        "visible in a snippet from its entry and a passage repeated within one",
     )
     p_search.add_argument(
         "--format",
@@ -1505,6 +1506,11 @@ def cmd_list(args) -> int:
                 s.summary or "-",
             ]
             print("\t".join(cols))
+        if not sessions:
+            # Text has no envelope to carry an empty list, and no output at
+            # all read as success to agents who then moved on. stderr, so
+            # stdout stays one record per line.
+            print("no sessions matched", file=sys.stderr)
         for w in warnings:
             print(w, file=sys.stderr)
     return 0
@@ -2231,6 +2237,8 @@ def cmd_search(args) -> int:
             print(json.dumps(payload, indent=2))
     else:
         _print_search_text(args, matched, anchor_ts=anchor_ts, summary_map=summary_map)
+        if not matched:
+            print("no sessions matched", file=sys.stderr)
         _report_warnings_stderr(warnings)
         _report_skipped_stderr(skipped)
     return 0
@@ -2395,20 +2403,33 @@ def _shown_snippets(args, r) -> list[tuple]:
     by name and once through its CLAUDE.md symlink -- matches twice, and the
     two windows around those matches are character-for-character identical:
     the second says nothing the first did not and spends a slot of the cap.
-    Both still count in match_count, so the repeat lands in snippets_omitted.
-    Built per returned result, outside any scan loop.
+    A match lying inside a window already shown from its entry is skipped
+    too: it is on screen already. Both kinds still count in match_count, so
+    they land in snippets_omitted. Built per returned result, outside any
+    scan loop.
     """
     cap = _snippet_cap(args)
     shown: list[tuple] = []
     seen: set[tuple[int, str]] = set()
+    # Windows already shown, per entry. A match lying wholly inside one is
+    # already on screen: several phrases OR'd together, or one repeated
+    # within a sentence, otherwise each re-showed the same passage, which two
+    # agents in a dogfood run reported as near-duplicate snippets.
+    windows: dict[int, list[tuple[int, int]]] = {}
+    context = args.context
     for m in r.matches:
+        width = len(m.query)
         for off in m.offsets:
             if cap and len(shown) >= cap:
                 return shown
-            text = make_snippet(m.entry.text, off, len(m.query), args.context)
+            spans = windows.setdefault(m.entry_index, [])
+            if any(a <= off and off + width <= b for a, b in spans):
+                continue
+            text = make_snippet(m.entry.text, off, width, context)
             if (m.entry_index, text) in seen:
                 continue
             seen.add((m.entry_index, text))
+            spans.append((off - context, off + width + context))
             shown.append((m, text))
     return shown
 
@@ -2515,7 +2536,9 @@ def _print_search_text(args, matched, *, anchor_ts=None, summary_map=None) -> No
         if args.mode == "snippets":
             shown = _shown_snippets(args, r)
             for m, snip in shown:
-                print(f"  [{m.entry.role}] {snip}")
+                # get's own role-filtered shape, so the index can go straight
+                # back to get --entries without a JSON detour.
+                print(f"  [{m.entry_index}] {m.entry.role}: {snip}")
             if r.match_count > len(shown):
                 print(
                     f"  … {r.match_count - len(shown)} more snippet(s) "
