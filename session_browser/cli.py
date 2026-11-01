@@ -122,7 +122,10 @@ def _text_column_contract(label: str, columns: tuple[str, ...], extra: str) -> s
 
 
 _LIST_EPILOG = """Output contract:
-Default format: json. Text emits one tab-separated session per line.
+Default format: json. Text emits one tab-separated session per line. jsonl
+emits the envelope on line 1 with "sessions" replaced by "records" (how many
+lines follow), then one session object per line, so `| head -N` keeps whole
+records and the envelope's counts and warnings.
 {keys}
 {text}
 "warnings" and session "offset" are conditional. "total_entries" is null
@@ -210,7 +213,9 @@ _SEARCH_RESULT_KEYS = _SESSION_KEYS + (
 )
 _SEARCH_EPILOG = """Output contract:
 Default format: json; default mode: snippets. Text emits tab-separated result
-headers. ids omits snippets/entries; snippets adds snippets; full adds entries.
+headers. jsonl emits the envelope on line 1 with "results" replaced by
+"records" (how many lines follow), then one result object per line.
+ids omits snippets/entries; snippets adds snippets; full adds entries.
 {keys}
 {text}
 {subagents}
@@ -388,9 +393,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_list.add_argument(
         "--format",
-        choices=["json", "text"],
+        choices=["json", "text", "jsonl"],
         default="json",
-        help="output format (default: json)",
+        help="output format (default: json); jsonl puts one session per "
+        "line, so | head -N keeps N whole records",
     )
     p_list.set_defaults(handler=cmd_list)
 
@@ -548,9 +554,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_search.add_argument(
         "--format",
-        choices=["json", "text"],
+        choices=["json", "text", "jsonl"],
         default="json",
-        help="output format (default: json)",
+        help="output format (default: json); jsonl puts one result per "
+        "line, so | head -N keeps N whole records",
     )
     p_search.add_argument(
         "--output-dir", help="write manifest.json (and full transcripts) here"
@@ -1271,8 +1278,10 @@ def _id_sample(ids: list[str], cap: int = 5) -> str:
 
 
 def cmd_list(args) -> int:
-    if args.preview and args.format != "json":
-        raise CliError("--preview requires --format json", code="invalid_filter")
+    if args.preview and args.format == "text":
+        raise CliError(
+            "--preview requires --format json or jsonl", code="invalid_filter"
+        )
     warnings: list[str] = []
     discovered = _discover(args)
     around = _resolve_anchor(discovered, args)
@@ -1322,7 +1331,7 @@ def cmd_list(args) -> int:
                 f"possibly corrupt records; treat their metadata with "
                 f"suspicion: {_id_sample(empty)}"
             )
-    if args.format == "json":
+    if args.format != "text":
         items = []
         for s, n in zip(sessions, counts, strict=True):
             item = session_to_dict(s)
@@ -1346,7 +1355,10 @@ def cmd_list(args) -> int:
         }
         if warnings:
             payload["warnings"] = warnings
-        print(json.dumps(payload, indent=2))
+        if args.format == "jsonl":
+            _print_jsonl(payload, "sessions")
+        else:
+            print(json.dumps(payload, indent=2))
     else:
         for s, n in zip(sessions, counts, strict=True):
             updated = s.updated_at or s.created_at or "-"
@@ -1915,20 +1927,19 @@ def cmd_search(args) -> int:
             anchor_ts=anchor_ts,
             summary_map=summary_map,
         )
-    if args.format == "json":
-        print(
-            json.dumps(
-                _search_payload(
-                    args,
-                    matched,
-                    skipped,
-                    warnings,
-                    anchor_ts=anchor_ts,
-                    summary_map=summary_map,
-                ),
-                indent=2,
-            )
+    if args.format != "text":
+        payload = _search_payload(
+            args,
+            matched,
+            skipped,
+            warnings,
+            anchor_ts=anchor_ts,
+            summary_map=summary_map,
         )
+        if args.format == "jsonl":
+            _print_jsonl(payload, "results")
+        else:
+            print(json.dumps(payload, indent=2))
     else:
         _print_search_text(args, matched, anchor_ts=anchor_ts, summary_map=summary_map)
         _report_warnings_stderr(warnings)
@@ -1996,7 +2007,7 @@ def _write_search_artifacts(
         "files_written": len(planned),
         "results": len(matched),
     }
-    if args.format == "json":
+    if args.format != "text":
         print(json.dumps(summary))
     else:
         print(f"wrote {len(planned)} file(s) to {out_dir} (manifest: {manifest_path})")
@@ -2217,6 +2228,22 @@ def _shorten_home(path: str) -> str:
 
 
 _INT_ARRAY_RE = re.compile(r"\[\n\s+-?\d+(?:,\n\s+-?\d+)*\n\s*\]")
+
+
+def _print_jsonl(payload: dict, records_key: str) -> None:
+    """The envelope on one line, then one record per line.
+
+    Pretty-printed JSON is the wrong shape for the line tools agents reach
+    for: measured over real usage, 18 of 28 replayed `--format json | head -N`
+    calls produced more lines than the cap, so the agent got JSON cut
+    mid-object and nothing said so. Here a line is a record, so `| head -N`
+    keeps N - 1 whole ones. The envelope comes first, so a cut keeps the
+    counts and warnings, and its "records" says how many lines follow it --
+    which turns a truncation into something the reader can see.
+    """
+    records = payload.pop(records_key)
+    payload["records"] = len(records)
+    print("\n".join([json.dumps(payload), *(json.dumps(r) for r in records)]))
 
 
 def _compact_int_arrays(text: str) -> str:

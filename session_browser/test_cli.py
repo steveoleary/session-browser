@@ -2796,6 +2796,44 @@ class TestMultiPhraseSearch:
         assert json.loads(err)["error"]["code"] == "invalid_query"
 
 
+class TestJsonlFormat:
+    """--format jsonl: line 1 is the envelope with the record array replaced
+    by its count, then one record per line, identical to the json array's
+    items. Pretty-printed JSON cut by `| head -N` is invalid JSON with exit 0;
+    here every line is whole."""
+
+    @pytest.mark.parametrize(
+        ("argv", "key"),
+        [
+            (("list",), "sessions"),
+            (("search", "wombat"), "results"),
+            (("search", "wombat", "--mode", "ids"), "results"),
+        ],
+    )
+    def test_each_line_is_a_record_and_the_envelope_counts_them(self, cli, argv, key):
+        _, as_json, _ = cli(*argv, "--format", "json")
+        _, as_jsonl, _ = cli(*argv, "--format", "jsonl")
+        whole = json.loads(as_json)
+        lines = [json.loads(line) for line in as_jsonl.splitlines()]
+        envelope, records = lines[0], lines[1:]
+        assert records == whole.pop(key)
+        assert envelope.pop("records") == len(records) > 0
+        assert envelope == whole
+
+    def test_a_head_cut_keeps_whole_records_and_says_how_many_exist(self, cli):
+        _, out, _ = cli("list", "--format", "jsonl")
+        cut = out.splitlines()[:2]
+        envelope, first = (json.loads(line) for line in cut)
+        assert envelope["records"] > 1  # more existed than were kept
+        assert first["id"]
+
+    def test_preview_accepts_jsonl_and_still_refuses_text(self, cli):
+        code, _, _ = cli("list", "--preview", "ending", "--format", "jsonl")
+        assert code == 0
+        code, _, err = cli("list", "--preview", "ending", "--format", "text")
+        assert code == 1 and "json or jsonl" in err
+
+
 class TestSearchTriageSignals:
     """Search results carry total_entries and first/last match indices, and
     can be ordered by match count."""

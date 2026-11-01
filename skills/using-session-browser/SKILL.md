@@ -160,6 +160,11 @@ Judgment `--help` does not carry:
 
 - Whenever `--limit` drops results, `list` and `search` say so in `warnings`
   with a count and date range. **A listing with no such warning is complete.**
+- **Never cut `--format json` with `head`, `tail` or `sed`.** It is
+  pretty-printed, so the cut lands mid-object and you get invalid JSON with
+  exit 0. To cap lines, use `--format jsonl` (`list`, `search`): line 1 is the
+  envelope, whose `records` says how many lines follow, then one whole record
+  per line.
 - `--around ID --limit 15` is a k-nearest query — the 15 closest sessions
   regardless of window. Adjust `--window` only for a hard time cutoff.
 - Judge neighbours by `offset` *and* `duration_seconds` together: a small
