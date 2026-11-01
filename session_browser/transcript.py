@@ -3148,7 +3148,7 @@ def _codex_response_item(payload: dict, ts: str) -> Iterator[TranscriptEntry]:
         if output is None:
             return
         if type(output) is not str:
-            output = _json_compact(output)
+            output = _codex_structured_output(output)
         if output:
             # One C-level prefix test is all a non-shell output pays.
             if output.startswith(_CODEX_EXIT_HEADS):
@@ -3156,6 +3156,29 @@ def _codex_response_item(payload: dict, ts: str) -> Iterator[TranscriptEntry]:
             else:
                 yield TranscriptEntry("tool", output, ts, {"kind": "output"})
     # reasoning / system payloads: no readable content, skipped.
+
+
+def _codex_structured_output(output) -> str:
+    """The readable text of a tool output Codex recorded as something other
+    than a string.
+
+    Code-mode tools write a list of content items --
+    ``[{"type": "input_text", "text": "Script completed\\n..."}, ...]`` --
+    and serializing that list whole put JSON-escaped text into every snippet
+    and every read: literal ``\\n`` where the tool printed line breaks, which
+    two agents in a dogfood run reported as double-escaped output. The texts
+    are joined as a user message's are. Any other item, an image above all,
+    is left out rather than letting its base64 into the search index. A shape
+    with no text items at all keeps the old compact JSON, so nothing that
+    used to be readable goes blank.
+    """
+    if type(output) is list:
+        texts = [
+            c["text"] for c in output if type(c) is dict and type(c.get("text")) is str
+        ]
+        if texts:
+            return "".join(texts)
+    return _json_compact(output)
 
 
 # How a Codex tool output that ran exactly one command reports its exit code,

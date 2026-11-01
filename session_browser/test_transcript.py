@@ -843,6 +843,41 @@ class TestCodexCommandFailures:
         assert entries[2].metadata == {"kind": "output"}
         assert len(entries) == 3
 
+    def test_a_listed_output_reads_as_its_text_not_its_json(self, tmp_path):
+        """Code-mode outputs are lists of content items. Serialized whole they
+        read as JSON -- literal backslash-n wherever the tool printed a line
+        break, in every snippet. An image item must not reach the text."""
+        entries = self._entries(
+            tmp_path,
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "output": [
+                            {
+                                "type": "input_text",
+                                "text": "Script completed\nOutput:\n",
+                            },
+                            {"type": "input_image", "image_url": "data:image/png;AAAA"},
+                            {"type": "input_text", "text": "line one\nline two\n"},
+                        ],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "output": {"unexpected": "shape"},
+                    },
+                },
+            ],
+        )
+        assert [e.text for e in entries] == [
+            "Script completed\nOutput:\nline one\nline two\n",
+            '{"unexpected": "shape"}',
+        ]
+
     @pytest.mark.parametrize(
         ("output", "meta"),
         [
