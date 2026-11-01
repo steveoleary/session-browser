@@ -3,10 +3,10 @@
   "_blessed": {
     "date": "2026-11-01",
     "python": "3.14",
-    "moved": {},
-    "added": [
-      "cli.search.opencode.v2"
-    ]
+    "moved": {
+      "loop_opcodes.loop.codex_entries": "56518 -> 56758 (+0.4%)"
+    },
+    "added": []
   },
   "guards": {
     "cli.search.absent": "A term in no session must cost zero canonical parses: the prefilter, not the parser, answers a miss.",
@@ -309,7 +309,7 @@
   "loop_python": "3.14",
   "loop_opcodes": {
     "loop.codex_db_rows": 9458,
-    "loop.codex_entries": 56518,
+    "loop.codex_entries": 56758,
     "loop.count_overlapping": 7242,
     "loop.find_entry_matches": 8704,
     "loop.parse_jsonl": 36662,

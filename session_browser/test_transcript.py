@@ -786,6 +786,133 @@ class TestClaudeParser:
         assert [e.text for e in t.entries] == ["survivor"]
 
 
+class TestCodexCommandFailures:
+    """A failed Codex command is structured data, not just prose in an
+    output, so get --format json can count it as it counts Claude's
+    is_error."""
+
+    def _entries(self, tmp_path, records):
+        f = tmp_path / "r.jsonl"
+        write_claude_jsonl(f, records)
+        s = Session(id="cx-1", provider="codex", content_path=str(f))
+        return load_transcript(s).entries
+
+    @staticmethod
+    def _item(status, code, cmd, out="", **extra):
+        return {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CommandExecution",
+                    "command": cmd,
+                    "status": status,
+                    "exit_code": code,
+                    "aggregated_output": out,
+                    **extra,
+                },
+            },
+        }
+
+    def test_a_failed_command_inside_a_script_is_its_own_entry(self, tmp_path):
+        """Code mode runs many commands per tool call and its output says only
+        "Script completed": per-command items are the only record of which
+        one failed. A command that succeeded adds no entry."""
+        entries = self._entries(
+            tmp_path,
+            [
+                self._item("completed", 0, ["/bin/zsh", "-lc", "ls"], "a\n"),
+                self._item("failed", 2, ["/bin/zsh", "-lc", "herdr pane"], "usage\n"),
+                self._item("failed", None, "make check"),
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "output": [{"type": "input_text", "text": "Script completed"}],
+                    },
+                },
+            ],
+        )
+        assert [(e.text, e.metadata) for e in entries[:2]] == [
+            (
+                "herdr pane [exit 2]\nusage",
+                {"kind": "command", "is_error": True, "exit_code": 2},
+            ),
+            ("make check [failed]", {"kind": "command", "is_error": True}),
+        ]
+        assert entries[2].metadata == {"kind": "output"}
+        assert len(entries) == 3
+
+    @pytest.mark.parametrize(
+        ("output", "meta"),
+        [
+            (
+                "Exit code: 2\nWall time: 0 seconds\nOutput:\nboom",
+                {"kind": "output", "exit_code": 2, "is_error": True},
+            ),
+            (
+                "Exit code: 0\nWall time: 0 seconds\nOutput:\nfine",
+                {"kind": "output", "exit_code": 0},
+            ),
+            (
+                (
+                    "Chunk ID: 9\nWall time: 0.8 seconds\nProcess exited with code 1\n"
+                    "Original token count: 3\nOutput:\nnope"
+                ),
+                {"kind": "output", "exit_code": 1, "is_error": True},
+            ),
+            (
+                (
+                    "Command: /bin/zsh -lc 'make'\nChunk ID: 9\nWall time: 0\n"
+                    "Process exited with code 127\nOutput:\n"
+                ),
+                {"kind": "output", "exit_code": 127, "is_error": True},
+            ),
+            (
+                # The body may print the phrase too; only the header counts.
+                (
+                    "Chunk ID: 9\nWall time: 0\nProcess exited with code 0\n"
+                    "Output:\nProcess exited with code 5"
+                ),
+                {"kind": "output", "exit_code": 0},
+            ),
+            (
+                # Still running: no exit code yet, so none is claimed.
+                (
+                    "Chunk ID: 9\nWall time: 0\nProcess running with session ID 3\n"
+                    "Output:\n"
+                ),
+                {"kind": "output"},
+            ),
+            (
+                json.dumps(
+                    {
+                        "output": '"exit_code":0 in the text',
+                        "metadata": {"exit_code": 1, "duration_seconds": 0.1},
+                    }
+                ),
+                {"kind": "output", "exit_code": 1, "is_error": True},
+            ),
+            ("plain file contents", {"kind": "output"}),
+        ],
+    )
+    def test_a_single_command_output_carries_its_exit_code(
+        self, tmp_path, output, meta
+    ):
+        """Older tool outputs ran one command each, so the output's exit code
+        is the command's and a boolean on it is accurate."""
+        (entry,) = self._entries(
+            tmp_path,
+            [
+                {
+                    "type": "response_item",
+                    "payload": {"type": "function_call_output", "output": output},
+                }
+            ],
+        )
+        assert entry.metadata == meta
+
+
 class TestCodexParser:
     def codex_session(self, path: Path) -> Session:
         return Session(id="cx-1", provider="codex", content_path=str(path))

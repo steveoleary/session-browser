@@ -2758,20 +2758,81 @@ def _codex_response_item(payload: dict, ts: str) -> Iterator[TranscriptEntry]:
         if type(output) is not str:
             output = _json_compact(output)
         if output:
-            yield TranscriptEntry("tool", output, ts, {"kind": "output"})
+            # One C-level prefix test is all a non-shell output pays.
+            if output.startswith(_CODEX_EXIT_HEADS):
+                yield TranscriptEntry("tool", output, ts, _codex_exit_metadata(output))
+            else:
+                yield TranscriptEntry("tool", output, ts, {"kind": "output"})
     # reasoning / system payloads: no readable content, skipped.
+
+
+# How a Codex tool output that ran exactly one command reports its exit code,
+# by era, measured over sampled rollouts on one machine (2026-11-01):
+#   legacy shell tool   '{"output": ..., "metadata": {"exit_code": N, ...}}'
+#   exec_command        'Exit code: N\nWall time: ...\nOutput:\n...'
+#   unified exec        'Chunk ID: ...\nWall time: ...\nProcess exited with
+#                       code N\n...', sometimes behind a 'Command: ...' line
+# One command per output, so the output's exit code is the command's and a
+# boolean on it is accurate. Code-mode scripts are different -- many commands
+# per output, which only ever says "Script completed" -- and are covered by
+# their CommandExecution items instead. No rollout sampled carries both.
+_CODEX_EXIT_HEADS = ('{"output":', "Exit code: ", "Chunk ID: ", "Command: ")
+_CODEX_EXIT_INT = re.compile(r"-?\d+")
+_CODEX_EXIT_JSON = re.compile(r'"exit_code"\s*:\s*')
+_CODEX_EXITED = "\nProcess exited with code "
+# The header block is short; the output after it can be megabytes and may
+# itself print "Process exited with code", so the search stops at its start.
+_CODEX_EXIT_HEADER_MAX = 4096
+
+
+def _codex_exit_metadata(output: str) -> dict:
+    """Metadata for a single-command tool output: its exit code, and
+    ``is_error`` when that is non-zero, as Claude marks a failed tool.
+
+    str.find and an anchored match rather than a regex search over the
+    header: timed at under half the cost, on a path every older shell output
+    takes."""
+    if output[0] == "{":
+        # The metadata object follows the escaped output string, inside which
+        # a bare '"exit_code"' cannot occur, so the last one is the real one.
+        # Codex writes it compact; a space after the colon is tolerated.
+        at = output.rfind('"exit_code"')
+        m = _CODEX_EXIT_JSON.match(output, at) if at >= 0 else None
+        at = m.end() if m is not None else -1
+    elif output[0] == "E":  # "Exit code: N", the one shape that leads with it
+        at = 11
+    else:
+        end = output.find("\nOutput:", 0, _CODEX_EXIT_HEADER_MAX)
+        at = output.find(_CODEX_EXITED, 0, end if end >= 0 else _CODEX_EXIT_HEADER_MAX)
+        at = at + 26 if at >= 0 else -1
+    m = _CODEX_EXIT_INT.match(output, at) if at >= 0 else None
+    if m is None:
+        return {"kind": "output"}
+    code = int(m.group())
+    if code:
+        return {"kind": "output", "exit_code": code, "is_error": True}
+    return {"kind": "output", "exit_code": code}
 
 
 def _codex_item_completed(payload: dict, ts: str) -> Iterator[TranscriptEntry]:
     """Parse a paginated-era ``item_completed`` event into zero or one entry.
 
-    Only ``UserMessage`` is taken. An ``AgentMessage`` item repeats the
-    response item the model returned, which is already parsed above, and
-    every other TurnItem (reasoning, command execution, file change) either
+    ``UserMessage`` is taken, and a ``CommandExecution`` that failed (see
+    _codex_failed_command). An ``AgentMessage`` item repeats the response
+    item the model returned, which is already parsed above, and every other
+    TurnItem (reasoning, a command that succeeded, file change) either
     duplicates a response item or carries no readable turn.
     """
     item = payload.get("item")
-    if type(item) is not dict or item.get("type") != "UserMessage":
+    if type(item) is not dict:
+        return
+    itype = item.get("type")
+    if itype == "CommandExecution":
+        code = item.get("exit_code")
+        if item.get("status") == "failed" or (type(code) is int and code):
+            yield _codex_failed_command(item, code, ts)
+        return
+    if itype != "UserMessage":
         return
     content = item.get("content")
     if type(content) is not list:
@@ -2787,6 +2848,35 @@ def _codex_item_completed(payload: dict, ts: str) -> Iterator[TranscriptEntry]:
     text = "".join(texts)
     if text:
         yield TranscriptEntry("user", text, ts)
+
+
+def _codex_failed_command(item: dict, code, ts: str) -> TranscriptEntry:
+    """A command a code-mode script ran that failed, as an entry of its own.
+
+    A code-mode tool call runs any number of commands and its output says
+    only "Script completed", so a failure inside it is invisible to anything
+    reading outputs. The CommandExecution item carries it, per command. Only
+    failures become entries: a successful command adds nothing the output
+    does not, and an entry per command would multiply the transcript.
+    """
+    cmd = item.get("command")
+    if type(cmd) is list:
+        # ["/bin/zsh", "-lc", "herdr pane"]: the shell wrapper is noise.
+        if len(cmd) == 3 and cmd[1] in ("-lc", "-c"):
+            cmd = cmd[2]
+        else:
+            cmd = " ".join(str(c) for c in cmd)
+    elif type(cmd) is not str:
+        cmd = "?"
+    status = f"exit {code}" if type(code) is int else "failed"
+    text = f"{cmd} [{status}]"
+    out = item.get("aggregated_output")
+    if type(out) is str and out.strip():
+        text += f"\n{out.rstrip()}"
+    meta: dict = {"kind": "command", "is_error": True}
+    if type(code) is int:
+        meta["exit_code"] = code
+    return TranscriptEntry("tool", text, ts, meta)
 
 
 def _codex_user_text(payload: dict) -> str:
