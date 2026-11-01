@@ -46,6 +46,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from . import compressed
 from .discovery import (
@@ -66,6 +67,15 @@ class DeleteFailed(Exception):
     """The deletion was attempted and did not complete."""
 
 
+class Removal(NamedTuple):
+    """One thing a delete removes, for the confirmation: what kind of thing
+    it is, the path or name that identifies it, and an optional aside."""
+
+    label: str
+    value: str
+    note: str = ""
+
+
 @dataclass(frozen=True)
 class DeletePlan:
     """What deleting one session will remove, worked out before anything is."""
@@ -78,8 +88,8 @@ class DeletePlan:
     command: tuple[str, ...]
     # Sessions in the list that go with it: subagents at any depth.
     subagents: int
-    # Human-readable lines for the confirmation, one per thing removed.
-    removes: tuple[str, ...]
+    # What the confirmation lists, one per thing removed.
+    removes: tuple[Removal, ...]
 
 
 def plan_delete(session: Session, sessions: Iterable[Session]) -> DeletePlan:
@@ -144,10 +154,10 @@ def _plan_claude(session: Session, subagents: int) -> DeletePlan:
     # leaves the session visible in the list, where it can be deleted again,
     # rather than an invisible remainder nothing will ever clean up.
     paths = tuple(p for p in aux if p.exists()) + (transcript,)
-    removes = [f"transcript  {transcript}"]
+    removes = [Removal("transcript", str(transcript))]
     if aux[0] in paths:
-        removes.append(f"session dir {aux[0]}  (subagents, tool output)")
-    removes += [f"state       {p}" for p in aux[1:] if p in paths]
+        removes.append(Removal("session dir", str(aux[0]), "subagents, tool output"))
+    removes += [Removal("state", str(p)) for p in aux[1:] if p in paths]
     return DeletePlan(session, paths, (), subagents, tuple(removes))
 
 
@@ -197,8 +207,8 @@ def _plan_codex(session: Session, subagents: int) -> DeletePlan:
     except ValueError:
         raise DeleteRefused(f"Not a Codex thread id: {session.id}") from None
     removes = (
-        f"rollout     {session.content_path}",
-        "index       Codex's own thread and history rows",
+        Removal("rollout", session.content_path),
+        Removal("index", "Codex's own thread and history rows"),
     )
     command = (codex, "delete", "--force", session.id)
     return DeletePlan(session, (), command, subagents, removes)
@@ -292,8 +302,10 @@ def _plan_opencode(session: Session, subagents: int) -> DeletePlan:
     if not rows:
         raise DeleteRefused(f"OpenCode has no session {session.id}")
     removes = (
-        f"session     {session.id}, from OpenCode's database",
-        "            its messages and event history, by OpenCode's own delete",
+        Removal(
+            "session", "its row in OpenCode's database", "by OpenCode's own delete"
+        ),
+        Removal("history", "its messages and event history"),
     )
     command = (opencode, "session", "delete", session.id)
     return DeletePlan(session, (), command, subagents, removes)

@@ -384,3 +384,36 @@ class TestDeleteKey:
             await pilot.pause()
             assert not isinstance(app.screen, ConfirmDelete)
             assert "still running" in str(app._status.render())
+
+
+@pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
+def test_the_confirmation_names_each_folder_once_and_never_wraps_a_name(home):
+    """A wall of wrapped absolute paths was the complaint: the long part of
+    every path is its folder, so each folder is written once and the entries
+    under it carry only their names, which then fit on a line."""
+    import io
+
+    from rich.console import Console
+
+    session = _claude_session(home, "3f2a8c1e-9b7d-4e2f-a1c3-5d6e7f8a9b0c")
+    plan = deletion.plan_delete(session, scan_claude())
+    out = io.StringIO()
+    # The modal is 100 wide less border and padding; 94 is what is left.
+    Console(file=out, width=94).print(ConfirmDelete(plan)._removals())
+    lines = out.getvalue().splitlines()
+
+    project = "~/.claude/projects/-Users-test/"
+    assert [ln for ln in lines if not ln.startswith(" ")] == [
+        project,
+        "~/.claude/session-env/",
+        "~/.claude/file-history/",
+        "and its 1 subagent, which goes with it",
+    ]
+    entries = [ln.split() for ln in lines if ln.startswith("  ")]
+    assert [e[:2] for e in entries] == [
+        ["transcript", f"{session.id}.jsonl"],
+        ["session", "dir"],
+        ["state", session.id],
+        ["state", session.id],
+    ]
+    assert entries[1][2:] == [session.id, "subagents,", "tool", "output"]

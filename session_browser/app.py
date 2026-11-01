@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import ClassVar, NamedTuple
 
 try:
+    from rich.console import Group
+    from rich.padding import Padding
     from rich.segment import Segment
+    from rich.table import Table
+    from rich.text import Text
     from textual import events
     from textual.app import App, ComposeResult
     from textual.binding import Binding
@@ -1401,11 +1405,25 @@ class MultiplexerChoice(ModalScreen["multiplexer.Target | None"]):
         self.dismiss(None)
 
 
+def _tilde(path: str) -> str:
+    """*path* with the home directory written as ``~``."""
+    home = str(Path.home())
+    if path == home or path.startswith(home + os.sep):
+        return "~" + path[len(home) :]
+    return path
+
+
 class ConfirmDelete(ModalScreen["deletion.DeletePlan | None"]):
     """Spell out what a permanent delete removes, and take ``y`` to do it.
 
     Anything else cancels. Not Enter: it is the key most likely to arrive by
     accident from the list underneath, and this cannot be undone.
+
+    Laid out for a glance: what the session was about first and in bold, the
+    exact identity under it in a muted line, then what goes as a label/value
+    grid whose values wrap inside their own column, so a long path never
+    strands its label on a line of its own. Paths under the home directory
+    read from ``~``.
     """
 
     CSS = """
@@ -1421,6 +1439,19 @@ class ConfirmDelete(ModalScreen["deletion.DeletePlan | None"]):
         background: $surface;
         border: round $error;
     }
+    #confirm-delete > Static {
+        height: auto;
+    }
+    #confirm-delete .delete-summary {
+        text-style: bold;
+        margin-top: 1;
+    }
+    #confirm-delete .delete-meta {
+        color: $text-muted;
+    }
+    #confirm-delete .delete-removes {
+        margin: 1 0;
+    }
     """
 
     def __init__(self, plan: deletion.DeletePlan) -> None:
@@ -1429,26 +1460,61 @@ class ConfirmDelete(ModalScreen["deletion.DeletePlan | None"]):
 
     def compose(self) -> ComposeResult:
         s = self._plan.session
-        lines = [
-            Content.from_markup("[bold $error]Delete this session permanently?[/]"),
-            Content(""),
-            Content(f"{s.provider}  {s.id}"),
-            Content(s.summary or "(no summary)"),
-            Content(s.cwd),
-            Content(""),
-            *(Content(line) for line in self._plan.removes),
-        ]
-        if self._plan.subagents:
-            n = self._plan.subagents
-            lines.append(Content(f"and its {n} subagent{'s' if n != 1 else ''}"))
-        lines += [
-            Content(""),
-            Content.from_markup(
-                "[bold]y[/] delete   [dim]any other key cancels. This cannot be "
-                "undone.[/]"
-            ),
-        ]
-        yield Static(Content("\n").join(lines), id="confirm-delete")
+        identity = " · ".join(x for x in (s.provider, s.id, _tilde(s.cwd)) if x)
+        with Vertical(id="confirm-delete"):
+            yield Static(
+                Content.from_markup("[bold $error]Delete this session permanently?[/]")
+            )
+            yield Static(Content(s.summary or "(no summary)"), classes="delete-summary")
+            yield Static(Content(identity), classes="delete-meta")
+            yield Static(self._removals(), classes="delete-removes")
+            yield Static(
+                Content.from_markup(
+                    "[bold]y[/] delete   [dim]any other key cancels. This cannot "
+                    "be undone.[/]"
+                )
+            )
+
+    def _removals(self) -> Group:
+        """What goes, a folder heading at a time.
+
+        Every path a delete removes is long because of its folder -- a Claude
+        project directory alone is ~/.claude/projects/ plus the whole encoded
+        cwd -- and short because of its name. So each folder is written once,
+        dim, and the entries under it carry only their names: exact, and
+        short enough not to wrap. A value that is not a path (a provider's
+        own index rows) stands on its own line.
+        """
+        removes = self._plan.removes
+        width = max((len(r.label) for r in removes), default=0)
+        parts: list = []
+        grid: Table | None = None
+        folder: str | None = None
+        for removal in removes:
+            here, name = None, removal.value
+            if os.path.isabs(name):
+                here, _, name = _tilde(name).rpartition("/")
+            if grid is None or here != folder:
+                folder = here
+                if here is not None:
+                    parts.append(Text(f"{here}/", style="dim"))
+                grid = Table.grid(padding=(0, 2))
+                grid.add_column(style="dim", no_wrap=True, min_width=width)
+                grid.add_column(overflow="fold")
+                parts.append(Padding(grid, (0, 0, 0, 2)))
+            value = Text(name)
+            if removal.note:
+                value.append(f"   {removal.note}", style="dim")
+            grid.add_row(removal.label, value)
+        if n := self._plan.subagents:
+            parts.append(
+                Text(
+                    f"and its {n} subagent, which goes with it"
+                    if n == 1
+                    else f"and its {n} subagents, which go with it"
+                )
+            )
+        return Group(*parts)
 
     def on_key(self, event: events.Key) -> None:
         event.stop()
