@@ -6,7 +6,9 @@
     "opencode": "1.18.30",
     "codex_cli": "0.154.0",
     "claude_code_interrupted_run": "2.1.272",
-    "claude_code_workflow_run": "2.1.272"
+    "claude_code_workflow_run": "2.1.272",
+    "opencode_interrupted_run": "2.0.32",
+    "codex_cli_guardian_run": "0.166.0"
   },
   "claude": {
     "parent_session": "a3dcce18-13a9-4260-820b-ec747764e557",
@@ -113,6 +115,12 @@
         "child": "ses_f64465b49ffeq3PGq6WBCaxsaE",
         "description": "gamma",
         "subagent_type": "general"
+      },
+      {
+        "spawner": "ses_eafb5ee61ffelUXt6EdDAW1Mcg",
+        "child": "ses_eafb5e27cffe2INEGTSD3tzCRH",
+        "description": "Summarize session_browser py files",
+        "subagent_type": "general"
       }
     ],
     "failed_spawns": [
@@ -132,7 +140,29 @@
         "names_spawner": "ses_f6447a689ffeTR731crEfPt1mL",
         "child": "ses_f6447843affegRuo4O9O7qc2vL"
       }
-    ]
+    ],
+    "interrupted": {
+      "recorded": "2026-10-18",
+      "how": "OpenCode 2.0.32 in a Herdr pane, model deepseek-v4.1-flash-free: the parent was asked to launch one general subagent that reads every .py file one at a time; Esc Esc in the pane while the child was mid-run.",
+      "parent": "ses_eafb5ee61ffelUXt6EdDAW1Mcg",
+      "child": "ses_eafb5e27cffe2INEGTSD3tzCRH",
+      "spawning_side": {
+        "tool_name": "subagent",
+        "status": "error",
+        "error": {
+          "type": "aborted",
+          "message": "Tool execution interrupted (sessionID: ses_eafb5e27cffe2INEGTSD3tzCRH)"
+        }
+      },
+      "idle_outcome": {
+        "parent": "interrupted",
+        "child": "interrupted"
+      },
+      "child_last_record": {
+        "type": "idle",
+        "outcome": "interrupted"
+      }
+    }
   },
   "codex": {
     "roots": [
@@ -230,6 +260,27 @@
         "session_id": "01a0a432-d7fd-7ed3-9cd0-1effc8df9262",
         "multi_agent_version": "disabled",
         "copies_spawner_history": false
+      },
+      "in_thread_spawn_edges": false
+    },
+    "guardian": {
+      "recorded": "2026-11-01",
+      "how": "codex exec (codex-cli 0.166.0, low reasoning effort) in a scratch git repository with -c approvals_reviewer=\"auto_review\" -c approval_policy=\"on-request\" -c sandbox_mode=\"workspace-write\", asked to run one curl requesting escalated permissions. The exec thread is the parent; Codex opens a Guardian review thread to judge the escalation (it allowed it).",
+      "parent": "01a19721-3241-71f3-9bd1-bf0f60685ba4",
+      "child": "01a19721-32d9-7d10-bcf0-48049750c9cb",
+      "spawning_side": "The child's own task_started carries turn_attribution.turn_trigger \"guardian_review\" and parent_turn_id equal to the parent's turn; the parent's custom_tool_call asked for sandbox_permissions require_escalated. Nothing in the parent rollout names the child.",
+      "child_session_meta": {
+        "source": {
+          "subagent": {
+            "other": "guardian"
+          }
+        },
+        "thread_source": "guardian_review",
+        "parent_thread_id_top_level": "01a19721-3241-71f3-9bd1-bf0f60685ba4",
+        "session_id": "01a19721-3241-71f3-9bd1-bf0f60685ba4",
+        "multi_agent_version": "disabled",
+        "copies_spawner_history": false,
+        "quotes_parent_history_as_user_message": true
       },
       "in_thread_spawn_edges": false
     }

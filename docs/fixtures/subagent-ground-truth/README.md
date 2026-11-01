@@ -56,6 +56,12 @@ overlay):
 
 Edges come from each `task` tool part's `state.metadata.sessionId`.
 
+**OpenCode 2.0.32**, recorded 2026-10-18 in a Herdr pane on the 2.x schema
+(`session_v2`/`session_message`) and reduced to the same row shape: a parent
+that launched one `general` subagent to read every `.py` file in turn, then
+**Esc Esc while the child was mid-run**. Recorded under
+`opencode.interrupted`, and as an ordinary edge.
+
 **Codex CLI 0.154.0** (`codex exec`, `agents.max_depth=2`, low reasoning
 effort), in a scratch directory:
 
@@ -65,6 +71,12 @@ effort), in a scratch directory:
 - `codex exec fork` of the root, and a second fork of `gamma`, the subagent;
 - a second root that spawned `epsilon` into `sleep 300` and was then
   interrupted with SIGINT while epsilon was still running.
+- recorded 2026-11-01 on **codex-cli 0.166.0**: `codex exec` with
+  `-c approvals_reviewer="auto_review" -c approval_policy="on-request"
+  -c sandbox_mode="workspace-write"`, asked to run one `curl` requesting
+  escalated permissions. That opens a **Guardian review** thread to judge the
+  escalation. Recorded under `codex.guardian`; the trigger is the
+  `approvals_reviewer` setting, which needs no interactive approval at all.
 - recorded 2026-09-15 with the same build: `codex review --uncommitted` in a
   scratch repository, which runs as an `exec` parent plus a second thread for
   the review itself. Recorded under `codex.review`; its spawning-side evidence
@@ -131,6 +143,12 @@ OpenCode:
   instead of `session.parent_id` would credit the fork with its source's
   children.
 - A depth-2 child's `parent_id` is its direct spawner, not the root.
+- **An interrupted child keeps its edge on both sides** (2.x). The child's
+  `parent_id` stands, and unlike a killed Claude subagent the spawning side
+  still names it: the parent's tool — `subagent` in 2.x, `task` in 1.x —
+  ends `status: error`, `error.type: aborted`, message `Tool execution
+  interrupted (sessionID: <child>)`. Both sessions end `idle_outcome:
+  interrupted`, and the child's last record is an `idle` row saying so.
 
 Codex:
 
@@ -160,6 +178,15 @@ Codex:
   at all, so the index path cannot recover this parent from the row it reads.
   A review child also copies **none** of its spawner's history, unlike a
   `thread_spawn` child.
+- **A `guardian` child has the review child's shape.** `source` is
+  `{"subagent":{"other":"guardian"}}`, `thread_source` `guardian_review`; the
+  parent is again only the top-level `parent_thread_id` (and `session_id`),
+  with no `thread_spawn_edges` row. Its spawning-side evidence is in the
+  child: `task_started.turn_attribution` has `turn_trigger`
+  `guardian_review` and `parent_turn_id` naming the parent's turn; nothing in
+  the parent rollout names the child. Unlike a review child, **its prompt
+  quotes the parent's history** as a user message, so it repeats the
+  parent's words.
 - A fork copies **no** spawn records. It points at its source through
   `history_base` instead of repeating it, unlike an OpenCode fork.
 - A spawn's `root_turn_id` groups like Claude's `promptId`: alpha and beta
@@ -217,6 +244,7 @@ are the ones Codex wrote, with `rollout_path` made relative to `~/.codex`.
 
 ## Not covered yet
 
-- **An interrupted OpenCode subagent.** Codex and Claude Code each have one.
-- **Codex `guardian` subagents.** Only the incidental corpus has them, and no
-  headless trigger is known.
+Nothing from the original list: an interrupted OpenCode subagent and a Codex
+`guardian` thread were both recorded on 2026-11-01's pass. Every provider now
+has a finished, an interrupted and (where the provider has one) a
+non-spawn subagent kind pinned.

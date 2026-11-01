@@ -394,6 +394,20 @@ def check_opencode_raw_facts() -> None:
     assert {c["names_spawner"] for c in copied} == {fork["forked_from"]}, copied
     for e in OPENCODE["edges"]:
         assert rows[e["child"]]["parent_id"] == e["spawner"], e
+    # Interrupted mid-run (OpenCode 2.x): unlike a killed Claude subagent,
+    # the spawning side still names the child -- the parent's `subagent`
+    # tool ends "aborted" with the child's id in its message -- and the
+    # child keeps its parent_id, so the edge survives the kill on both sides.
+    cut = OPENCODE["interrupted"]
+    parent, child = cut["parent"], cut["child"]
+    assert rows[child]["parent_id"] == parent, rows[child]
+    assert rows[parent]["parent_id"] is None, rows[parent]
+    spawn = cut["spawning_side"]
+    assert spawn["tool_name"] == "subagent" and spawn["status"] == "error", spawn
+    assert spawn["error"]["type"] == "aborted", spawn
+    assert spawn["error"]["message"].endswith(f"(sessionID: {child})"), spawn
+    assert cut["idle_outcome"] == {"parent": "interrupted", "child": "interrupted"}
+    assert cut["child_last_record"] == {"type": "idle", "outcome": "interrupted"}
 
 
 def codex_rollout(thread_id: str) -> list[dict]:
@@ -549,6 +563,63 @@ def check_codex_review_raw_facts() -> None:
     assert "parent_thread_id" not in row, row
 
 
+def check_codex_guardian_raw_facts() -> None:
+    """A Guardian review thread: the approvals reviewer, opened when the
+    parent asked for escalated permissions with approvals_reviewer set to
+    auto_review. Shaped like a review child -- parent at the top level of
+    session_meta, none inside source.subagent, no thread_spawn_edges row --
+    and, unlike one, its prompt quotes the parent's history as a user
+    message, so it repeats the parent's words."""
+    guardian = CODEX["guardian"]
+    parent, child = guardian["parent"], guardian["child"]
+    want = guardian["child_session_meta"]
+    child_rollout = codex_rollout(child)
+    metas = [r for r in child_rollout if r["type"] == "session_meta"]
+    assert len(metas) == 1, "a guardian copies no spawner history records"
+    meta = metas[0]["payload"]
+    assert meta["source"] == want["source"], meta
+    assert meta["thread_source"] == want["thread_source"], meta
+    assert meta["parent_thread_id"] == parent, meta
+    assert meta["session_id"] == parent and meta["id"] == child, meta
+    assert meta["multi_agent_version"] == want["multi_agent_version"], meta
+    assert "subagent_history_start_ordinal" not in meta, meta
+    started = next(
+        r["payload"]
+        for r in child_rollout
+        if r["type"] == "event_msg" and r["payload"]["type"] == "task_started"
+    )
+    attribution = started["turn_attribution"]
+    parent_rollout = codex_rollout(parent)
+    parent_turn = next(
+        r["payload"]["turn_id"]
+        for r in parent_rollout
+        if r["type"] == "event_msg" and r["payload"]["type"] == "task_started"
+    )
+    assert attribution["turn_trigger"] == "guardian_review", attribution
+    assert attribution["parent_turn_id"] == parent_turn, attribution
+    prompt = next(
+        r["payload"]
+        for r in parent_rollout
+        if r["type"] == "response_item" and r["payload"].get("role") == "user"
+    )["content"][0]["text"]
+    quoted = [
+        c["text"]
+        for r in child_rollout
+        if r["type"] == "response_item" and r["payload"].get("role") == "user"
+        for c in r["payload"]["content"]
+    ]
+    assert any(prompt in q for q in quoted), "the guardian quotes its parent"
+    parent_meta = parent_rollout[0]["payload"]
+    assert parent_meta["source"] == "exec" and "parent_thread_id" not in parent_meta
+    assert not any(
+        child in (e["parent_thread_id"], e["child_thread_id"])
+        for e in CODEX_INDEX["thread_spawn_edges"]
+    )
+    (row,) = [t for t in CODEX_INDEX["threads"] if t["id"] == child]
+    assert json.loads(row["source"]) == want["source"], row
+    assert row["thread_source"] == want["thread_source"], row
+
+
 def check_codex_graph() -> None:
     """The Codex graph through both discovery paths: index and file scan."""
     spawner_of = {e["child"]: e["spawner"] for e in CODEX["edges"]}
@@ -568,6 +639,10 @@ def check_codex_graph() -> None:
                 # Known as a subagent on both paths; its parent is not read on
                 # either, although the rollout carries it (see the raw facts).
                 assert s["subagent_kind"] == "review", (where, s)
+                assert s["parent_id"] == "", (where, s)
+            elif thread_id == CODEX["guardian"]["child"]:
+                # The same shape as review, and the same status today.
+                assert s["subagent_kind"] == "guardian", (where, s)
                 assert s["parent_id"] == "", (where, s)
             else:
                 # Roots and forks alike: a fork is not a child.
@@ -643,6 +718,7 @@ def check_baseline() -> None:
     check_opencode_raw_facts()
     check_codex_raw_facts()
     check_codex_review_raw_facts()
+    check_codex_guardian_raw_facts()
     check_codex_graph()
     with tempfile.TemporaryDirectory() as tmp:
         home = build_home(Path(tmp))
@@ -666,6 +742,7 @@ def check_candidate() -> None:
     check_opencode_raw_facts()
     check_codex_raw_facts()
     check_codex_review_raw_facts()
+    check_codex_guardian_raw_facts()
     check_codex_graph()
     check_codex_inherited_history()
     with tempfile.TemporaryDirectory() as tmp:

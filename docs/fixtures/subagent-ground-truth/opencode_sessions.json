@@ -79,5 +79,23 @@
     "directory": "/fixture/spawn-opencode",
     "time_created": 1789319029942,
     "time_updated": 1789319033202
+  },
+  {
+    "id": "ses_eafb5ee61ffelUXt6EdDAW1Mcg",
+    "parent_id": null,
+    "agent": "build",
+    "title": "Test subagent reading session_browser .py files",
+    "directory": "/fixture/spawn-opencode-v2-interrupted",
+    "time_created": 1792348393915,
+    "time_updated": 1792348477963
+  },
+  {
+    "id": "ses_eafb5e27cffe2INEGTSD3tzCRH",
+    "parent_id": "ses_eafb5ee61ffelUXt6EdDAW1Mcg",
+    "agent": "general",
+    "title": "Summarize session_browser py files",
+    "directory": "/fixture/spawn-opencode-v2-interrupted",
+    "time_created": 1792348396954,
+    "time_updated": 1792348477989
   }
 ]

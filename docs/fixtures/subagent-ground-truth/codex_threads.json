@@ -164,6 +164,36 @@
       "source": "{\"subagent\":\"review\"}",
       "thread_source": "subagent",
       "updated_at_ms": 1789461222339
+    },
+    {
+      "id": "01a19721-3241-71f3-9bd1-bf0f60685ba4",
+      "rollout_path": "sessions/2026/11/01/rollout-2026-11-01T12-41-37-01a19721-3241-71f3-9bd1-bf0f60685ba4.jsonl",
+      "created_at_ms": 1793536897616,
+      "updated_at_ms": 1793536904800,
+      "source": "exec",
+      "thread_source": "user",
+      "cwd": "/fixture/spawn-codex-guardian",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "sb-fixture-guardian. Run exactly this shell command, which needs network access outside the sandbox, requesting escalated permissions for it: curl -sI https://example.com | head -1. Then reply DONE.",
+      "archived": 0,
+      "agent_path": null,
+      "agent_nickname": null
+    },
+    {
+      "id": "01a19721-32d9-7d10-bcf0-48049750c9cb",
+      "rollout_path": "sessions/2026/11/01/rollout-2026-11-01T12-41-37-01a19721-32d9-7d10-bcf0-48049750c9cb.jsonl",
+      "created_at_ms": 1793536897753,
+      "updated_at_ms": 1793536903776,
+      "source": "{\"subagent\":{\"other\":\"guardian\"}}",
+      "thread_source": "guardian_review",
+      "cwd": "/fixture/spawn-codex-guardian",
+      "git_branch": null,
+      "git_origin_url": null,
+      "first_user_message": "",
+      "archived": 0,
+      "agent_path": null,
+      "agent_nickname": null
     }
   ],
   "thread_spawn_edges": [
