@@ -631,6 +631,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _Once(argparse.Action):
+    """Store a single-valued option, refusing a second occurrence of it.
+
+    argparse keeps the last of a repeated option and says nothing, so
+    ``--until 2026-10-01 ... --until -1d`` -- the shape an edited command line
+    takes -- answered for a window nobody asked for, and nothing in the output
+    showed which bound had won. A filter given twice is a mistake to report,
+    not a choice to make on the caller's behalf. Repeatable flags
+    (--exclude-cwd, --role) keep ``append``.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        seen = namespace.__dict__.setdefault("_once_seen", set())
+        if self.dest in seen:
+            raise argparse.ArgumentError(
+                self, "given more than once; it takes a single value"
+            )
+        seen.add(self.dest)
+        setattr(namespace, self.dest, values)
+
+
 def _add_filter_args(p: argparse.ArgumentParser) -> None:
     # Validated rather than filtered with. An unknown value used to filter
     # every session out and exit 0, so `--provider claude-code` -- the
@@ -640,12 +661,14 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
     # ``type`` runs before the choices check, so CLAUDE still works.
     p.add_argument(
         "--provider",
+        action=_Once,
         type=str.lower,
         choices=sorted(ALL_SCANNERS),
         help="provider to scan (case-insensitive)",
     )
     p.add_argument(
         "--repo",
+        action=_Once,
         help="case-insensitive substring of the inferred project name, not "
         "a git remote URL. OpenCode records a project root. Codex uses the "
         "final segment of its recorded git origin when present, then falls "
@@ -654,7 +677,11 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         "sessions without origin metadata -- remain named after the "
         "worktree directory; read cwd off hits when that uncertainty matters",
     )
-    p.add_argument("--cwd", help="case-insensitive substring of working directory")
+    p.add_argument(
+        "--cwd",
+        action=_Once,
+        help="case-insensitive substring of working directory",
+    )
     p.add_argument(
         "--exclude-cwd",
         metavar="SUBSTR",
@@ -673,6 +700,7 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--since",
+        action=_Once,
         help="lower bound on last activity (newest message, not "
         "file mtime): ISO 8601, or relative like "
         "-30m/-2h/-1d/-1w; a date-only value means from the "
@@ -680,6 +708,7 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--until",
+        action=_Once,
         help="upper bound on last activity (newest message, not "
         "file mtime): ISO 8601, or relative like "
         "-30m/-2h/-1d/-1w; a date-only value includes that "
@@ -687,6 +716,7 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--around",
+        action=_Once,
         metavar="SESSION",
         help="temporal anchor: keep sessions whose last activity "
         "falls within --window of this session's (same id "
@@ -697,6 +727,7 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--window",
+        action=_Once,
         metavar="DUR",
         help="half-width of the --around window on each side: "
         "30m/2h/1d/1w (default 1d)",
@@ -719,6 +750,7 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument(
         "--limit",
+        action=_Once,
         type=int,
         help="maximum number of results; omit it and every match is "
         "returned, unbounded. When it does truncate, a warning reports how "

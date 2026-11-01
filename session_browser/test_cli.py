@@ -3708,6 +3708,26 @@ class TestRelativeDates:
         assert code == 1
         assert json.loads(err)["error"]["code"] == "invalid_date"
 
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ("list", "--until", "-1d", "--until", "2026-06-02"),
+            ("search", "wombat", "--cwd", "projA", "--cwd=projC"),
+            ("stats", "--limit", "5", "--limit", "9"),
+        ],
+    )
+    def test_a_single_valued_filter_given_twice_is_refused(self, cli, argv):
+        """argparse keeps the last of a repeated option and says nothing, so
+        an edited command line answered for a window nobody asked for."""
+        with pytest.raises(SystemExit) as exc:
+            cli(*argv)
+        assert exc.value.code == 2
+
+    def test_repeatable_filters_still_repeat(self, cli):
+        code, out, _ = cli("list", "--exclude-cwd", "projA", "--exclude-cwd", "projB")
+        assert code == 0
+        assert [s["id"] for s in json.loads(out)["sessions"]] == ["claude:ccc"]
+
 
 class TestStats:
     @pytest.fixture
