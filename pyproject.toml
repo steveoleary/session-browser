@@ -75,7 +75,7 @@ ignore = [
   # `a + [b]` over `[*a, b]`. Pure style, and the concatenation form reads
   # better for the argv lists this codebase builds.
   "RUF005",
-  # Discovery walks session files written by three other tools. A broken
+  # Discovery walks session files written by four other tools. A broken
   # file must skip one session, not kill the scan, so the blind excepts are
   # the design; every one of them logs.
   "BLE001",

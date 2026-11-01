@@ -2,9 +2,8 @@
 
 A Python CLI + TUI (`session_browser/`) that discovers and retrieves prior
 agent sessions across providers (Claude Code, Codex, OpenCode, Pi). Tests
-live alongside the code in `session_browser/`: `tests.py`, `test_cli.py`,
-`test_transcript.py`, `test_case_runner.py`, `test_retrieval_compare.py`,
-`test_deletion.py` and `test_performance.py`.
+live alongside the code in `session_browser/`: `tests.py` and the `test_*.py`
+modules beside it.
 
 Committed regression fixtures live in `docs/fixtures/`. Each has a
 `verify_case.py` and a declared accepted state; run them with
@@ -49,7 +48,7 @@ an agent mid-edit invites it to work from a stale copy.
 
 Three rules are switched off in `pyproject.toml` and each says why: `RUF001`/
 `RUF002` (a TUI renders `×`, `›` and en dashes on purpose), `RUF005` (style),
-`BLE001` (discovery reads three other tools' files; isolating a bad file is the
+`BLE001` (discovery reads four other tools' files; isolating a bad file is the
 design, and every catch logs).
 
 **A `# noqa` in this repo carries a reason, and one of them is perf.**

@@ -100,7 +100,7 @@ The editable install always runs the code in your checkout.
 
 ### Search across every session
 
-Press `/` and search once across all three providers. The session list narrows
+Press `/` and search once across all four providers. The session list narrows
 to the conversations that contain your phrase, while the transcript shows the
 match in context. When you find the right one, press `t` to continue it in tmux
 or Herdr, or `c` to copy its resume command — search, read, and resume without
@@ -146,7 +146,7 @@ session-browser get claude:7645 --brief
 # Read recent user and assistant messages together, sharing a text budget
 session-browser get claude:7645 --recent 8 --budget 6000
 
-# Summarise providers, activity, and working directories
+# Summarise projects, providers, activity, and working directories
 session-browser stats --here
 ```
 
@@ -188,8 +188,8 @@ investigation simply stops appearing in `list` and `search`. Raise the limit in
 ```
 
 This only stops future deletions; a session the sweep already removed is gone.
-Check how far back you reach with `session-browser stats`, which prints the date
-range per provider. See Claude Code's
+Check how far back you reach with `session-browser stats --provider claude`,
+whose first line gives the date range of what is still there. See Claude Code's
 [`cleanupPeriodDays`](https://code.claude.com/docs/en/settings-reference#cleanupperioddays)
 for what else the sweep removes.
 
