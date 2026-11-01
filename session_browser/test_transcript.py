@@ -984,6 +984,36 @@ class TestCodexCopiedHistory:
         texts = self._texts(self._rollout(tmp_path, own_started=own_started, ts=ts))
         assert texts[-1] == "the child's answer"
 
+    def test_a_guardians_quoted_prompt_is_system_not_user(self, tmp_path):
+        """A Guardian review thread's prompt quotes its parent's history; it
+        must not read as the guardian's user saying the parent's words."""
+        f = tmp_path / "g.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "quoted ask"}],
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "allow"},
+                },
+            ],
+        )
+        s = Session(id="g", provider="codex", content_path=str(f))
+        s.subagent_kind = "guardian"
+        assert [(e.role, e.text) for e in load_transcript(s).entries] == [
+            ("system", "quoted ask"),
+            ("assistant", "allow"),
+        ]
+        s.subagent_kind = ""
+        assert load_transcript(s).entries[0].role == "user"
+
     def test_a_naive_creation_time_is_utc(self):
         assert transcript_mod._epoch_second("2026-09-13T20:48:43.124") == 1789332523
         assert transcript_mod._epoch_second(self.SPAWN) == 1789332523

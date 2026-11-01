@@ -1991,7 +1991,10 @@ def iter_entries(session: Session, warnings: list[str]) -> Iterator[TranscriptEn
             if session.subagent_kind == "thread_spawn"
             else _codex_entries
         )
-        yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, event_fn))
+        entries = _dedupe_codex_turns(_parse_jsonl(path, warnings, event_fn))
+        if session.subagent_kind == "guardian":
+            entries = _codex_guardian_entries(entries)
+        yield from entries
     elif session.provider == "pi":
         path = _existing_file(session)
         yield from _parse_jsonl(path, warnings, _pi_entries)
@@ -2775,6 +2778,28 @@ def _codex_own_records() -> Callable[[dict], Iterable[TranscriptEntry]]:
         return ()
 
     return event_fn
+
+
+_CODEX_GUARDIAN_PROMPT = {"kind": "injected", "subtype": "guardian_review"}
+
+
+def _codex_guardian_entries(
+    entries: Iterable[TranscriptEntry],
+) -> Iterator[TranscriptEntry]:
+    """A Guardian review thread's user turns, relabelled as system.
+
+    Codex opens a Guardian thread to judge an escalation, and its prompt is
+    the parent's history quoted wholesale -- Codex's own source calls it
+    "synthetic review context, not user-authored messages". Read as `user`,
+    a search for something the human typed in the parent credited the
+    guardian with saying it too. Labelled, not hidden: the verdict and the
+    quote stay readable, with the role saying what they are.
+    """
+    for e in entries:
+        if e.role == "user":
+            yield TranscriptEntry("system", e.text, e.timestamp, _CODEX_GUARDIAN_PROMPT)
+        else:
+            yield e
 
 
 def _epoch_second(ts) -> int:

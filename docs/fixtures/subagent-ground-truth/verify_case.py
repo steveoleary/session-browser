@@ -680,6 +680,34 @@ def check_codex_inherited_history() -> None:
             assert summary.startswith(agent_path + " · "), (where, child, summary)
 
 
+def check_codex_guardian_roles() -> None:
+    """A guardian quotes its parent's prompt; it must not read as saying it.
+
+    The parent's own words stay `user`; the guardian's copy of them is
+    `system`, the role for copied and injected text. Both paths."""
+    guardian = CODEX["guardian"]
+    for use_index in (True, False):
+        where = "index" if use_index else "file scan"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = build_home(Path(tmp), codex_index=use_index)
+            found = cli_json(
+                home,
+                [
+                    "search",
+                    "sb-fixture-guardian",
+                    "--provider",
+                    "codex",
+                    "--mode",
+                    "snippets",
+                ],
+                quiet=use_index,
+            )["results"]
+        roles = {r["session_id"]: r["match_roles"] for r in found}
+        assert set(roles) == {guardian["parent"], guardian["child"]}, (where, roles)
+        assert "user" in roles[guardian["parent"]], (where, roles)
+        assert set(roles[guardian["child"]]) == {"system"}, (where, roles)
+
+
 def check_opencode_graph(home: Path) -> None:
     listed = {s["id"]: s for s in list_sessions(home, "opencode")}
     expected_ids = {f"opencode:{r['id']}" for r in OPENCODE_ROWS}
@@ -745,6 +773,7 @@ def check_candidate() -> None:
     check_codex_guardian_raw_facts()
     check_codex_graph()
     check_codex_inherited_history()
+    check_codex_guardian_roles()
     with tempfile.TemporaryDirectory() as tmp:
         home = build_home(Path(tmp))
         check_opencode_graph(home)
