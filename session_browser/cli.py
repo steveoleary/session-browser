@@ -29,6 +29,8 @@ from .transcript import (
     TranscriptEntry,
     TranscriptUnreadable,
     canonical_id,
+    codex_fork_base,
+    codex_prefix_entries,
     entry_matches_roles,
     iter_entries,
     load_transcript,
@@ -163,6 +165,10 @@ Batch JSON example: {{"sessions": [{{"session": {{"id": "claude:abc", ...}},
 "entry_range", "roles", "brief", "clip", "recent" and "budget" are conditional. Every entry has
 all entry keys; entry_index is absolute and matches search snippets. A batch's
 "sessions" items have exactly the single payload shape, not list rows.
+"forked_from" appears only on a Codex fork, a continuation whose rollout holds
+only what came after the fork: its earlier history is the first "entries"
+entries of session "id" (null when that history is not on this machine).
+It is reported, not spliced in, so entry indices stay the ones search reports.
 With --output --format json, stdout is the output_confirmation shape.
 """.format(
     subagents=_SUBAGENT_CONTRACT,
@@ -180,9 +186,11 @@ With --output --format json, stdout is the output_confirmation shape.
                 "clip",
                 "recent",
                 "budget",
+                "forked_from",
             ),
         ),
         ("batch", ("sessions", "skipped")),
+        ("forked_from", ("id", "entries")),
         ("session", _SESSION_KEYS),
         ("entry", _ENTRY_KEYS),
         ("entry_range", ("start", "end")),
@@ -1668,6 +1676,52 @@ def _session_view(session: Session, args, roles):
     return transcript, total, window, indices
 
 
+def _fork_receipt(
+    session: Session, discovered: list[Session], warnings: list[str]
+) -> dict | None:
+    """Where a Codex fork's earlier history lives, or None if not a fork.
+
+    A fork's rollout holds only what happened after it was forked; the turns
+    before are the first part of the session it was forked from. Reported
+    rather than spliced in, so entry indices stay the ones search reports
+    and --entries addresses: {"id": the source, "entries": how many of the
+    source's entries are this fork's history (null when the source is not on
+    this machine or its rollout no longer reaches the fork point)}.
+    """
+    base = codex_fork_base(session)
+    if base is None:
+        return None
+    source_id, byte_end = base
+    receipt: dict = {"id": f"codex:{source_id}", "entries": None}
+    source = next(
+        (s for s in discovered if s.provider == "codex" and s.id == source_id), None
+    )
+    if source is None:
+        warnings.append(
+            f"forked from codex:{source_id}, which is not on this machine; "
+            "the history before the fork is unavailable"
+        )
+        return receipt
+    prefix = codex_prefix_entries(source, byte_end, warnings)
+    if prefix is not None:
+        receipt["entries"] = len(prefix)
+    return receipt
+
+
+def _render_fork(fork: dict) -> str:
+    n = fork["entries"]
+    if n is None:
+        return (
+            f"> Forked from {fork['id']}; the history before the fork is unavailable."
+        )
+    return (
+        f"> Forked from {fork['id']}: its first {n} entries are this session's "
+        f"earlier history (`get {fork['id']} --entries 0:{n - 1}`)."
+        if n
+        else f"> Forked from {fork['id']} at its start."
+    )
+
+
 def cmd_get(args) -> int:
     roles = _parse_roles(args.role)
     brief = _parse_brief(args.brief)
@@ -1735,12 +1789,19 @@ def cmd_get(args) -> int:
             code="unreadable_session",
         )
     single = len(idents) == 1
+    forks = {
+        canonical_id(s): fork
+        for s, *_ in views
+        if (fork := _fork_receipt(s, discovered, views[0][1].warnings)) is not None
+    }
     parse_warnings = [w for _, t, *_ in views for w in t.warnings]
     if args.format == "json":
         payloads = []
         for _s, t, total, window, indices in views:
             payload = transcript_to_dict(t, entry_indices=indices)
             payload["total_entries"] = total
+            if canonical_id(t.session) in forks:
+                payload["forked_from"] = forks[canonical_id(t.session)]
             if window is not None:
                 payload["entry_range"] = {"start": window[0], "end": window[1]}
             if roles is not None:
@@ -1786,6 +1847,12 @@ def cmd_get(args) -> int:
                 _render_budget(budgets[canonical_id(s)]) + "\n\n" + doc
                 for doc, (s, *_) in zip(docs, views, strict=True)
             ]
+        docs = [
+            _render_fork(forks[canonical_id(s)]) + "\n\n" + doc
+            if canonical_id(s) in forks
+            else doc
+            for doc, (s, *_) in zip(docs, views, strict=True)
+        ]
         content = "\n\n---\n\n".join(docs)
     if args.output:
         path = Path(args.output)

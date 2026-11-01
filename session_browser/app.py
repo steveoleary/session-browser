@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
@@ -38,7 +37,7 @@ except ImportError:
 
 from datetime import UTC
 
-from . import compressed, deletion, multiplexer
+from . import deletion, multiplexer
 from .config import ConfigError, load_ignore, load_tui_settings
 from .discovery import Session, claude_root_session, discover_all
 from .resume import (
@@ -53,11 +52,11 @@ from .transcript import (
     Transcript,
     TranscriptEntry,
     TranscriptUnreadable,
-    _codex_entries,
-    _dedupe_codex_turns,
     _offset_map,
     _OffsetMap,
     canonical_id,
+    codex_fork_base,
+    codex_prefix_entries,
     entry_label,
     entry_matches_roles,
     find_text_spans,
@@ -111,40 +110,17 @@ def _codex_fork_transcript(
             warnings.append("fork history contains a cycle")
             return []
         seen.add(current.id)
-        try:
-            with open(compressed.readable(Path(current.content_path)), "rb") as fh:
-                first = json.loads(fh.readline())
-            meta = first.get("payload", {})
-            base = meta.get("history_base")
-            if not isinstance(base, dict):
-                return []
-            source_id = base.get("thread_id")
-            byte_end = base.get("end_byte_offset")
-            source = sessions_by_id.get(source_id)
-            if source is None or not isinstance(byte_end, int) or byte_end < 0:
-                warnings.append(f"fork history unavailable: {source_id}")
-                return []
-            earlier = inherited(source)
-            with open(compressed.readable(Path(source.content_path)), "rb") as fh:
-                prefix = fh.read(byte_end)
-            if len(prefix) != byte_end or (prefix and not prefix.endswith(b"\n")):
-                warnings.append(f"fork history incomplete: {source_id}")
-                return earlier
-
-            def raw_entries():
-                for line in prefix.splitlines():
-                    try:
-                        obj = json.loads(line)
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        warnings.append(f"invalid fork history record: {source_id}")
-                        continue
-                    if isinstance(obj, dict):
-                        yield from _codex_entries(obj)
-
-            return earlier + list(_dedupe_codex_turns(raw_entries()))
-        except (OSError, ValueError, TypeError) as exc:
-            warnings.append(f"fork history unavailable: {exc}")
+        base = codex_fork_base(current)
+        if base is None:
             return []
+        source_id, byte_end = base
+        source = sessions_by_id.get(source_id)
+        if source is None:
+            warnings.append(f"fork history unavailable: {source_id}")
+            return []
+        earlier = inherited(source)
+        prefix = codex_prefix_entries(source, byte_end, warnings)
+        return earlier if prefix is None else earlier + prefix
 
     prefix_entries = inherited(session)
     if prefix_entries:

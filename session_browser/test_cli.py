@@ -123,6 +123,42 @@ def _text_columns(help_text: str, label: str) -> list[str]:
     raise AssertionError(f"no text-column contract for {label!r}")
 
 
+def _codex_fork_pair(tmp_path: Path) -> tuple[Session, Session]:
+    """A Codex source and a fork of it, shaped as Codex writes them: the
+    fork's first line names the source and the byte boundary in the source's
+    rollout where the fork's history ends."""
+
+    def line(obj) -> str:
+        return json.dumps(obj) + "\n"
+
+    def said(kind, text):
+        return line({"type": "event_msg", "payload": {"type": kind, "message": text}})
+
+    head = line({"type": "session_meta", "payload": {"id": "src1", "cwd": "/p"}})
+    shared = said("user_message", "first ask") + said("agent_message", "first answer")
+    after = said("user_message", "only in the source, after the fork")
+    src = tmp_path / "rollout-src1.jsonl"
+    src.write_text(head + shared + after)
+    meta = {
+        "id": "fork1",
+        "cwd": "/p",
+        "forked_from_id": "src1",
+        "history_base": {
+            "thread_id": "src1",
+            "end_byte_offset": len((head + shared).encode()),
+        },
+    }
+    fork = tmp_path / "rollout-fork1.jsonl"
+    fork.write_text(
+        line({"type": "session_meta", "payload": meta})
+        + said("user_message", "continuing in the fork")
+    )
+    return (
+        Session(id="src1", provider="codex", content_path=str(src), subagent_kind=""),
+        Session(id="fork1", provider="codex", content_path=str(fork), subagent_kind=""),
+    )
+
+
 class TestHelpOutputContracts:
     """The discoverable contracts must be exact unions of runtime variants.
 
@@ -225,8 +261,10 @@ class TestHelpOutputContracts:
                 content_path=str(tmp_path / "missing.jsonl"),
             )
         )
+        sessions.extend(_codex_fork_pair(tmp_path))
         singles = []
         for argv in (
+            ("get", "codex:fork1", "--format", "json"),
             ("get", "claude:aaa", "--format", "json"),
             ("get", "claude:aaa", "--entries", "0", "--format", "json"),
             ("get", "claude:aaa", "--role", "user", "--format", "json"),
@@ -273,7 +311,8 @@ class TestHelpOutputContracts:
         assert contract["entry"] == _key_union(
             entry for payload in singles for entry in payload["entries"]
         )
-        assert contract["entry_range"] == set(singles[1]["entry_range"])
+        assert contract["entry_range"] == set(singles[2]["entry_range"])
+        assert contract["forked_from"] == set(singles[0]["forked_from"])
         assert contract["skipped"] == set(batch["skipped"][0])
         assert contract["output_confirmation"] == set(confirmation)
         assert contract["error_envelope"] == set(error_payload)
@@ -2832,6 +2871,42 @@ class TestJsonlFormat:
         assert code == 0
         code, _, err = cli("list", "--preview", "ending", "--format", "text")
         assert code == 1 and "json or jsonl" in err
+
+
+class TestCodexForkLineage:
+    """get on a Codex fork says where its earlier history lives, instead of
+    returning the few entries after the fork as though they were all."""
+
+    def test_a_fork_names_its_source_and_how_much_of_it_is_history(
+        self, cli, sessions, tmp_path
+    ):
+        sessions.extend(_codex_fork_pair(tmp_path))
+        _, out, _ = cli("get", "codex:fork1", "--format", "json")
+        payload = json.loads(out)
+        assert payload["forked_from"] == {"id": "codex:src1", "entries": 2}
+        assert [e["text"] for e in payload["entries"]] == ["continuing in the fork"]
+        # The count addresses the source directly: entries 0..1 are the
+        # fork's history, entry 2 happened in the source after the fork.
+        _, out, _ = cli("get", "codex:src1", "--format", "json")
+        texts = [e["text"] for e in json.loads(out)["entries"]]
+        assert texts[:2] == ["first ask", "first answer"]
+        assert "forked_from" not in json.loads(out)
+
+    def test_text_output_leads_with_the_lineage(self, cli, sessions, tmp_path):
+        sessions.extend(_codex_fork_pair(tmp_path))
+        _, out, _ = cli("get", "codex:fork1")
+        assert out.splitlines()[0] == (
+            "> Forked from codex:src1: its first 2 entries are this session's "
+            "earlier history (`get codex:src1 --entries 0:1`)."
+        )
+
+    def test_a_missing_source_is_reported_not_guessed(self, cli, sessions, tmp_path):
+        _src, fork = _codex_fork_pair(tmp_path)
+        sessions.append(fork)
+        _, out, _ = cli("get", "codex:fork1", "--format", "json")
+        payload = json.loads(out)
+        assert payload["forked_from"] == {"id": "codex:src1", "entries": None}
+        assert any("not on this machine" in w for w in payload["warnings"])
 
 
 class TestSearchTriageSignals:

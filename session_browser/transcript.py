@@ -2658,6 +2658,70 @@ def _dedupe_codex_turns(
         yield pending
 
 
+# ---------------------------------------------------------------------------
+# Codex forks
+# ---------------------------------------------------------------------------
+#
+# A fork (`codex fork`, or a resumed thread forked in the app) is a
+# continuation, not a spawned child: its rollout stores only the new records,
+# and its first line's `history_base` names the source thread and the byte
+# boundary in the source's rollout where the fork's history ends. Every
+# thread_spawn child also carries forked_from_id == its spawner, so
+# forked_from_id alone does not mean "fork"; history_base on a non-subagent
+# does. The Codex index has no column for any of it, so lineage is read here,
+# per session asked about, never during discovery -- reading every rollout's
+# first line on the index path would cost a file open per Codex session.
+
+
+def codex_fork_base(session: Session) -> tuple[str, int] | None:
+    """(source thread id, byte boundary) when *session* is a Codex fork."""
+    if session.provider != "codex" or session.subagent_kind:
+        return None
+    try:
+        with open(compressed.readable(Path(session.content_path)), "rb") as fh:
+            first = json.loads(fh.readline())
+    except (OSError, ValueError):
+        return None
+    meta = first.get("payload") if isinstance(first, dict) else None
+    base = meta.get("history_base") if isinstance(meta, dict) else None
+    if not isinstance(base, dict):
+        return None
+    source, end = base.get("thread_id"), base.get("end_byte_offset")
+    if not isinstance(source, str) or not isinstance(end, int) or end < 0:
+        return None
+    return source, end
+
+
+def codex_prefix_entries(
+    source: Session, byte_end: int, warnings: list[str]
+) -> list[TranscriptEntry] | None:
+    """The entries of *source*'s rollout up to *byte_end*: a fork's history.
+
+    None, with a warning, when the source's rollout is shorter than the
+    boundary or the boundary does not fall at the end of a record."""
+    try:
+        with open(compressed.readable(Path(source.content_path)), "rb") as fh:
+            prefix = fh.read(byte_end)
+    except OSError as exc:
+        warnings.append(f"fork history unavailable: {exc}")
+        return None
+    if len(prefix) != byte_end or (prefix and not prefix.endswith(b"\n")):
+        warnings.append(f"fork history incomplete: {source.id}")
+        return None
+
+    def raw_entries():
+        for line in prefix.splitlines():
+            try:
+                obj = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                warnings.append(f"invalid fork history record: {source.id}")
+                continue
+            if isinstance(obj, dict):
+                yield from _codex_entries(obj)
+
+    return list(_dedupe_codex_turns(raw_entries()))
+
+
 def _codex_own_records() -> Callable[[dict], Iterable[TranscriptEntry]]:
     """A Codex record parser that skips a spawned child's copied history.
 
