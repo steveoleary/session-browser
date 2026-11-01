@@ -75,6 +75,7 @@ _FILTER_KEYS = (
     "here",
     "include_current",
     "no_ignore",
+    "no_subagents",
     "since",
     "until",
     "around",
@@ -293,6 +294,10 @@ Default format: text (human dashboard). JSON must be requested with --format jso
 counts discovered sessions without opening transcripts. activity.counts has one
 bucket per local calendar day from start through end. top_cwds helps validate
 whether a --repo or --cwd substring matched more projects than intended.
+projects groups by the inferred project name (session "repository", the
+same name --repo matches), so a project's worktree directories count as one;
+each carries its total, how many of those are subagents, a count per
+provider, and its last activity. --top caps projects and top_cwds alike.
 subagents decomposes total: "linked" name a parent, "unlinked" are subagents
 whose provider recorded none, and "unknown" are sessions from a provider that
 exposes no link, so they are neither known to be subagents nor known not to be.
@@ -307,6 +312,7 @@ exposes no link, so they are neither known to be subagents nor known not to be.
                 "activity",
                 "providers",
                 "subagents",
+                "projects",
                 "top_cwds",
                 "oldest",
                 "newest",
@@ -316,6 +322,7 @@ exposes no link, so they are neither known to be subagents nor known not to be.
         ("filters", _FILTER_KEYS),
         ("activity", ("days", "start", "end", "counts")),
         ("provider", ("provider", "count", "percent", "updated_at")),
+        ("project", ("repository", "count", "subagents", "providers", "updated_at")),
         ("subagents", ("total", "linked", "unlinked", "unknown", "kinds")),
         ("subagent_kind", ("kind", "count")),
         ("top_cwd", ("cwd", "count")),
@@ -619,7 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--top",
         type=int,
         default=5,
-        help="how many top working directories to show (default 5)",
+        help="how many top projects and working directories to show (default 5)",
     )
     p_stats.add_argument(
         "--format",
@@ -748,6 +755,14 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         "against the working directory, for noise such as loop runs). "
         "Silent otherwise, as ripgrep is; a filter that leaves nothing "
         "while ignored sessions would have matched says so",
+    )
+    p.add_argument(
+        "--no-subagents",
+        action="store_true",
+        help="drop sessions known to be subagents (subagent_kind set), to "
+        "count or search only the sessions a person started. Kept: sessions "
+        "from a provider that exposes no link (subagent_kind null), since "
+        "they are not known to be subagents. Applied before --limit",
     )
     p.add_argument(
         "--limit",
@@ -906,6 +921,12 @@ def apply_filters(
     if args.provider:
         p = args.provider.lower()
         out = [s for s in out if s.provider.lower() == p]
+    if getattr(args, "no_subagents", False):
+        # Opt-in only. Subagents are real work -- a median 49% of a child's
+        # vocabulary is absent from its parent -- so nothing hides them by
+        # default; this is for counting what people started. Early, so a
+        # search never parses a session it was told to leave out.
+        out = [s for s in out if not s.subagent_kind]
     if args.repo:
         q = args.repo.lower()
         candidates = out
@@ -2199,6 +2220,7 @@ def _filters_dict(args) -> dict:
         "here": getattr(args, "here", False),
         "include_current": getattr(args, "include_current", False),
         "no_ignore": getattr(args, "no_ignore", False),
+        "no_subagents": getattr(args, "no_subagents", False),
         "since": args.since,
         "until": args.until,
         "around": getattr(args, "around", None),
@@ -2469,8 +2491,22 @@ def cmd_stats(args) -> int:
     # from its parent, so they are real work and not duplicates of it.
     subagent_kinds: dict[str, int] = {}
     linked = unlinked = unknown = 0
+    # Per inferred project name, which is what folds a project's worktree
+    # directories together: one project appeared as 9 cwds in top_cwds. The
+    # question it answers -- which projects had work, with which providers --
+    # used to take a 60 KB `list` and a hand-written group-by.
+    projects: dict[str, list] = {}  # name -> [count, subagents, {provider: n}]
     for s in sessions:
         provider_counts[s.provider] = provider_counts.get(s.provider, 0) + 1
+        name = (s.repository or "").strip()
+        if name:
+            proj = projects.get(name)
+            if proj is None:
+                proj = projects[name] = [0, 0, {}, None]
+            proj[0] += 1
+            if s.subagent_kind:
+                proj[1] += 1
+            proj[2][s.provider] = proj[2].get(s.provider, 0) + 1
         if s.subagent_kind is None:
             unknown += 1
         elif s.subagent_kind:
@@ -2486,6 +2522,8 @@ def cmd_stats(args) -> int:
         if ts is None:
             continue
         times.append(ts)
+        if name and (proj[3] is None or ts > proj[3]):
+            proj[3] = ts
         prev = provider_last.get(s.provider)
         if prev is None or ts > prev:
             provider_last[s.provider] = ts
@@ -2547,6 +2585,17 @@ def cmd_stats(args) -> int:
             for k, n in sorted(subagent_kinds.items(), key=lambda kv: (-kv[1], kv[0]))
         ],
     }
+    ranked = sorted(projects.items(), key=lambda kv: (-kv[1][0], kv[0]))
+    payload["projects"] = [
+        {
+            "repository": name,
+            "count": count,
+            "subagents": subs,
+            "providers": dict(sorted(by.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "updated_at": last.isoformat() if last else None,
+        }
+        for name, (count, subs, by, last) in ranked[: args.top]
+    ]
     payload["top_cwds"] = [{"cwd": c, "count": n} for c, n in top_cwds[: args.top]]
     payload["oldest"] = min(times).isoformat() if times else None
     payload["newest"] = max(times).isoformat() if times else None
@@ -2606,6 +2655,16 @@ def _print_stats_text(payload: dict, *, distinct_cwds: int) -> None:
     print(label)
     print(f"  {_sparkline(act['counts'])}")
     print(f"  {act['start'][5:]} → {act['end'][5:]}")
+
+    if payload["projects"]:
+        print()
+        print("top projects")
+        name_w = max(len(p["repository"]) for p in payload["projects"])
+        for p in payload["projects"]:
+            by = " · ".join(f"{n} {prov}" for prov, n in p["providers"].items())
+            n = p["subagents"]
+            subs = f"  ({n} subagent{'' if n == 1 else 's'})" if n else ""
+            print(f"  {p['count']:>5}  {p['repository']:<{name_w}}  {by}{subs}")
 
     if payload["top_cwds"]:
         print()

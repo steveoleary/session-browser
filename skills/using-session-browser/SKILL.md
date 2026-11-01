@@ -72,8 +72,11 @@ where they disagree, `--help` describes the binary you are actually running.
 ## Retrieval Workflow
 
 1. **Orient.** `session-browser stats --format json` (shared filters apply,
-   e.g. `--here`) gives provider counts, per-day activity and `top_cwds` values
-   you can feed straight to `--cwd`. Mind trap 4 on its total.
+   e.g. `--here`, `--since -7d`) gives provider counts, per-day activity,
+   `projects` — each project's sessions split by provider, worktree directories
+   folded into one name — and `top_cwds` values you can feed straight to
+   `--cwd`. Subagents are counted in every total; `--no-subagents` leaves only
+   sessions a person started. Mind trap 4 on its total.
 2. **Discover with metadata.** Two things distort discovery before any trap
    does, and both are properties of the corpus rather than of your query:
 

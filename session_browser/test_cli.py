@@ -413,6 +413,104 @@ class TestHelpOutputContracts:
         assert contract["subagents"] == _key_union(
             payload["subagents"] for payload in payloads
         )
+        projects = [row for payload in payloads for row in payload["projects"]]
+        assert projects, "the fixture must emit projects for this to check anything"
+        assert contract["project"] == _key_union(projects)
+
+    def test_stats_projects_fold_worktrees_and_split_providers(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        """Which projects had work, ranked, with which providers -- one call.
+
+        Grouped by the inferred project name, so worktree directories named
+        for the same repository count as one project, where top_cwds sees
+        them as many."""
+        f = tmp_path / "s.jsonl"
+        write_claude(f, ["work"])
+
+        def session(sid, provider, cwd, repo, when, kind=None):
+            return Session(
+                id=sid,
+                provider=provider,
+                cwd=cwd,
+                repository=repo,
+                updated_at=f"2026-06-0{when}T10:00:00+00:00",
+                content_path=str(f),
+                subagent_kind=kind,
+            )
+
+        corpus = [
+            session("a", "pi", "/w/111/ships", "ships", 1),
+            session("b", "pi", "/w/222/ships", "ships", 2),
+            session("c", "codex", "/w/333/ships", "ships", 3, kind=""),
+            session("d", "claude", "/p/harrier", "harrier", 4, kind=""),
+            session("e", "claude", "/p/harrier", "harrier", 5, kind="ideator"),
+            session("f", "claude", "/tmp", "", 6, kind=""),
+        ]
+        monkeypatch.setattr("session_browser.cli.discover_all", lambda *a, **k: corpus)
+
+        assert run_cli(["stats", "--format", "json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["projects"] == [
+            {
+                "repository": "ships",
+                "count": 3,
+                "subagents": 0,
+                "providers": {"pi": 2, "codex": 1},
+                "updated_at": "2026-06-03T10:00:00+00:00",
+            },
+            {
+                "repository": "harrier",
+                "count": 2,
+                "subagents": 1,
+                "providers": {"claude": 2},
+                "updated_at": "2026-06-05T10:00:00+00:00",
+            },
+        ]
+        # The same three sessions are three directories to top_cwds.
+        assert {d["cwd"] for d in payload["top_cwds"]} >= {"/w/111/ships"}
+
+        assert run_cli(["stats", "--format", "text"]) == 0
+        out = capsys.readouterr().out
+        assert "top projects" in out
+        assert "2 pi · 1 codex" in out
+        assert "(1 subagent)" in out
+
+    def test_no_subagents_keeps_what_people_started(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        """Drops sessions known to be subagents, from every command, before
+        --limit. A session whose provider exposes no link is not known to be
+        one, so it stays."""
+        f = tmp_path / "s.jsonl"
+        write_claude(f, ["wombat"])
+        corpus = [
+            Session(
+                id=sid,
+                provider="claude",
+                summary=sid,
+                updated_at=f"2026-06-0{i}T10:00:00+00:00",
+                content_path=str(f),
+                subagent_kind=kind,
+            )
+            for i, (sid, kind) in enumerate(
+                [("root", ""), ("unknown", None), ("child", "ideator")], start=1
+            )
+        ]
+        monkeypatch.setattr("session_browser.cli.discover_all", lambda *a, **k: corpus)
+
+        assert run_cli(["list", "--no-subagents", "--limit", "1"]) == 0
+        assert [s["id"] for s in json.loads(capsys.readouterr().out)["sessions"]] == [
+            "claude:unknown"
+        ]
+        assert run_cli(["search", "wombat", "--no-subagents", "--mode", "ids"]) == 0
+        data = json.loads(capsys.readouterr().out)
+        assert {r["id"] for r in data["results"]} == {"claude:root", "claude:unknown"}
+        assert data["filters"]["no_subagents"] is True
+        assert run_cli(["stats", "--no-subagents", "--format", "json"]) == 0
+        stats = json.loads(capsys.readouterr().out)
+        assert stats["total"] == 2
+        assert stats["subagents"]["total"] == 0
 
     def test_stats_counts_subagents_and_declares_their_shape(
         self, monkeypatch, capsys, sessions, tmp_path
