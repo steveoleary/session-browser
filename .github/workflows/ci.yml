@@ -1,0 +1,62 @@
+name: CI
+
+# The suite, the linters and the committed fixtures on every version
+# requires-python claims. Running the claimed floor is the point: the first
+# time 3.12 was exercised it failed two tests that 3.14 had never shown.
+#
+# Not here, on purpose: the editable `uv tool install` and the skill sync in
+# AGENTS.md. Both are local-developer workflow, not properties of the code.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.14"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  test:
+    # 3.14 is the ENFORCING job for the loop opcode budgets. Opcode counts are
+    # a property of the interpreter, so docs/perf_budgets.json records the one
+    # they were blessed on (loop_python) and the enforcement test SKIPS, with a
+    # message, everywhere else. A green 3.12 or 3.13 job has enforced the
+    # workload counters but not the loop budgets. Bump this name together with
+    # loop_python after a re-bless on a newer interpreter.
+    name: test (${{ matrix.python }}${{ matrix.python == '3.14' && ', enforces loop budgets' || '' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ matrix.python }}
+      # Without ripgrep the perf gate omits every workload that budgets a
+      # ripgrep invocation, and three transcript tests skip. Install it so the
+      # job checks what a developer's machine checks.
+      - name: Install ripgrep
+        run: sudo apt-get update -q && sudo apt-get install -y -q ripgrep
+      - run: uv sync --locked
+      - name: Test suite
+        run: uv run python -m pytest session_browser/ -q -rs
+      - name: Committed regression fixtures
+        run: uv run python -m session_browser.case_runner run
