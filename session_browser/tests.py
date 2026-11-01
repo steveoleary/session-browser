@@ -391,6 +391,104 @@ class TestScanClaude:
         assert self._ids(tmp_path) == {"blank"}
 
 
+class TestClaudeSummary:
+    """Claude Code records a slash command as a user message of markup and a
+    paste wrapped in <pasted_content> tags. Neither may reach the summary as
+    XML: it is what the list, the TUI table and the delete confirmation show.
+    """
+
+    CMD = (
+        "<command-name>/goal</command-name>\n"
+        "            <command-message>goal</command-message>\n"
+        "            <command-args>work the open beads yolo style</command-args>"
+    )
+    BARE = (
+        "<command-name>/clear</command-name>\n"
+        "            <command-message>clear</command-message>\n"
+        "            <command-args></command-args>"
+    )
+
+    def _summary(self, tmp_path, *contents, meta_first=False):
+        projects = tmp_path / ".claude" / "projects" / "-Users-test"
+        projects.mkdir(parents=True, exist_ok=True)
+        lines = []
+        if meta_first:
+            lines.append(
+                {"type": "user", "isMeta": True, "message": {"content": "caveat"}}
+            )
+        for content in contents:
+            lines.append(
+                {
+                    "type": "user",
+                    "message": {"role": "user", "content": content},
+                    "cwd": "/Users/test/project",
+                    "timestamp": "2026-10-15T10:00:00Z",
+                }
+            )
+        (projects / "s1.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in lines) + "\n"
+        )
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            (session,) = scan_claude()
+        return session.summary
+
+    def test_a_command_with_arguments_reads_as_typed(self, tmp_path):
+        assert (
+            self._summary(tmp_path, self.CMD, "a later prompt")
+            == "/goal work the open beads yolo style"
+        )
+
+    def test_tag_order_does_not_matter(self, tmp_path):
+        content = (
+            "<command-message>walkthrough</command-message> "
+            "<command-name>/walkthrough</command-name> "
+            "<command-args>build me one</command-args>"
+        )
+        assert self._summary(tmp_path, content) == "/walkthrough build me one"
+
+    def test_a_bare_command_yields_to_the_prompt_after_it(self, tmp_path):
+        """/clear and /model say nothing about the session they opened; the
+        first real prompt does. The command's own output is not a prompt."""
+        assert (
+            self._summary(
+                tmp_path,
+                self.BARE,
+                "<local-command-stdout>Set model to opus</local-command-stdout>",
+                self.BARE,
+                "why does the delete view wrap?",
+                meta_first=True,
+            )
+            == "why does the delete view wrap?"
+        )
+
+    def test_a_bare_command_with_nothing_after_it_names_itself(self, tmp_path):
+        assert self._summary(tmp_path, self.BARE) == "/clear"
+
+    def test_cleaning_happens_before_the_cut(self, tmp_path):
+        """Cutting first left summaries ending '<command-args></com'."""
+        long_args = "x " * 200
+        content = self.CMD.replace("work the open beads yolo style", long_args)
+        summary = self._summary(tmp_path, content)
+        assert summary.startswith("/goal x x")
+        assert len(summary) == 120
+        assert "<" not in summary
+
+    def test_a_paste_loses_its_wrapper(self, tmp_path):
+        content = (
+            '  <pasted_content id="3540">\nTraceback (most recent call last)\n'
+            "</pasted_content>\n\nwhat is this"
+        )
+        assert (
+            self._summary(tmp_path, content)
+            == "Traceback (most recent call last) what is this"
+        )
+
+    def test_an_ordinary_prompt_is_untouched(self, tmp_path):
+        """Prose that merely mentions a tag is the user speaking."""
+        content = "why does <command-name> show up\nin the list?"
+        assert self._summary(tmp_path, content) == content.replace("\n", " ")
+
+
 class TestScanCodex:
     def test_scan_codex_sessions(self, tmp_path):
         sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"

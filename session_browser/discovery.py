@@ -199,6 +199,9 @@ def _claude_session(
     # below the loop.
     has_turn = undecodable = False
     obj = None  # still None after the loop: nothing decoded
+    # Records left to read past a bare slash command looking for the first
+    # real prompt; None until one is met. See _claude_summary.
+    lookahead: int | None = None
     with open(f) as fh:
         for line in fh:
             line = line.strip()
@@ -212,16 +215,31 @@ def _claude_session(
             if not seen_cwd:
                 seen_cwd = obj.get("cwd", "")
             kind = obj.get("type")
+            if lookahead is not None:
+                if kind == "user" and not obj.get("isMeta"):
+                    content = obj.get("message", {}).get("content", "")
+                    if isinstance(content, str):
+                        text, bare = _claude_summary(content)
+                        if text and not bare and not _claude_command_output(content):
+                            summary = text
+                            break
+                lookahead -= 1
+                if not lookahead:
+                    break
+                continue
             # Extract metadata from first user message
             if kind == "user" and not obj.get("isMeta"):
                 msg = obj.get("message", {})
                 content = msg.get("content", "")
-                if isinstance(content, str):
-                    summary = content[:120].replace("\n", " ")
                 cwd = obj.get("cwd", "")
                 branch = obj.get("gitBranch", "")
                 created_at = obj.get("timestamp", "")
                 has_turn = True
+                if isinstance(content, str):
+                    summary, bare = _claude_summary(content)
+                    if bare:
+                        lookahead = _CLAUDE_PROMPT_LOOKAHEAD
+                        continue
                 break
             if kind in ("user", "assistant"):
                 has_turn = True
@@ -669,6 +687,57 @@ def _codex_parts_text(content, part_type: str) -> str:
 def _summary_text(text: str) -> str:
     """One line of at most 120 characters, for a session's summary field."""
     return text[:120].replace("\n", " ")
+
+
+# Claude Code records a slash command as an ordinary user message made of
+# markup -- <command-name>/goal</command-name> <command-message>goal
+# </command-message> <command-args>...</command-args> -- and a paste as the
+# pasted text wrapped in <pasted_content id="..."> tags. Used verbatim as the
+# summary, either one fills the list, the TUI and the delete confirmation with
+# XML: 130 of 295 Claude sessions on one machine (2026-11-01), most of them
+# sessions that a /clear or /goal opened.
+_CLAUDE_COMMAND_HEADS = ("<command-name>", "<command-message>")
+_CLAUDE_OUTPUT_HEADS = ("<local-command-stdout>", "<local-command-stderr>")
+_PASTE_TAG = re.compile(r"</?pasted_content\b[^>]*>")
+# How far past a bare command (/clear, /model with no arguments) to look for
+# the prompt that follows it. Measured shape: the command, its stdout record
+# and a meta caveat, then the prompt; a session that never gets one stops at
+# end of file, so this only bounds a pathological run of non-prompt records.
+_CLAUDE_PROMPT_LOOKAHEAD = 40
+
+
+def _claude_tag(text: str, tag: str) -> str:
+    start = text.find(f"<{tag}>")
+    if start < 0:
+        return ""
+    start += len(tag) + 2
+    end = text.find(f"</{tag}>", start)
+    return " ".join(text[start : end if end >= 0 else len(text)].split())
+
+
+def _claude_command_output(text: str) -> bool:
+    return text.lstrip().startswith(_CLAUDE_OUTPUT_HEADS)
+
+
+def _claude_summary(content: str) -> tuple[str, bool]:
+    """A readable summary of one Claude user message, and whether it is a
+    bare slash command -- one with no arguments, which says too little to name
+    a session by when a real prompt follows it.
+
+    A command reads as typed (``/goal work the open beads``), a paste as its
+    text without the wrapper. Everything else is the message as it always was.
+    The cleaning happens before the 120-character cut: cutting first is what
+    left summaries ending ``<command-args></com``.
+    """
+    head = content.lstrip()
+    if head.startswith(_CLAUDE_COMMAND_HEADS):
+        name = _claude_tag(head, "command-name")
+        if name:
+            args = _claude_tag(head, "command-args")
+            return _summary_text(f"{name} {args}" if args else name), not args
+    elif head.startswith("<pasted_content"):
+        return _summary_text(" ".join(_PASTE_TAG.sub(" ", content).split())), False
+    return _summary_text(content), False
 
 
 def _repo_name(cwd: str) -> str:
