@@ -187,6 +187,12 @@ all entry keys; entry_index is absolute and matches search snippets. A batch's
 only what came after the fork: its earlier history is the first "entries"
 entries of session "id" (null when that history is not on this machine).
 It is reported, not spliced in, so entry indices stay the ones search reports.
+"briefed_by" appears when the opening request names a file in another Claude
+session's scratchpad (/private/tmp/claude-<uid>/<project>/<id>/scratchpad/), as
+work handed to another agent through Herdr usually does: "id" is the session
+that wrote the brief, "path" the brief, "present" whether that session is on
+this machine. The other direction -- what a session briefed -- is a search for
+"<its id>/scratchpad" with --role user.
 With --output --format json, stdout is the output_confirmation shape.
 """.format(
     subagents=_SUBAGENT_CONTRACT,
@@ -205,10 +211,12 @@ With --output --format json, stdout is the output_confirmation shape.
                 "recent",
                 "budget",
                 "forked_from",
+                "briefed_by",
             ),
         ),
         ("batch", ("sessions", "skipped")),
         ("forked_from", ("id", "entries")),
+        ("briefed_by", ("id", "path", "present")),
         ("session", _SESSION_KEYS),
         ("entry", _ENTRY_KEYS),
         ("entry_range", ("start", "end")),
@@ -1734,7 +1742,8 @@ def _parse_roles(values: list[str] | None) -> list[str] | None:
 
 def _session_view(session: Session, args, roles):
     """Load and window one session's transcript. Returns
-    (transcript, total, window, indices); raises when unreadable.
+    (transcript, total, window, indices, briefed); raises when unreadable.
+    *briefed* is what _briefed_by found in the whole transcript's opening.
 
     *indices* are the absolute positions of the entries actually returned,
     always — including the unfiltered case, where they are contiguous but
@@ -1743,6 +1752,8 @@ def _session_view(session: Session, args, roles):
     ask *roles*, not whether indices are present."""
     transcript = load_transcript(session)
     total = len(transcript.entries)
+    # Read before any window cuts the opening away.
+    briefed = _briefed_by(session, transcript.entries)
     window = None
     brief = _parse_brief(getattr(args, "brief", None))
     if brief is not None:
@@ -1751,7 +1762,7 @@ def _session_view(session: Session, args, roles):
         transcript = Transcript(
             transcript.session, [e for _, e in kept], transcript.warnings
         )
-        return transcript, total, None, indices
+        return transcript, total, None, indices, briefed
     if roles is not None and (args.head is not None or args.tail is not None):
         # --head/--tail bound the *kept* entries when --role is given —
         # "--role user --tail 5" means the last five user turns, not the
@@ -1794,7 +1805,7 @@ def _session_view(session: Session, args, roles):
             )
         else:
             indices = list(range(start, start + len(transcript.entries)))
-    return transcript, total, window, indices
+    return transcript, total, window, indices, briefed
 
 
 def _fork_receipt(
@@ -1827,6 +1838,68 @@ def _fork_receipt(
     if prefix is not None:
         receipt["entries"] = len(prefix)
     return receipt
+
+
+# A Claude Code session's scratchpad is /private/tmp/claude-<uid>/<project>/
+# <session-id>/scratchpad/, so a brief written there names the session that
+# wrote it. Another agent handed work through Herdr typically opens "Read the
+# brief at <that path> and follow it": the one trace a cross-tool hand-off
+# leaves in the session that received it. Measured 2026-11-01: 20 sessions
+# here open that way with nothing else linking them to their briefer (Codex,
+# Pi and Claude panes), 10 of whose briefers are still on disk.
+_SCRATCHPAD_BRIEF = re.compile(
+    r"(?P<path>\S*/claude-\d+/[^/\s]+/"
+    r"(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+    r"/scratchpad/\S*)"
+)
+
+
+def _briefed_by(session: Session, entries) -> tuple[str, str] | None:
+    """(briefer's session id, brief path) when this session's opening request
+    names a file in another Claude session's scratchpad, else None.
+
+    Only the opening request is read -- a bare /clear or a command's output
+    before it is passed over -- because that is where a hand-off's brief is
+    named. A path met later is a file the session used, not who briefed it.
+    """
+    for e in entries:
+        if e.role != "user" or is_command_noise(e):
+            continue
+        m = _SCRATCHPAD_BRIEF.search(e.text)
+        if m is None or m["id"] == session.id:
+            return None
+        return m["id"], m["path"].rstrip(".,;:)\"'`")
+    return None
+
+
+def _brief_receipt(found: tuple[str, str] | None) -> dict | None:
+    if found is None:
+        return None
+    briefer, path = found
+    return {
+        "id": f"claude:{briefer}",
+        "path": path,
+        "present": _claude_transcript_exists(briefer),
+    }
+
+
+def _claude_transcript_exists(session_id: str) -> bool:
+    """Whether ``~/.claude/projects/*/<session_id>.jsonl`` exists.
+
+    Asked of the disk rather than of discovery, which `get` scopes to the
+    providers its ids name: a Codex session briefed by Claude would otherwise
+    report its briefer missing, and discovering every Claude session to ask
+    would put that whole scan on every Codex `get`. One stat per project."""
+    root = Path.home() / ".claude" / "projects"
+    try:
+        return any((d / f"{session_id}.jsonl").is_file() for d in root.iterdir())
+    except OSError:
+        return False
+
+
+def _render_brief(receipt: dict) -> str:
+    where = "" if receipt["present"] else ", which is not on this machine"
+    return f"> Briefed by {receipt['id']}{where}, through `{receipt['path']}`."
 
 
 def _render_fork(fork: dict) -> str:
@@ -1887,10 +1960,11 @@ def cmd_get(args) -> int:
             sessions.append(s)
     views = []
     budgets = {}
+    briefs: dict[str, dict] = {}
     skipped: list[tuple[Session, str]] = []
     for s in sessions:
         try:
-            t, total, window, indices = _session_view(s, args, roles)
+            t, total, window, indices, briefed = _session_view(s, args, roles)
         except (TranscriptUnreadable, OSError) as exc:
             if len(sessions) == 1:
                 raise CliError(
@@ -1903,6 +1977,8 @@ def cmd_get(args) -> int:
             t, receipt = _budget_transcript(t, indices, args.budget)
             budgets[canonical_id(s)] = receipt
         views.append((s, _clip_transcript(t, clip), total, window, indices))
+        if (receipt := _brief_receipt(briefed)) is not None:
+            briefs[canonical_id(s)] = receipt
     if not views:
         raise CliError(
             "no readable sessions among: "
@@ -1923,6 +1999,8 @@ def cmd_get(args) -> int:
             payload["total_entries"] = total
             if canonical_id(t.session) in forks:
                 payload["forked_from"] = forks[canonical_id(t.session)]
+            if canonical_id(t.session) in briefs:
+                payload["briefed_by"] = briefs[canonical_id(t.session)]
             if window is not None:
                 payload["entry_range"] = {"start": window[0], "end": window[1]}
             if roles is not None:
@@ -1971,6 +2049,12 @@ def cmd_get(args) -> int:
         docs = [
             _render_fork(forks[canonical_id(s)]) + "\n\n" + doc
             if canonical_id(s) in forks
+            else doc
+            for doc, (s, *_) in zip(docs, views, strict=True)
+        ]
+        docs = [
+            _render_brief(briefs[canonical_id(s)]) + "\n\n" + doc
+            if canonical_id(s) in briefs
             else doc
             for doc, (s, *_) in zip(docs, views, strict=True)
         ]

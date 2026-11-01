@@ -166,6 +166,8 @@ where they disagree, `--help` describes the binary you are actually running.
 | A stable snapshot while other agents are working | add `--until -30m` |
 | Every match, not the first N | omit `--limit` entirely — it is unbounded by default |
 | Who said it, without reading snippets | `match_roles` on each result |
+| Which session handed this one its work (via Herdr) | `get ID` reports `briefed_by` when its opening names a brief in a Claude scratchpad |
+| Which sessions one handed work to | `session-browser search "<its id>/scratchpad" --role user --mode ids` |
 
 A canonical id (`claude:76458688-…`, copyable from the TUI with `i`) goes
 straight to `get ID` — no `list`/`search` first. A unique id *prefix* resolves

@@ -6,6 +6,7 @@ import json
 import os
 from datetime import UTC
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -121,6 +122,13 @@ def _text_columns(help_text: str, label: str) -> list[str]:
         if line.startswith(prefix):
             return line.removeprefix(prefix).split(", ")
     raise AssertionError(f"no text-column contract for {label!r}")
+
+
+_BRIEFER = "b53fbc05-5851-4b5f-af07-cebfb9a1d4f2"
+_SCRATCHPAD_BRIEF = (
+    f"/private/tmp/claude-501/-Users-u-Projects-harrier/{_BRIEFER}"
+    "/scratchpad/exp/judge-brief.md"
+)
 
 
 def _codex_fork_pair(tmp_path: Path) -> tuple[Session, Session]:
@@ -262,9 +270,15 @@ class TestHelpOutputContracts:
             )
         )
         sessions.extend(_codex_fork_pair(tmp_path))
+        briefed = tmp_path / "briefed.jsonl"
+        write_claude(briefed, [f"Read the brief at {_SCRATCHPAD_BRIEF} and do it"])
+        sessions.append(
+            Session(id="briefed", provider="claude", content_path=str(briefed))
+        )
         singles = []
         for argv in (
             ("get", "codex:fork1", "--format", "json"),
+            ("get", "claude:briefed", "--format", "json"),
             ("get", "claude:aaa", "--format", "json"),
             ("get", "claude:aaa", "--entries", "0", "--format", "json"),
             ("get", "claude:aaa", "--role", "user", "--format", "json"),
@@ -311,8 +325,9 @@ class TestHelpOutputContracts:
         assert contract["entry"] == _key_union(
             entry for payload in singles for entry in payload["entries"]
         )
-        assert contract["entry_range"] == set(singles[2]["entry_range"])
+        assert contract["entry_range"] == set(singles[3]["entry_range"])
         assert contract["forked_from"] == set(singles[0]["forked_from"])
+        assert contract["briefed_by"] == set(singles[1]["briefed_by"])
         assert contract["skipped"] == set(batch["skipped"][0])
         assert contract["output_confirmation"] == set(confirmation)
         assert contract["error_envelope"] == set(error_payload)
@@ -3136,6 +3151,71 @@ class TestCodexForkLineage:
         payload = json.loads(out)
         assert payload["forked_from"] == {"id": "codex:src1", "entries": None}
         assert any("not on this machine" in w for w in payload["warnings"])
+
+
+class TestBriefedBy:
+    """A session handed work through Herdr opens by naming its brief, and a
+    brief in a Claude scratchpad names the session that wrote it."""
+
+    @pytest.fixture
+    def run(self, monkeypatch, capsys, tmp_path):
+        home = tmp_path / "home"
+        project = home / ".claude" / "projects" / "-Users-u-Projects-harrier"
+        project.mkdir(parents=True)
+        corpus: list[Session] = []
+
+        def add(sid, provider, texts):
+            f = tmp_path / f"{sid}.jsonl"
+            write_claude(f, texts)
+            corpus.append(Session(id=sid, provider=provider, content_path=str(f)))
+
+        add(
+            "child",
+            "claude",
+            [
+                "<command-name>/clear</command-name>\n<command-args></command-args>",
+                f"Read the brief at {_SCRATCHPAD_BRIEF}. Then report.",
+                (
+                    "later: also look at /private/tmp/claude-501/p/"
+                    "11111111-2222-3333-4444-555555555555/scratchpad/x.md"
+                ),
+            ],
+        )
+        add("plain", "claude", ["fix the login page", f"see {_SCRATCHPAD_BRIEF}"])
+
+        def go(*argv):
+            monkeypatch.setattr(
+                "session_browser.cli.discover_all", lambda *a, **k: corpus
+            )
+            with patch("session_browser.cli.Path.home", return_value=home):
+                code = run_cli(list(argv))
+            captured = capsys.readouterr()
+            return code, captured.out
+
+        return go, project
+
+    def test_the_opening_brief_names_the_briefer(self, run):
+        go, project = run
+        code, out = go("get", "claude:child", "--tail", "1", "--format", "json")
+        assert code == 0
+        # Found in the opening even though --tail 1 windows it away, and the
+        # bare /clear before it is passed over. The later path is a file the
+        # session used, not who briefed it.
+        assert json.loads(out)["briefed_by"] == {
+            "id": f"claude:{_BRIEFER}",
+            "path": _SCRATCHPAD_BRIEF,
+            "present": False,
+        }
+        (project / f"{_BRIEFER}.jsonl").write_text("{}\n")
+        _, out = go("get", "claude:child", "--format", "json")
+        assert json.loads(out)["briefed_by"]["present"] is True
+        _, out = go("get", "claude:child")
+        assert out.startswith(f"> Briefed by claude:{_BRIEFER}, through `")
+
+    def test_a_scratchpad_named_after_the_opening_is_not_a_brief(self, run):
+        go, _ = run
+        _, out = go("get", "claude:plain", "--format", "json")
+        assert "briefed_by" not in json.loads(out)
 
 
 class TestSearchRole:
