@@ -3,9 +3,9 @@
 **Turn your agent transcripts into working memory.**
 
 Claude Code, Codex, OpenCode and Pi all keep session histories. Session
-Browser brings them together so you — or your agent — can find lost context,
-build a handoff, spot recurring knowledge or repeating pain points, and easily
-resume the work instead of starting again.
+Browser brings them together so you — or your agent — can find what an earlier
+session decided, tried or got wrong, pick the work back up where it stopped,
+build a handoff, and spot the patterns and pain points that keep coming back.
 
 ![Session Browser showing sessions beside a selected transcript](docs/screenshots/01-list-160x45.svg)
 
@@ -17,19 +17,22 @@ agents.
 
 ## Put old sessions back to work
 
-- **Recover lost context.** Search complete Claude Code, Codex, OpenCode and
-  Pi transcripts together from the TUI, or let your agent find the useful parts
-  through the CLI.
-- **Great for handoffs**. Pulls the relevant context from
-  previous sessions so the next agent can pick up where you left off.
+- **Find where it happened.** The session where a decision was made, a bug was
+  first seen, or "we did this before" — and why. Search complete Claude Code,
+  Codex, OpenCode and Pi transcripts together from the TUI, or let your agent
+  find the useful parts through the CLI.
+- **Pick up where you left off.** Read how the last session ended and carry on,
+  or continue the original session directly in tmux or Herdr, or copy the
+  agent-specific resume command to the clipboard, all from the TUI.
 - **Let agents research your history.** The JSON-friendly CLI and bundled skill
   let an agent find and retrieve earlier work itself, without you pasting old
-  conversations into a new chat.
+  conversations into a new chat — and it reaches for it unprompted: in seven
+  weeks of use, most sessions that ran it had never been asked to.
+- **Great for handoffs.** Pulls the relevant context from previous sessions so
+  the next agent can pick up where you left off.
 - **Find the patterns worth keeping.** Mine repeated fixes, decisions, and
   workflows across sessions, then turn the useful ones into reusable skills,
   prompts, or playbooks.
-- **Resume instead of restarting.** Continue the original session directly in
-  tmux or Herdr, or copy the agent specific resume command to the clipboard, all from the TUI.
 - **Stay in the terminal.** Browse, search, export, and resume sessions where
   your coding agents already run — no browser tab or separate desktop app
   required.
