@@ -1604,7 +1604,11 @@ class SessionBrowser(App):
         Binding("e", "export_chat_clipboard", "Copy chat", show=False),
         Binding("E", "export_chat_file", "Export chat", show=False),
         Binding("m", "toggle_matches_only", "Matching blocks", show=False),
-        Binding("f", "cycle_entry_filter", "Filter entries", show=False),
+        # In the footer, unlike its neighbours: "just the conversation, not the
+        # tool traffic" is the commonest reason to open a transcript, and a
+        # reader who has to find it in the ? map first usually never does --
+        # it was asked for as a new feature after it had already shipped.
+        Binding("f", "cycle_entry_filter", "Conversation"),
         Binding("space", "toggle_children", "Expand/collapse", show=False),
         Binding("T", "toggle_tree", "Tree view", show=False),
         Binding("n", "next_match", "Next match", show=False),

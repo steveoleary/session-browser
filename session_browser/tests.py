@@ -5642,6 +5642,17 @@ class TestReadingFilter:
             typed.action_toggle_collapsed()
             assert typed._visible_text()[0] == typed.entry.text
 
+    async def test_the_footer_offers_the_conversation_view(self):
+        """It shipped behind ? and was then asked for as a new feature."""
+        from textual.widgets import Footer
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await self._loaded(app, pilot, fake)
+            shown = {key for key, b in app.active_bindings.items() if b.binding.show}
+            assert "f" in shown
+            assert app.query_one(Footer)
+
 
 class TestCopyToClipboard:
     def test_linux_tries_clip_exe_first(self):
