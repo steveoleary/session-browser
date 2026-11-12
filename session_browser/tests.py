@@ -492,7 +492,7 @@ class TestClaudeSummary:
     CMD = (
         "<command-name>/goal</command-name>\n"
         "            <command-message>goal</command-message>\n"
-        "            <command-args>work the open beads yolo style</command-args>"
+        "            <command-args>work the open tickets yolo style</command-args>"
     )
     BARE = (
         "<command-name>/clear</command-name>\n"
@@ -527,7 +527,7 @@ class TestClaudeSummary:
     def test_a_command_with_arguments_reads_as_typed(self, tmp_path):
         assert (
             self._summary(tmp_path, self.CMD, "a later prompt")
-            == "/goal work the open beads yolo style"
+            == "/goal work the open tickets yolo style"
         )
 
     def test_tag_order_does_not_matter(self, tmp_path):
@@ -559,7 +559,7 @@ class TestClaudeSummary:
     def test_cleaning_happens_before_the_cut(self, tmp_path):
         """Cutting first left summaries ending '<command-args></com'."""
         long_args = "x " * 200
-        content = self.CMD.replace("work the open beads yolo style", long_args)
+        content = self.CMD.replace("work the open tickets yolo style", long_args)
         summary = self._summary(tmp_path, content)
         assert summary.startswith("/goal x x")
         assert len(summary) == 120
@@ -6525,20 +6525,24 @@ class TestSelectionCopy:
 
 
 # ---------------------------------------------------------------------------
-# Unordered word matching (TUI global search fallback)
+# Word matching (TUI global search fallback)
 # ---------------------------------------------------------------------------
 
 TARGET_TURN = "there is a sibling codex pane you can ask for a second opinion or review"
 
 
 def _claude_file(path, *turns):
-    path.write_text(
-        "".join(
-            json.dumps({"type": role, "message": {"role": role, "content": text}})
-            + "\n"
-            for role, text in turns
-        )
-    )
+    """A Claude transcript of (role, text) turns; role "tool" writes *text*
+    as a tool result, which is how something the agent read is recorded."""
+    lines = []
+    for role, text in turns:
+        if role == "tool":
+            content = [{"type": "tool_result", "content": text}]
+            record = {"type": "user", "message": {"role": "user", "content": content}}
+        else:
+            record = {"type": role, "message": {"role": role, "content": text}}
+        lines.append(json.dumps(record) + "\n")
+    path.write_text("".join(lines))
     return str(path)
 
 
@@ -6575,34 +6579,170 @@ class TestUnorderedTerms:
         assert [text[s:e] for s, e in spans] == ["codex", "pane", "review"]
 
 
-class TestUnorderedSearch:
-    def test_finds_words_in_one_entry_and_not_words_scattered_across_a_session(
-        self, tmp_path
-    ):
-        from session_browser.transcript import search_session_unordered_hits
+class TestWordSearch:
+    """search_session_word_hits: every word, somewhere in the conversation."""
 
-        one_entry = Session(
-            id="target",
+    def _session(self, tmp_path, name, *turns, **fields):
+        return Session(
+            id=name,
             provider="claude",
-            content_path=_claude_file(tmp_path / "t.jsonl", ("user", TARGET_TURN)),
+            content_path=_claude_file(tmp_path / f"{name}.jsonl", *turns),
+            **fields,
         )
-        scattered = Session(
-            id="scattered",
-            provider="claude",
-            content_path=_claude_file(
-                tmp_path / "s.jsonl",
-                ("user", "open a codex session"),
-                ("assistant", "the pane is ready"),
-                ("user", "now review it"),
-            ),
-        )
-        hits = search_session_unordered_hits(
-            [one_entry, scattered], "review codex pane"
-        )
-        assert set(hits) == {"target"}
-        hit = hits["target"]
+
+    def _hits(self, sessions, query):
+        from session_browser.transcript import search_session_word_hits
+
+        return search_session_word_hits(sessions, query)
+
+    def test_words_in_one_entry_match_and_show_the_window(self, tmp_path):
+        from session_browser.transcript import WORDS_YOURS
+
+        target = self._session(tmp_path, "target", ("user", TARGET_TURN))
+        found = self._hits([target], "review codex pane")["target"]
+        assert found.strength == WORDS_YOURS
+        hit = found.hit
         assert hit.role == "user" and hit.count == 1
         assert hit.match.startswith("codex") and hit.match.endswith("review")
+
+    def test_words_scattered_across_turns_match(self, tmp_path):
+        """The reported miss: a cue typed 75 entries after the others used to
+        lose the session, because every word had to share one entry."""
+        from session_browser.transcript import WORDS_YOURS
+
+        scattered = self._session(
+            tmp_path,
+            "scattered",
+            ("user", "close the ticket unless it has a release watch"),
+            ("assistant", "closing them now"),
+            ("user", "/yolo"),
+        )
+        missing_one = self._session(
+            tmp_path,
+            "missing-one",
+            ("user", "close the ticket unless it has a release watch"),
+        )
+        hits = self._hits([scattered, missing_one], "watch ticket yolo")
+        assert set(hits) == {"scattered"}
+        assert hits["scattered"].strength == WORDS_YOURS
+        # The row shows a turn a person wrote, with one of the words marked.
+        assert hits["scattered"].hit.role == "user"
+        assert hits["scattered"].hit.match.lower() in ("watch", "ticket", "yolo")
+
+    def test_grades_by_who_said_the_words(self, tmp_path):
+        from session_browser.transcript import (
+            WORDS_CLOSE,
+            WORDS_QUOTED,
+            WORDS_SAID,
+            WORDS_YOURS,
+        )
+
+        apart = "the watch " + "filler " * 60 + "on that ticket"
+        sessions = [
+            self._session(
+                tmp_path, "yours", ("user", "set a watch"), ("user", "on the ticket")
+            ),
+            self._session(
+                tmp_path, "close", ("assistant", "the watch on that ticket is green")
+            ),
+            self._session(
+                tmp_path,
+                "said",
+                ("user", "set a watch"),
+                ("assistant", "ticket closed"),
+            ),
+            self._session(tmp_path, "quoted", ("tool", "watch: ticket T-1 GREEN")),
+            # A subagent's "user" turn is the prompt its parent wrote.
+            self._session(
+                tmp_path,
+                "subagent",
+                ("user", "set a watch"),
+                ("user", "on the ticket"),
+                parent_id="yours",
+            ),
+            # Apart in tool text, or apart in ONE entry of it: not a match.
+            self._session(
+                tmp_path, "tool-scatter", ("tool", "watch"), ("tool", "ticket")
+            ),
+            self._session(tmp_path, "tool-apart", ("tool", apart)),
+        ]
+        hits = self._hits(sessions, "watch ticket")
+        assert {sid: h.strength for sid, h in hits.items()} == {
+            "yours": WORDS_YOURS,
+            "close": WORDS_CLOSE,
+            "said": WORDS_SAID,
+            "quoted": WORDS_QUOTED,
+            "subagent": WORDS_SAID,
+        }
+        assert hits["quoted"].hit.role == "tool"
+
+    def test_metadata_holds_a_word_like_any_other_cue(self, tmp_path, monkeypatch):
+        from session_browser.transcript import (
+            WORDS_SAID,
+            WORDS_YOURS,
+            metadata_word_strengths,
+        )
+
+        monkeypatch.setenv("HOME", "/home/sam")
+        turn = ("user", "close the ticket")
+        sessions = [
+            # The project is a directory ABOVE the working one: a worktree.
+            self._session(
+                tmp_path,
+                "worktree",
+                turn,
+                cwd="/home/sam/worktrees/Acme_New/reset-minutes",
+            ),
+            self._session(tmp_path, "elsewhere", turn, cwd="/home/sam/other"),
+            # An id is hexadecimal, and "cafe" is a hexadecimal word.
+            Session(
+                id="00cafe00",
+                provider="claude",
+                cwd="/home/sam/Acme_New",
+                content_path=_claude_file(tmp_path / "hex.jsonl", ("user", "hello")),
+            ),
+            # The home prefix is in every path, so it is not a cue.
+            self._session(tmp_path, "home", turn, cwd="/home/sam/other"),
+        ]
+        hits = self._hits(sessions, "acme ticket")
+        assert {sid: h.strength for sid, h in hits.items()} == {"worktree": WORDS_YOURS}
+        assert self._hits(sessions, "sam ticket") == {}
+        assert self._hits(sessions, "acme cafe") == {}
+        # The directory projects are kept in admits a session, and is not
+        # a word anyone typed: "worktrees" here, ~/Projects on most machines.
+        shelved = self._hits(sessions, "worktrees ticket")
+        assert {sid: h.strength for sid, h in shelved.items()} == {
+            "worktree": WORDS_SAID
+        }
+
+        # Provider and branch admit a session without counting as typed.
+        on_branch = self._session(
+            tmp_path, "branch", ("assistant", "ticket closed"), branch="fix/watch"
+        )
+        assert self._hits([on_branch], "watch ticket")["branch"].strength == WORDS_SAID
+
+        # Metadata alone, with no transcript read at all.
+        titled = Session(
+            id="titled",
+            provider="claude",
+            summary="/yolo grab an open ticket",
+            cwd="/home/sam/Acme_New",
+        )
+        delegated = Session(
+            id="delegated",
+            provider="claude",
+            summary="/yolo grab an open ticket",
+            cwd="/home/sam/other",
+            parent_id="titled",
+        )
+        assert metadata_word_strengths([titled, delegated, *sessions], "acme yolo") == {
+            "titled": WORDS_YOURS
+        }
+        assert metadata_word_strengths([titled, delegated], "ticket yolo") == {
+            "titled": WORDS_YOURS,
+            "delegated": WORDS_SAID,
+        }
+        assert metadata_word_strengths([titled], '"ticket yolo"') == {}
 
 
 @pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
@@ -6649,14 +6789,14 @@ class TestUnorderedGlobalSearch:
             await self._search(app, pilot, "codex pane review")
             # The phrase hit outranks the newer unordered one.
             assert [s.id for s in app._filtered] == ["literal", "loose"]
-            assert "loose" in app._unordered_hits
-            assert "literal" not in app._unordered_hits
+            assert "loose" in app._word_hits
+            assert "literal" not in app._word_hits
 
             # Reordered: the phrase is in neither, so both come from the
             # fallback, and recency orders them as it does any one tier.
             await self._search(app, pilot, "review codex pane")
             assert [s.id for s in app._filtered] == ["loose", "literal"]
-            assert set(app._unordered_hits) == {"loose", "literal"}
+            assert set(app._word_hits) == {"loose", "literal"}
 
             # Opening the unordered hit never shows "0 matches": each term
             # is highlighted inside the window that matched.
@@ -6677,4 +6817,113 @@ class TestUnorderedGlobalSearch:
         async with app.run_test() as pilot:
             await _install_fake_sessions(app, pilot, [loose])
             await self._search(app, pilot, '"review codex pane"')
-            assert app._filtered == [] and app._unordered_hits == {}
+            assert app._filtered == [] and app._word_hits == {}
+
+    async def test_another_cue_narrows_to_the_session_instead_of_losing_it(
+        self, tmp_path
+    ):
+        """Words said in different turns find the session; the one where a
+        person typed them outranks a newer one where the agent supplied
+        some; and opening it marks each word where it was said."""
+        app = SessionBrowser()
+        wanted = Session(
+            id="wanted",
+            provider="claude",
+            summary="is this still an issue?",
+            updated_at="2026-01-01",
+            content_path=_claude_file(
+                tmp_path / "w.jsonl",
+                ("user", "close the ticket unless it has a release watch"),
+                ("tool", "ticket T-1 closed: watch GREEN, yolo mode off"),
+                ("assistant", "done"),
+                ("user", "/yolo"),
+            ),
+        )
+        agent_said = Session(
+            id="agent-said",
+            provider="claude",
+            summary="tidy up",
+            updated_at="2026-02-01",
+            content_path=_claude_file(
+                tmp_path / "a.jsonl",
+                ("user", "grab a ticket"),
+                ("assistant", "I will watch the build"),
+                ("assistant", "running in yolo mode"),
+            ),
+        )
+        two_of_three = Session(
+            id="two-of-three",
+            provider="claude",
+            summary="other",
+            updated_at="2026-03-01",
+            content_path=_claude_file(
+                tmp_path / "t.jsonl", ("user", "watch the ticket")
+            ),
+        )
+        async with app.run_test(size=(220, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, [two_of_three, agent_said, wanted])
+            await self._search(app, pilot, "watch ticket")
+            assert {s.id for s in app._filtered} == {
+                "two-of-three",
+                "agent-said",
+                "wanted",
+            }
+            await self._search(app, pilot, "watch ticket yolo")
+            assert [s.id for s in app._filtered] == ["wanted", "agent-said"]
+
+            table = app.query_one("#session-table")
+            assert app._table_column_mode == "full"
+            summary = str(table.get_row_at(0)[-1])
+            # Found by its words, and showing a turn a person wrote.
+            assert "≈" in summary and "release" in summary
+
+            app._select_session("0")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app._selected.id == "wanted"
+            words = [app._detail_text[s:e].lower() for s, e in app._matches]
+            # Each word where a person or the agent said it. The tool listing
+            # holds all three together, and is not what gets marked: the row
+            # was found, and ranked, by what was said.
+            assert words == ["ticket", "watch", "yolo"]
+
+            # Two of three words is not a match, so nothing is marked in a
+            # session that never reached this query's results.
+            app._select_session(
+                str([s.id for s in app._table_sessions].index("agent-said"))
+            )
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            app.query_one("#detail-search").value = "watch ticket pineapple"
+            await pilot.pause()
+            assert app._matches == []
+
+    async def test_words_held_by_metadata_show_before_any_transcript_is_read(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", "/home/sam")
+        app = SessionBrowser()
+        titled = Session(
+            id="titled",
+            provider="claude",
+            summary="/yolo grab an open ticket",
+            cwd="/home/sam/worktrees/Acme_New/reset-minutes",
+            content_path=_claude_file(tmp_path / "m.jsonl", ("user", "hello")),
+        )
+        other = Session(
+            id="other",
+            provider="claude",
+            summary="/yolo grab an open ticket",
+            cwd="/home/sam/elsewhere",
+            content_path=_claude_file(tmp_path / "o.jsonl", ("user", "hello")),
+        )
+        async with app.run_test(size=(160, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, [titled, other])
+            app.query_one("#global-search").value = "acme yolo"
+            app._apply_filter("acme yolo")
+            # No worker has run: the row is there on the keystroke.
+            assert [s.id for s in app._filtered] == ["titled"]
+            for _ in range(3):
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+            assert [s.id for s in app._filtered] == ["titled"]

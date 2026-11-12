@@ -106,6 +106,15 @@ match in context. When you find the right one, press `t` to continue it in tmux
 or Herdr, or `c` to copy its resume command — search, read, and resume without
 leaving the UI.
 
+You do not need the phrase. Type the few things you remember — `canary
+rollback friday`, or `billing export timeout` — and when the exact phrase comes up
+short the list fills with sessions where every word turns up: in what was said,
+in any turn and any order, or in the project, summary or branch. A word said
+fifty turns after the others still counts, so adding something else you
+remember homes in on the session instead of losing it. Those rows are marked
+`≈` and sit below exact matches, the ones where you typed the words yourself
+first. Put the query in double quotes to ask for the phrase and nothing else.
+
 ![Global transcript search for sqlite](docs/screenshots/02-search-sqlite-120x40.svg)
 
 ### Read the part that matters

@@ -1915,15 +1915,19 @@ def session_contains(session: Session, query: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Unordered word matching (TUI only)
+# Word matching (TUI only)
 # ---------------------------------------------------------------------------
 #
-# Literal phrase search misses an entry whose words were typed in another
-# order or with other words between them: "codex pane review" did not find a
-# user turn saying "there is a sibling codex pane you can ask for a second
-# opinion or review". The TUI therefore runs a second, lower-ranked wave for
-# a multi-word query. The rules, stated once here because the global search,
-# its ranking and the detail pane all depend on them agreeing:
+# Literal phrase search misses a session whose words were typed in another
+# order, with other words between them, or in different turns altogether.
+# "codex pane review" did not find a user turn saying "there is a sibling
+# codex pane you can ask for a second opinion or review"; a three-word query
+# did not find the session where two of its words were discussed and the
+# third was typed 75 entries later. The second is what a person holds of a
+# session they want back: a few cues, not a sentence. The TUI therefore runs
+# a second, lower-ranked wave for a multi-word query. The rules, stated once
+# here because the global search, its ranking and the detail pane all depend
+# on them agreeing:
 #
 #   * Terms are the query's whitespace-separated words after the same
 #     normalization literal search uses, so matching is substring and
@@ -1931,12 +1935,21 @@ def session_contains(session: Session, query: str) -> bool:
 #     Repeated terms count once. One-character terms are dropped: on their
 #     own they match nearly every entry. Stop words are not special.
 #   * A query containing a double quote is a literal phrase and gets no
-#     unordered wave: quoting is how to ask for exactly that.
-#   * Every term must occur in ONE entry, within UNORDERED_WINDOW characters
-#     of normalized text, measured as the smallest window holding them all.
-#     Words scattered across an hours-long session are not one match.
-#   * Literal phrase hits always outrank unordered ones; the CLI's search
-#     contract does not change.
+#     words wave: quoting is how to ask for exactly that.
+#   * A session matches when EVERY term is found in its conversation -- its
+#     user and assistant entries, in any of them, any distance apart -- or
+#     in its metadata: where it ran, its summary, its branch, its provider.
+#     So each cue added narrows the result and never loses the session, and
+#     a project name is a cue like any other. Not the session id: "dead",
+#     "face" and "cafe" are hexadecimal.
+#   * Tool and system text is where the noise is, so there the older, tighter
+#     rule still holds: every term in ONE entry, within UNORDERED_WINDOW
+#     characters of normalized text, measured as the smallest window holding
+#     them all. Words scattered across hours of tool output are not a match.
+#   * Matches are graded, strongest first (WORDS_YOURS, WORDS_CLOSE,
+#     WORDS_SAID, WORDS_QUOTED below), and recency orders each grade.
+#   * Literal phrase hits always outrank word hits; the CLI's search contract
+#     does not change.
 #
 # 200 was the proximity measured to keep the reported target while cutting
 # 111 candidate sessions to 12; 160 also kept it. The wider is the safer
@@ -1946,6 +1959,60 @@ UNORDERED_WINDOW = 200
 # times in a tool dump would otherwise make the window scan quadratic-ish;
 # the first few hundred decide the minimal window in any realistic entry.
 _UNORDERED_MAX_HITS = 256
+
+# How strongly a session matched the words, strongest first.
+#
+# YOURS: a person typed every term, or where the session ran holds it. What
+# someone remembers of a session is mostly what they said in it.
+#
+# CLOSE: every term sits together in one user or assistant entry, within the
+# window -- said in one breath, by the agent or by a subagent's prompt.
+#
+# SAID: every term is in the conversation, but spread across turns, with at
+# least one of them only in the agent's words, a subagent's prompt, the
+# branch or the provider.
+#
+# QUOTED: the terms sit together in one tool or system entry and are not all
+# in the conversation -- something the agent read, not something said.
+#
+# YOURS over CLOSE is a split by speaker, which SessionBrowser._match_tier
+# records as a mistake for literal hits. It is made here on a measurement
+# (2026-11-12, 2,193 sessions, against a session known to be the one
+# wanted) and because word evidence, unlike a phrase, is not equally strong
+# in either voice:
+#
+#   query                rows  YOURS  CLOSE  SAID  QUOTED   wanted session's row
+#                                                         recency  merged  split
+#   A B                   288     19     42   109     118       6       4      1
+#   C A B                 136      5     14    77      40       4       4      1
+#   A B D                  70      6      0    64       0       3       1      1
+#   codex pane review     365     20     74   115     156    (not a match)
+#
+# A to D stand for the words of the real search, which name private work.
+# "Merged" is YOURS and CLOSE as one grade; "recency" is no grades at all.
+# Merged, the top grade is a fifth of the rows and decides little: the
+# wanted session held row 4 only because it was from that morning, and an
+# older one falls as far as the grade is deep. The cost of the split is
+# bounded by the YOURS column: a recent reply that says the words together
+# sits under at most that many sessions, and above every scattered one.
+WORDS_YOURS = 0
+WORDS_CLOSE = 1
+WORDS_SAID = 2
+WORDS_QUOTED = 3
+
+_CONVERSATION_ROLES = ("user", "assistant")
+
+
+@dataclass(frozen=True)
+class WordsHit:
+    """Why one session matched a words search, and how strongly.
+
+    ``hit`` is the snippet to show for it, or None when metadata alone holds
+    the terms and no user or assistant entry has any of them.
+    """
+
+    strength: int
+    hit: ContentHit | None
 
 
 def unordered_terms(query: str) -> list[str]:
@@ -2044,81 +2111,214 @@ def unordered_spans(
     return spans
 
 
-def search_session_unordered_hits(
+def _metadata_grades(session: Session, terms: list[str], home: str) -> list[int]:
+    """Per term: 2 when a person typed it or the session's location holds it,
+    1 when weaker metadata does, 0 when no metadata holds it.
+
+    The location is the working directory and the repository. A summary is
+    the opening prompt, so it is a person's words -- except in a subagent,
+    whose prompt its parent wrote. Provider and branch admit a session
+    without counting as typed: "codex" and "main" would otherwise put every
+    Codex session, or every session on main, in the strongest grade.
+
+    Two parts of the path are not the location. The home prefix is in every
+    path, so it is cut: with it the user's own account name would be a term
+    every session holds. And the first directory below home, when the session
+    ran deeper than that, is the shelf projects are kept on rather than a
+    project: measured 2026-11-12, "project" was in 2,161 of 2,195 working
+    directories here through ~/Projects alone, which made it a free word at
+    the strongest grade. It admits, like a provider, and does not count.
+    """
+    cwd = session.cwd or ""
+    shelf = ""
+    if home and (cwd == home or cwd.startswith(home + os.sep)):
+        cwd = cwd[len(home) :]
+        head, _, deeper = cwd.lstrip(os.sep).partition(os.sep)
+        if deeper:
+            shelf, cwd = head, deeper
+    place = normalize_match_text(f"{cwd} {session.repository or ''}")
+    summary = normalize_match_text(session.summary or "")
+    other = normalize_match_text(f"{session.provider} {session.branch or ''} {shelf}")
+    person = not (session.parent_id or session.subagent_kind)
+    grades = []
+    for term in terms:
+        if term in place or (person and term in summary):
+            grades.append(2)
+        elif term in summary or term in other:
+            grades.append(1)
+        else:
+            grades.append(0)
+    return grades
+
+
+def metadata_word_strengths(sessions: list[Session], query: str) -> dict[str, int]:
+    """Sessions whose metadata alone holds every term of *query*, by id, with
+    the strength of that match.
+
+    Reads nothing from disk, so the TUI shows these rows on the keystroke,
+    before any transcript has been opened.
+    """
+    terms = unordered_terms(query)
+    if not terms:
+        return {}
+    home = os.path.expanduser("~")
+    found: dict[str, int] = {}
+    for s in sessions:
+        grades = _metadata_grades(s, terms, home)
+        if all(grades):
+            found[s.id] = WORDS_YOURS if min(grades) == 2 else WORDS_SAID
+    return found
+
+
+def _words_hit(
+    result: SessionSearchResult, terms: list[str], held: list[int]
+) -> WordsHit | None:
+    """Grade one scanned session against *terms*, or None when it does not
+    match. *held* is its _metadata_grades."""
+    session = result.session
+    person = not (session.parent_id or session.subagent_kind)
+    index = {term: t for t, term in enumerate(terms)}
+    grade = list(held)
+    # entry index -> (entry, indices of the terms it holds)
+    per_entry: dict[int, tuple[TranscriptEntry, list[int]]] = {}
+    for m in result.matches:
+        t = index[m.query]
+        slot = per_entry.get(m.entry_index)
+        if slot is None:
+            per_entry[m.entry_index] = (m.entry, [t])
+        else:
+            slot[1].append(t)
+        role = m.entry.role
+        if role == "user":
+            said = 2 if person else 1
+        elif role == "assistant":
+            said = 1
+        else:
+            continue
+        grade[t] = max(grade[t], said)
+    # Entries holding every term, checked for the window: the tight rule,
+    # which is all that tool and system text can match by.
+    need = len(terms)
+    windows = 0
+    close: tuple[tuple[int, int], TranscriptEntry] | None = None
+    for i, (entry, held_terms) in per_entry.items():
+        if len(held_terms) < need:
+            continue
+        if unordered_window(normalize_match_text(entry.text), terms) is None:
+            continue
+        windows += 1
+        key = (_snippet_role_rank(entry.role), i)
+        if close is None or key < close[0]:
+            close = (key, entry)
+    close_said = close is not None and close[1].role in _CONVERSATION_ROLES
+    if all(grade):
+        if min(grade) == 2:
+            strength = WORDS_YOURS
+        else:
+            strength = WORDS_CLOSE if close_said else WORDS_SAID
+    elif close is not None:
+        strength = WORDS_QUOTED
+    else:
+        return None
+    if close is not None and (close_said or strength == WORDS_QUOTED):
+        entry = close[1]
+        spans = unordered_spans(entry.text, terms)
+        return WordsHit(
+            strength,
+            _make_hit(entry.text, entry.role, (spans[0][0], spans[-1][1]), windows),
+        )
+    # Scattered through the conversation: show the turn holding the most of
+    # the terms, a person's before the agent's, and highlight one of them.
+    best: tuple[tuple[int, int, int], TranscriptEntry, list[int]] | None = None
+    for i, (entry, held_terms) in per_entry.items():
+        if entry.role not in _CONVERSATION_ROLES:
+            continue
+        key = (-len(held_terms), _snippet_role_rank(entry.role), i)
+        if best is None or key < best[0]:
+            best = (key, entry, held_terms)
+    if best is None:
+        return WordsHit(strength, None)
+    entry = best[1]
+    term = terms[min(best[2])]
+    span = _find_first_text_span(entry.text, term)
+    if span is None:
+        return WordsHit(strength, None)
+    return WordsHit(strength, _make_hit(entry.text, entry.role, span, 1))
+
+
+def search_session_word_hits(
     sessions: list[Session],
     query: str,
     *,
     cancelled: Callable[[], bool] | None = None,
     progress: ProgressFn | None = None,
-) -> dict[str, ContentHit]:
-    """Sessions with an entry holding every term of *query*, unordered.
+) -> dict[str, WordsHit]:
+    """Sessions matching every term of *query* by the word rules above.
 
     Parsing is what costs, so the work is arranged to parse as little as
-    possible. First the native candidate scan runs once per term -- ripgrep
-    over raw bytes, about 0.25 s a term on a 2,367-session corpus -- and a
-    file session is kept only if it can contain EVERY term. Then the literal
-    search for one anchor term (the longest) parses just those survivors, and
-    each entry that matched the anchor is checked for the rest within the
-    window. Callers pass only sessions the literal phrase did not already
-    find. Without ripgrep the intersection is skipped and the anchor scan's
-    own in-process prefilter decides, as it would for any search.
+    possible, and each candidate exactly once however many words were typed.
+    First the native candidate scan runs once per term -- ripgrep over raw
+    bytes, about 0.25 s a term on a 2,367-session corpus -- and a file
+    session survives a term only if its file can contain it or its metadata
+    already holds it; each scan reads only what the terms before it left,
+    longest term first because the longest is usually the rarest. Then ONE
+    scan for all the terms together parses the survivors, and its matches
+    are graded per session. Callers pass only sessions the literal phrase did
+    not already find. Without ripgrep the narrowing is skipped and that
+    scan's own in-process prefilter decides, as it would for any search.
 
-    The intersection is only as selective as the words are rare. Measured
-    2026-11-01 on that corpus, "codex pane review" -- three words nearly every
-    session there contains -- still left 1,686 sessions (5.5 GB) to parse:
-    about 20 s against 4 s for the literal scan. Two native proximity scans
-    were tried and dropped: a same-line PCRE2 lookahead (0.5 s, 1,478 files,
-    barely better) and a bounded-gap regex over every term order (20 s for
-    the scan alone). Hence the TUI's gate: it runs this wave only when the
-    literal phrase came up short.
+    The narrowing is only as selective as the words are rare: three words
+    nearly every session contains ("codex pane review") still leave almost
+    the whole corpus to the scan. Measured 2026-11-12 on 2,193 sessions, best
+    of three, against the wave this replaced -- one scan for the longest term
+    and a window check on its matches -- over the same six queries: 1.4-2.8 s
+    here, 2.0-4.1 s there. Scanning for every term at once is not the dearer
+    shape, because the same files are parsed either way. An earlier figure of
+    about 20 s for that query (2026-11-01, 2,367 sessions) is what the gate
+    in the TUI was set on: it runs this wave only when the literal phrase
+    came up short. Two native proximity scans were tried then and dropped: a
+    same-line PCRE2 lookahead (0.5 s, 1,478 files, barely better) and a
+    bounded-gap regex over every term order (20 s for the scan alone).
     """
     terms = unordered_terms(query)
     if not terms:
         return {}
-    anchor = max(terms, key=len)
-    files = [s for s in sessions if s.provider != "opencode"]
-    candidates: set[Path] | None = None
-    for term in terms:
-        needles = _prefilter_needles(term)
+    home = os.path.expanduser("~")
+    held = [_metadata_grades(s, terms, home) for s in sessions]
+    alive = list(range(len(sessions)))
+    for t in sorted(range(len(terms)), key=lambda t: -len(terms[t])):
+        needles = _prefilter_needles(terms[t])
         if needles is None or any("/" in n for n in needles):
-            candidates = None
-            break
+            continue  # this term cannot be scanned raw; the others still narrow
         if cancelled is not None and cancelled():
             return {}
-        found = _rg_candidate_paths(files, needles)
-        if found is None:
-            candidates = None
-            break
-        candidates = found if candidates is None else candidates & found
-        if not candidates:
-            break
-    if candidates is not None:
-        sessions = [
-            s
-            for s in sessions
-            if s.provider == "opencode" or _prefilter_file(s) in candidates
+        asked = [
+            sessions[i]
+            for i in alive
+            if sessions[i].provider != "opencode" and not held[i][t]
         ]
-    hits: dict[str, ContentHit] = {}
-    for r in search_sessions(sessions, anchor, cancelled=cancelled, progress=progress):
-        if r.unreadable or not r.matches:
+        if not asked:
             continue
-        best = None
-        count = 0
-        for m in r.matches:
-            folded = normalize_match_text(m.entry.text)
-            if unordered_window(folded, terms) is None:
-                continue
-            count += 1
-            key = (_snippet_role_rank(m.entry.role), m.entry_index)
-            if best is None or key < best[0]:
-                best = (key, m.entry)
-        if best is None:
+        found = _rg_candidate_paths(asked, needles)
+        if found is None:
+            break
+        alive = [
+            i
+            for i in alive
+            if sessions[i].provider == "opencode"
+            or held[i][t]
+            or _prefilter_file(sessions[i]) in found
+        ]
+    hits: dict[str, WordsHit] = {}
+    results = search_sessions(
+        [sessions[i] for i in alive], terms, cancelled=cancelled, progress=progress
+    )
+    for i, r in zip(alive, results, strict=False):
+        if r.unreadable:
             continue
-        entry = best[1]
-        spans = unordered_spans(entry.text, terms)
-        hits[r.session.id] = _make_hit(
-            entry.text, entry.role, (spans[0][0], spans[-1][1]), count
-        )
+        hit = _words_hit(r, terms, held[i])
+        if hit is not None:
+            hits[r.session.id] = hit
     return hits
 
 

@@ -1199,11 +1199,13 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
         ),
         Workload(
             "tui.search.unordered",
-            "The TUI's words-in-any-order wave. It must cost ONE literal scan "
-            "for its anchor term (the longest, here the rare one) plus a "
-            "window check on that scan's matches -- never a scan per term, "
-            "which would read the corpus once for each word typed.",
-            lambda: transcript.search_session_unordered_hits(
+            "The TUI's words wave. It must parse each candidate ONCE, in one "
+            "scan for all the typed words together, after one native "
+            "candidate scan per word has narrowed the files -- never a "
+            "parsing scan per word, which would read the corpus once for "
+            "each word typed. The key keeps its old name so a bless shows "
+            "this workload's counters moving rather than a new workload.",
+            lambda: transcript.search_session_word_hits(
                 discovery.discover_all(),
                 f"sighted {QUERY_RARE}",
                 progress=lambda *_a: ledger.add("progress_callbacks"),

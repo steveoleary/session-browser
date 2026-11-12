@@ -47,11 +47,14 @@ from .resume import (
     resume_command,
 )
 from .transcript import (
+    WORDS_QUOTED,
     ContentHit,
     ContentSearchCache,
     Transcript,
     TranscriptEntry,
     TranscriptUnreadable,
+    WordsHit,
+    _metadata_grades,
     _offset_map,
     _OffsetMap,
     canonical_id,
@@ -62,10 +65,11 @@ from .transcript import (
     find_text_spans,
     is_slash_command,
     load_transcript,
+    metadata_word_strengths,
     normalize_match_text,
     render_text,
     search_session_hits,
-    search_session_unordered_hits,
+    search_session_word_hits,
     unordered_spans,
     unordered_terms,
 )
@@ -86,13 +90,20 @@ PROVIDER_COLOURS = {
 # instant.
 _FILTER_DEBOUNCE = 0.15
 
-# The words-in-any-order wave is a recall fallback for a phrase that came up
-# short, so it runs only below this many literal results. When the words are
-# common it is the expensive half of a search (measured at ~20 s against ~4 s
-# for the literal scan on a 2,367-session corpus; see
-# search_session_unordered_hits), and a phrase that already found this many
-# sessions has not left the user short of something to read.
+# The words wave is a recall fallback for a phrase that came up short, so it
+# runs only below this many literal results. When the words are common it is
+# the expensive half of a search and the noisy one: measured 2026-11-12 in
+# this app on a 2,020-session corpus, "codex pane review" settles in 1.6 s
+# with 10 rows while the gate holds the wave back, and in 12.4 s with 319
+# when it does not. A phrase that already found this many sessions has not
+# left the user short of something to read.
+#
+# Every literal result counts, including sessions that only quote the phrase
+# in tool output. Counting only the ones where it was said was tried and is
+# what produced the second pair of numbers above.
 _UNORDERED_BELOW = 10
+
+_CONVERSATION_ROLES = ("user", "assistant")
 
 # The detail pane renders at most this many characters at once. This is
 # strictly a presentation bound: search, match counts, and exports always
@@ -781,6 +792,22 @@ def _format_content_hit(hit: ContentHit) -> str:
         f"[black on yellow]{_escape_markup(match)}[/]"
         f"{_escape_markup(after)}{suffix}"
     )
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """*spans* in order, overlapping ones joined.
+
+    Two search words can overlap in the text ("pane" inside "panes" when
+    both were typed), and match navigation expects each span to start after
+    the one before it ends.
+    """
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _teardown_safe(method):
@@ -1631,9 +1658,14 @@ class SessionBrowser(App):
         self._tree: bool = True
         self._row_meta: dict[str, RowMeta] = {}
         self._content_hits: dict[str, ContentHit] = {}
-        # Sessions found only by the unordered-words wave, ranked below every
-        # literal hit; see transcript.unordered_terms for the rules.
-        self._unordered_hits: dict[str, ContentHit] = {}
+        # Sessions the phrase did not find but its words did, ranked below
+        # every literal hit; see "Word matching" in transcript.py for the
+        # rules. _meta_words is the half that needs no transcript -- every
+        # word held by where the session ran, its summary, branch or provider
+        # -- so those rows are on screen from the keystroke; _word_hits is
+        # the half the worker reads transcripts for. Both map to a strength.
+        self._meta_words: dict[str, int] = {}
+        self._word_hits: dict[str, WordsHit] = {}
         self._literal_added = 0
         # (normalized query, hit ids) of the last *completed* content
         # search. Extending a query can only shrink its hit set (any text
@@ -1971,9 +2003,9 @@ class SessionBrowser(App):
                 1 for s in self._all_sessions if s.id in hits or s.matches(query)
             )
             if unordered_terms(query) and literal < _UNORDERED_BELOW:
-                # Literal results are on screen; now the words-in-any-order
-                # wave, over what neither metadata nor the phrase found. The
-                # spinner keeps running, and one count lands at the end.
+                # Literal results are on screen; now the words wave, over
+                # what neither metadata nor the phrase found. The spinner
+                # keeps running, and one count lands at the end.
                 self._literal_added = added
                 rest = [
                     s
@@ -1981,24 +2013,26 @@ class SessionBrowser(App):
                     if s.id not in hits and not s.matches(query)
                 ]
                 self.run_worker(
-                    lambda q=query, ss=rest: self._unordered_search_worker(q, ss),
+                    lambda q=query, ss=rest: self._word_search_worker(q, ss),
                     thread=True,
                     exclusive=True,
                     group="content_search",
-                    name="_unordered_search",
+                    name="_word_search",
                 )
             else:
                 self._stop_deep_search(found=added)
-        elif event.worker.name == "_unordered_search":
+        elif event.worker.name == "_word_search":
             result = event.worker.result
             if result is None:
                 return
             query, hits = result
             if query != self._filter_query:
                 return
-            self._stop_deep_search(found=self._literal_added + len(hits))
+            # Rows metadata had already put on screen were not added by this.
+            fresh = sum(1 for sid in hits if sid not in self._meta_words)
+            self._stop_deep_search(found=self._literal_added + fresh)
             if hits:
-                self._unordered_hits = hits
+                self._word_hits = hits
                 self._rebuild_filtered(query)
 
     # -- Global search / filter --------------------------------------------
@@ -2091,7 +2125,8 @@ class SessionBrowser(App):
     def _apply_filter(self, query: str) -> None:
         self._filter_query = query
         self._content_hits = {}
-        self._unordered_hits = {}
+        self._word_hits = {}
+        self._meta_words = metadata_word_strengths(self._all_sessions, query)
         if not query:
             self._stop_deep_search()
             self._filtered = self._cwd_scope(self._all_sessions)
@@ -2138,12 +2173,12 @@ class SessionBrowser(App):
         )
         return query, hits
 
-    def _unordered_search_worker(
+    def _word_search_worker(
         self, query: str, sessions: list[Session]
-    ) -> tuple[str, dict[str, ContentHit]]:
+    ) -> tuple[str, dict[str, WordsHit]]:
         worker = get_current_worker()
         generation = self._search_generation
-        hits = search_session_unordered_hits(
+        hits = search_session_word_hits(
             sessions,
             query,
             cancelled=lambda: worker.is_cancelled,
@@ -2269,21 +2304,31 @@ class SessionBrowser(App):
             return 0
         hit = self._content_hits.get(s.id)
         if hit is None:
-            # Unordered words rank below every literal hit, keeping the same
-            # conversation-over-tool-traffic split among themselves.
-            loose = self._unordered_hits.get(s.id)
-            return 2 if loose is not None and loose.role in ("user", "assistant") else 3
-        if hit.role not in ("user", "assistant"):
+            # Words rank below every literal hit, by how strongly they
+            # matched: the WORDS_* grades in transcript.py, which do split
+            # by speaker, on a measurement recorded there.
+            return 2 + self._word_strength(s.id)
+        if hit.role not in _CONVERSATION_ROLES:
             return 1
         return 0
 
+    def _word_strength(self, session_id: str) -> int:
+        """The stronger of what metadata and the transcript say of a words
+        match; metadata answers first and a transcript can only improve it."""
+        found = self._word_hits.get(session_id)
+        return min(
+            self._meta_words.get(session_id, WORDS_QUOTED),
+            found.strength if found is not None else WORDS_QUOTED,
+        )
+
     def _rebuild_filtered(self, query: str) -> None:
         hits = self._content_hits
-        loose = self._unordered_hits
+        words = self._word_hits
+        meta = self._meta_words
         matched = [
             s
             for s in self._all_sessions
-            if s.matches(query) or s.id in hits or s.id in loose
+            if s.matches(query) or s.id in hits or s.id in words or s.id in meta
         ]
         # Stable sort: _all_sessions is newest-first, so recency still
         # orders sessions within the same evidence tier.
@@ -2327,23 +2372,27 @@ class SessionBrowser(App):
             )
             project = f"[dim]{_escape_markup(_project_name(s.cwd))}[/]"
             hit = self._content_hits.get(s.id) if self._filter_query else None
-            loose = (
-                self._unordered_hits.get(s.id)
-                if self._filter_query and hit is None
-                else None
-            )
             if hit is not None:
                 summary = _format_content_hit(hit)
-            elif loose is not None:
-                # "≈" marks words found in another order or apart, so a row
-                # whose snippet does not show the typed phrase explains itself.
-                summary = "[dim]≈ [/]" + _format_content_hit(loose)
             else:
-                summary = (
-                    _escape_markup(_ellipsize(s.summary, 120))
-                    if s.summary
-                    else "(no summary)"
-                )
+                words = self._word_hits.get(s.id) if self._filter_query else None
+                if words is not None and words.hit is not None:
+                    summary = _format_content_hit(words.hit)
+                else:
+                    summary = (
+                        _escape_markup(_ellipsize(s.summary, 120))
+                        if s.summary
+                        else "(no summary)"
+                    )
+                if (words is not None or s.id in self._meta_words) and not s.matches(
+                    self._filter_query
+                ):
+                    # "≈" marks a row found by its words rather than the
+                    # phrase, so one whose text does not show what was typed
+                    # explains itself. Some of the words may be nowhere in
+                    # the row at all: in a later turn, or in a directory
+                    # above the project name.
+                    summary = "[dim]≈ [/]" + summary
             age = _relative_time(s.updated_at or s.created_at)
             values = {
                 "minimal": (provider_label, project),
@@ -2946,18 +2995,10 @@ class SessionBrowser(App):
                     terms = unordered_terms(query) if not self._matches else []
                     if terms:
                         # Exact first: only when the phrase is nowhere in the
-                        # session, fall back to its words in any order within
-                        # one entry -- the same rule that found it globally,
-                        # so an unordered hit never opens on "0 matches".
-                        for i, ((start, _end), entry) in enumerate(
-                            zip(
-                                self._entry_spans,
-                                self._transcript.entries,
-                                strict=True,
-                            )
-                        ):
-                            for s, e in self._entry_unordered(i, entry, terms):
-                                self._matches.append((start + s, start + e))
+                        # session, fall back to its words -- by the same
+                        # rules that found it globally, so a words hit never
+                        # opens on "0 matches".
+                        self._matches = self._word_matches(terms)
             else:
                 # Legacy flat path (no entry structure to lean on).
                 if self._detail_norm is None:
@@ -2994,6 +3035,52 @@ class SessionBrowser(App):
             cached[1] = idx_map
             cached[2] = True
         return find_text_spans(entry.text, query, norm=(folded, idx_map))
+
+    def _word_matches(self, terms: list[str]) -> list[tuple[int, int]]:
+        """Where a query's words are, when its phrase is nowhere in the session.
+
+        In the order the global search grades a words match (the WORDS_*
+        grades in transcript.py), so what is highlighted is the evidence the
+        row was ranked on: the words together in one user or assistant
+        entry; else each word wherever the conversation said it; else
+        together in one tool or system entry. Tool text is tried last on
+        purpose -- one listing that happens to hold all the words would
+        otherwise be the only thing marked in a session found by what a
+        person said across several turns.
+        """
+        said, read = [], []
+        for i, ((start, _end), entry) in enumerate(
+            zip(self._entry_spans, self._transcript.entries, strict=True)
+        ):
+            group = said if entry.role in _CONVERSATION_ROLES else read
+            group.append((i, start, entry))
+        spans = [
+            (start + s, start + e)
+            for i, start, entry in said
+            for s, e in self._entry_unordered(i, entry, terms)
+        ]
+        if spans:
+            return spans
+        found: set[str] = set()
+        for i, start, entry in said:
+            for term in terms:
+                for s, e in self._entry_matches(i, entry, term, term):
+                    spans.append((start + s, start + e))
+                    found.add(term)
+        if spans:
+            # Only when the session really matches: every word said, or held
+            # by its metadata. Otherwise this would mark the two words of
+            # three a session happens to have, and count them as matches.
+            held = _metadata_grades(
+                self._transcript.session, terms, os.path.expanduser("~")
+            )
+            if all(t in found or h for t, h in zip(terms, held, strict=True)):
+                return _merge_spans(spans)
+        return [
+            (start + s, start + e)
+            for i, start, entry in read
+            for s, e in self._entry_unordered(i, entry, terms)
+        ]
 
     def _entry_unordered(
         self, index: int, entry: TranscriptEntry, terms: list[str]
