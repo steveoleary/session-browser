@@ -26,6 +26,10 @@ source .venv/bin/activate
 python -m pytest session_browser/ -q
 ```
 
+The whole suite takes about 2.5 minutes (990 tests, 2026-11-12) — longer than an
+agent harness's default 2-minute command timeout, which kills it with exit 137 and
+no output. Run it in the background or with a longer timeout.
+
 ## Linting
 
 `ruff check .` — configured in `pyproject.toml`. **The baseline is zero
