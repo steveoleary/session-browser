@@ -2940,6 +2940,42 @@ _CLAUDE_SLASH_COMMAND_HEADS = (
 )
 
 
+# Pi expands a skill invocation in place: the user entry is the whole SKILL.md
+# wrapped in <skill name="..." location="...">...</skill>, followed by whatever
+# was typed after ``/skill:<name>``. Measured over all 614 Pi sessions on
+# 2026-11-12: 126 expansions in 101 sessions, 37 with nothing typed after them,
+# and together 81% of every character of Pi user text (1,886,285 of 2,333,010)
+# -- of which the person had typed 19,474. Zero matches among 300 sessions each
+# of Claude, Codex and OpenCode.
+# Claude Code records the same act as a <command-name> block with the skill
+# text in a meta record the parser already drops, so this is the Pi half of
+# one idea rather than a second one.
+_PI_SKILL_HEAD = '<skill name="'
+_PI_SKILL_CLOSE = "</skill>"
+
+
+def pi_skill_invocation(text: str) -> tuple[str, int] | None:
+    """The skill name and the offset where the typed text begins, if *text*
+    is a Pi skill expansion; None otherwise.
+
+    The offset points just past the closing tag, so ``text[offset:]`` is what
+    the person typed, surrounded by whatever whitespace Pi put there. Leading
+    marker only, as everywhere else here, and the closing tag must be present:
+    a message that merely opens with the marker is someone talking about it.
+    """
+    head = len(text) - len(text.lstrip())
+    if not text.startswith(_PI_SKILL_HEAD, head):
+        return None
+    close = text.rfind(_PI_SKILL_CLOSE)
+    if close < 0:
+        return None
+    name_start = head + len(_PI_SKILL_HEAD)
+    name_end = text.find('"', name_start)
+    if name_end < 0 or name_end > close:
+        return None
+    return text[name_start:name_end], close + len(_PI_SKILL_CLOSE)
+
+
 def is_slash_command(entry: TranscriptEntry) -> bool:
     """True if this user entry is a slash-command invocation or its output.
 
@@ -2949,11 +2985,15 @@ def is_slash_command(entry: TranscriptEntry) -> bool:
 
     Provider-specific by measurement, not by assumption. Surveyed 60 sessions
     each of Codex, OpenCode and Pi on 2026-09-08: none records a slash command
-    as a leading-marker user entry, so the predicate is inert for them rather
-    than wrong.
+    as a leading-marker user entry. Pi's skill commands are the exception
+    found since -- see ``pi_skill_invocation``.
     """
-    return entry.role == "user" and entry.text.lstrip().startswith(
-        _CLAUDE_SLASH_COMMAND_HEADS
+    if entry.role != "user":
+        return False
+    text = entry.text
+    return (
+        text.lstrip().startswith(_CLAUDE_SLASH_COMMAND_HEADS)
+        or pi_skill_invocation(text) is not None
     )
 
 
@@ -2966,9 +3006,13 @@ def is_command_noise(entry: TranscriptEntry) -> bool:
     the request itself, typed through a command. The same split names a
     session in discovery (see ``_claude_summary``), so a session's summary and
     what ``get --brief`` calls its opening request agree on what a request is.
+    A Pi skill expansion splits the same way, on what follows its body.
     """
     if not is_slash_command(entry):
         return False
+    skill = pi_skill_invocation(entry.text)
+    if skill is not None:
+        return not entry.text[skill[1] :].strip()
     if _claude_command_output(entry.text):
         return True
     return _claude_summary(entry.text)[1]

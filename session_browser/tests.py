@@ -5563,6 +5563,85 @@ class TestReadingFilter:
             assert app._filter_idx == 0
             assert search.value == "f"
 
+    def _commands_transcript(self, session: Session) -> Transcript:
+        """Commands that carry a request beside ones that only drive the
+        harness, in both shapes: Claude's tag block and Pi's skill expansion."""
+        skill_body = "# goodbye\n\n" + "End the session cleanly.\n" * 200
+        return Transcript(
+            session,
+            [
+                TranscriptEntry(
+                    "user",
+                    "<command-message>goal</command-message>\n"
+                    "<command-name>/goal</command-name>\n"
+                    "<command-args>fix the login bug</command-args>",
+                ),
+                TranscriptEntry(
+                    "user",
+                    "<command-name>/clear</command-name>\n<command-args></command-args>",
+                ),
+                TranscriptEntry(
+                    "user",
+                    f'<skill name="goodbye" location="/s/SKILL.md">\n{skill_body}'
+                    "</skill>\n\nwe'll pick this up tomorrow",
+                ),
+                TranscriptEntry(
+                    "user",
+                    f'<skill name="goodbye" location="/s/SKILL.md">\n{skill_body}</skill>',
+                ),
+                TranscriptEntry("assistant", "done"),
+            ],
+        )
+
+    async def test_a_command_carrying_a_request_is_conversation(self):
+        """/goal fix the login bug is the person speaking; a bare /clear and a
+        bare skill are not, so CONVERSATION and YOUR TURNS keep only the first
+        kind."""
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._commands_transcript(fake[0]))
+            await pilot.pause()
+
+            def shown():
+                return [w.entry_index for w in app.query(TranscriptEntryWidget)]
+
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert shown() == [0, 2, 4]
+
+            app.action_cycle_entry_filter()
+            await pilot.pause()
+            assert shown() == [0, 2]
+
+    async def test_a_pi_skill_folds_to_what_was_typed(self):
+        """The skill's own file is folded away, the preview is the line the
+        person typed after the command, and the header names the skill."""
+        from session_browser.app import TranscriptEntryWidget
+
+        app, fake = _make_app_with_rows(1)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            app._on_transcript_loaded(self._commands_transcript(fake[0]))
+            await pilot.pause()
+
+            widgets = {w.entry_index: w for w in app.query(TranscriptEntryWidget)}
+            typed, bare = widgets[2], widgets[3]
+            assert typed.collapsed and bare.collapsed
+            text, _offset, footer = typed._visible_text()
+            assert text == "we'll pick this up tomorrow"
+            assert "chars hidden" in footer
+            assert "/skill:goodbye" in typed._header_markup()
+            # Nothing typed: the opening tag at least names what ran.
+            assert bare._visible_text()[0].startswith('<skill name="goodbye"')
+            # A Claude command is short and stays as it was.
+            assert not widgets[0].collapsible
+
+            typed.action_toggle_collapsed()
+            assert typed._visible_text()[0] == typed.entry.text
+
 
 class TestCopyToClipboard:
     def test_linux_tries_clip_exe_first(self):

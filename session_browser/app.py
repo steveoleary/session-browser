@@ -63,10 +63,11 @@ from .transcript import (
     entry_label,
     entry_matches_roles,
     find_text_spans,
-    is_slash_command,
+    is_command_noise,
     load_transcript,
     metadata_word_strengths,
     normalize_match_text,
+    pi_skill_invocation,
     render_text,
     search_session_hits,
     search_session_word_hits,
@@ -321,8 +322,11 @@ class _FilterPreset(NamedTuple):
     #: entry_matches_roles, so "error" would match failed tool entries here
     #: exactly as it does for the CLI's get --role.
     roles: frozenset[str] | None
-    #: Drop Claude slash-command invocations and their captured stdout.
-    hide_slash_commands: bool
+    #: Drop slash commands that only drive the harness -- a bare ``/clear``,
+    #: a bare skill, what a command printed -- while keeping one that carries
+    #: a request (``/goal fix the login bug``): that is the person speaking,
+    #: through a command. The same split ``get --brief`` makes.
+    hide_command_noise: bool
 
 
 # Cycled by f, in order, wrapping back to the first. A ladder from "all of it"
@@ -1062,7 +1066,15 @@ class TranscriptEntryWidget(Static):
         # past this threshold, 202 past 10,000 characters and the largest to
         # 92,248 -- and a call that arrives already expanded floods the pane
         # exactly as an output would.
-        self.collapsible = entry.role == "tool" and len(entry.text) > self.COLLAPSE_AT
+        #
+        # A Pi skill expansion folds too, whatever its length: its body is the
+        # skill's own file, which the person did not write, and it buries the
+        # one line they did -- so the fold previews that line instead of the
+        # opening one, and the header names the skill.
+        self._skill = pi_skill_invocation(entry.text) if entry.role == "user" else None
+        self.collapsible = self._skill is not None or (
+            entry.role == "tool" and len(entry.text) > self.COLLAPSE_AT
+        )
         # Nothing but ``action_toggle_collapsed`` ever writes this again, which
         # is what keeps an explicit choice explicit: navigation moves the
         # preview inside a collapsed block instead of unfolding it, so a block
@@ -1167,10 +1179,18 @@ class TranscriptEntryWidget(Static):
         it, and the same however many times it did.
         """
         if not self._match_spans:
-            line_end = text.find("\n")
+            start = 0
+            if self._skill is not None:
+                typed = self._skill[1]
+                # What was typed after the command, if anything was; with
+                # nothing typed the opening tag at least names the skill.
+                stripped = len(text) - len(text[typed:].lstrip())
+                if stripped < len(text):
+                    start = stripped
+            line_end = text.find("\n", start)
             if line_end == -1:
                 line_end = len(text)
-            return 0, min(line_end, self.PREVIEW_CHARS)
+            return start, min(line_end, start + self.PREVIEW_CHARS)
         match_start, match_end = self._match_spans[self._active_index or 0]
         # Stay inside the match's own line: a preview that ran on through
         # newlines would grow the collapsed widget by an unbounded number of
@@ -1229,6 +1249,8 @@ class TranscriptEntryWidget(Static):
         tool = (self.entry.metadata or {}).get("tool")
         if tool and self.entry.role == "tool":
             label = f"{label}: {tool}"
+        elif self._skill is not None:
+            label = f"{label}: /skill:{self._skill[0]}"
         count = len(self._match_spans)
         matches = (
             f"  [dim]· {count} match{'' if count == 1 else 'es'}[/]" if count else ""
@@ -2827,7 +2849,7 @@ class SessionBrowser(App):
         preset = self._preset
         if preset.roles is not None and not entry_matches_roles(entry, preset.roles):
             return False
-        if preset.hide_slash_commands and is_slash_command(entry):
+        if preset.hide_command_noise and is_command_noise(entry):
             return False
         if not self._matching_only:
             return True

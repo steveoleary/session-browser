@@ -23,11 +23,13 @@ from session_browser.transcript import (
     entry_matches_roles,
     find_entry_matches,
     find_text_spans,
+    is_command_noise,
     is_slash_command,
     lineage_ids,
     load_session_content,
     load_transcript,
     make_snippet,
+    pi_skill_invocation,
     render_markdown,
     render_text,
     search_session,
@@ -2615,6 +2617,42 @@ class TestRendering:
         for role in ("assistant", "tool", "system"):
             entry = TranscriptEntry(role, "<command-name>/clear</command-name>")
             assert not is_slash_command(entry), role
+
+    def test_pi_skill_invocation_names_the_skill_and_the_typed_text(self):
+        text = '<skill name="goodbye" location="/s/SKILL.md">\nbody\n</skill>\n\nlater'
+        name, offset = pi_skill_invocation(text)
+        assert name == "goodbye"
+        assert text[offset:].strip() == "later"
+
+    def test_pi_skill_invocation_wants_the_marker_first_and_the_close(self):
+        for text in (
+            'I typed <skill name="goodbye"> then </skill> by hand',
+            '<skill name="goodbye" location="/s/SKILL.md">\nno close tag',
+            "<skill>\nbody\n</skill>",
+        ):
+            assert pi_skill_invocation(text) is None, text
+
+    def test_command_noise_splits_on_what_was_typed(self):
+        """A command with arguments is a request; without, it drives the
+        harness -- in Claude's tag block and in Pi's skill expansion alike."""
+        noise = (
+            "<command-name>/clear</command-name>",
+            "<local-command-stdout>Set model</local-command-stdout>",
+            '<skill name="goodbye" location="/s">\nbody\n</skill>\n  \n',
+        )
+        request = (
+            (
+                "<command-name>/goal</command-name>\n"
+                "<command-args>fix the login bug</command-args>"
+            ),
+            '<skill name="goodbye" location="/s">\nbody\n</skill>\n\nlater',
+        )
+        for text in noise:
+            entry = TranscriptEntry("user", text)
+            assert is_slash_command(entry) and is_command_noise(entry), text
+        for text in request:
+            entry = TranscriptEntry("user", text)
+            assert is_slash_command(entry) and not is_command_noise(entry), text
 
     def test_render_text_with_indices_prefixes_blocks(self):
         t = Transcript(
