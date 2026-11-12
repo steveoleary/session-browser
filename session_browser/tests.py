@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from session_browser import compressed, herdr, multiplexer, tmux
+from session_browser import compressed, herdr, herdr_core, multiplexer, tmux
 from session_browser.discovery import (
     Session,
     _codex_repo_name,
@@ -6530,13 +6530,19 @@ class TestHerdrAvailable:
 
 class TestAvailableTargets:
     def test_keys_are_distinct(self):
-        keys = [t.key for t in multiplexer.TARGETS]
-        assert len(set(keys)) == len(keys)
+        # Two targets may share a name -- the original herdr and herdr-core
+        # are one "herdr" choice -- and then they share a key too; different
+        # names never do.
+        key_for = {t.name: t.key for t in multiplexer.TARGETS}
+        assert len(set(key_for.values())) == len(key_for)
+        for target in multiplexer.TARGETS:
+            assert target.key == key_for[target.name]
 
     def test_only_running_multiplexers_are_offered(self):
         with (
             patch.object(tmux, "available", return_value=False),
             patch.object(herdr, "available", return_value=True),
+            patch.object(herdr_core, "available", return_value=False),
         ):
             assert multiplexer.available_names() == ["herdr"]
 
@@ -6544,6 +6550,7 @@ class TestAvailableTargets:
         with (
             patch.object(tmux, "available", return_value=True),
             patch.object(herdr, "available", return_value=True),
+            patch.object(herdr_core, "available", return_value=False),
         ):
             assert multiplexer.available_names() == ["tmux", "herdr"]
 
@@ -6551,6 +6558,7 @@ class TestAvailableTargets:
         with (
             patch.object(tmux, "available", return_value=False),
             patch.object(herdr, "available", return_value=False),
+            patch.object(herdr_core, "available", return_value=False),
         ):
             assert multiplexer.available_targets() == []
 

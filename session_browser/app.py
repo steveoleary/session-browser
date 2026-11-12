@@ -3365,7 +3365,7 @@ class SessionBrowser(App):
             return
         targets = multiplexer.available_targets()
         if not targets:
-            names = ", ".join(t.name for t in multiplexer.TARGETS)
+            names = ", ".join(multiplexer.target_names())
             self._status.update(f"No multiplexer running ({names})")
             return
         if len(targets) == 1:

@@ -1,5 +1,9 @@
 """Open a session's folder in herdr, the way ``tmux.py`` does for tmux.
 
+This is the original herdr: one ``herdr`` CLI and TUI. Its successor, the
+Herdr app over herdr-core (``hc``), is handled by ``herdr_core.py``, and
+``multiplexer.py`` decides which of the two a handoff goes to.
+
 Herdr organises terminals as workspaces → tabs → panes and drives them through
 a server socket, reachable from the ``herdr`` CLI as JSON-returning commands.
 A folder (a session's ``cwd``) maps to one workspace labelled after the

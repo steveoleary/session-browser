@@ -5,6 +5,13 @@ actually running: tmux with a live server, or herdr with a live server. On a
 machine where neither is up the key says so instead of failing deep inside a
 create command, and when both are up the caller asks which.
 
+"herdr" is two different programs. The original is one ``herdr`` CLI and TUI
+(``herdr.py``); its successor splits into herdr-core, whose ``hc`` runs the
+terminals, and the Herdr app window, driven by ``herdr-app``
+(``herdr_core.py``). The user means whichever one they run, so both appear as
+a single "herdr" choice and ``available_targets`` picks the one that is live —
+the one this browser is running inside when both are, otherwise the newer.
+
 ``tmux`` and ``herdr`` are interchangeable here because both modules implement
 the same small interface — ``available()``, ``in_*()`` for "are we already
 inside it", and ``prepare_session()`` returning a plan with
@@ -20,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
 
-from . import herdr, tmux
+from . import herdr, herdr_core, tmux
 
 
 @dataclass(frozen=True)
@@ -42,18 +49,43 @@ class Target:
 
 TARGETS: tuple[Target, ...] = (
     Target("tmux", "t", tmux, tmux.TmuxError, tmux.in_tmux),
+    # The two herdrs share a name and a key: they are one destination as far
+    # as the user is concerned, and ``available_targets`` never offers both.
+    # The newer comes first, which is what breaks a tie.
+    Target(
+        "herdr",
+        "h",
+        herdr_core,
+        herdr_core.HerdrCoreError,
+        herdr_core.in_herdr_core,
+    ),
     Target("herdr", "h", herdr, herdr.HerdrError, herdr.in_herdr),
 )
 
 
 def available_targets() -> list[Target]:
-    """The multiplexers running right now, in ``TARGETS`` order.
+    """The multiplexers running right now, in ``TARGETS`` order, one per name.
 
     Probed on each use rather than cached at startup, because a browser left
     open across a day outlives the servers it is reporting on — and each probe
     is a bounded, sub-10ms local call.
     """
-    return [target for target in TARGETS if target.module.available()]
+    chosen: dict[str, Target] = {}
+    for target in TARGETS:
+        held = chosen.get(target.name)
+        # A later target of the same name only displaces an earlier one when
+        # the browser is running inside it and not inside the other: that is
+        # the herdr the user is looking at. Otherwise it is not even probed.
+        if held is not None and (held.inside() or not target.inside()):
+            continue
+        if target.module.available():
+            chosen[target.name] = target
+    return [target for target in TARGETS if chosen.get(target.name) is target]
+
+
+def target_names() -> list[str]:
+    """Every multiplexer the handoff knows, each named once."""
+    return list(dict.fromkeys(target.name for target in TARGETS))
 
 
 def available_names() -> list[str]:
