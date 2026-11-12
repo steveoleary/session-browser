@@ -298,6 +298,15 @@ Python fallback, by patching the ripgrep path off. Reach for them while
 exploring where time goes; reach for `retrieval_compare.py` when a change needs
 a decision.
 
+A third, `tui_search.py`, is for a change to the TUI's global search — its
+waves, ranking or row text — which none of the above can see, because they
+drive the CLI. It runs the real app headlessly against your corpus and prints
+the rows a query shows, when it settled, and with `--expect ID` the row a
+session you name landed on. `--repo PATH` runs another checkout for a
+before/after, and is the only reliable way to: the editable install's import
+hook outranks `PYTHONPATH`, so a hand-rolled "baseline" run imports this
+checkout and agrees with itself.
+
 ## Local `session-browser` command
 
 The command must run the current checkout, never a snapshot copied into `uv`'s
@@ -353,6 +362,12 @@ git config --get-all hooks.leakpattern      # read them back
 
 A clone with no patterns configured is a clone with nothing to hide, which is
 the right default for a public repo and for anyone else who clones it.
+
+**The guard knows the list, not that your example is real.** A fixture, a code
+comment, a README example or a commit message taken from a real search or a
+real session carries names the list never had: a ticket id, a product, a
+directory. Invent the example, and label a measured query `A B` rather than
+quote it.
 
 **Ignore rules for whatever you run alongside this repo belong in
 `.git/info/exclude`, not in `.gitignore`.** Local tooling — an editor's state, a
