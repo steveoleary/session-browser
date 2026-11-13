@@ -489,20 +489,22 @@ This skill rides `npx skills`, and did not always: it was copy-managed out of
 `~/Projects/skills` until `steveoleary/session-browser` went public, at which
 point the skills repo migrated it to the npx lane — that repo's lane rule is
 *whether npx can clone the source*, so a public home repo means npx. Its row is
-gone from `scripts/external-skills.txt`, and `install.sh` now refuses it.
+gone from `scripts/external-skills.txt`. Since 13 Nov 2026 every skill rides
+npx and `install.sh` is deleted.
 
 ```bash
 git commit -am "skill: <message>" && git push   # npx reads GitHub, so push FIRST
 npx skills update --global                      # or: npx skills add \
                                                 #   steveoleary/session-browser \
-                                                #   -s using-session-browser -g -y
+                                                #   -s using-session-browser -g \
+                                                #   -a claude-code -a codex -y
 ```
 
 **The push is not optional any more.** The old copy path read this working
 tree, so an uncommitted edit installed fine; npx reads GitHub, so an unpushed
 change simply does not reach either store. That trade was accepted knowingly
 when the repo went public — the other half of it is that
-`install.sh --check` no longer byte-verifies this skill, so verify by hand:
+nothing byte-verifies the installed copy, so verify by hand:
 
 ```bash
 diff -r skills/using-session-browser ~/.claude/skills/using-session-browser
