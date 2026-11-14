@@ -57,7 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-from . import compressed
+from . import compressed, entry_cache
 from .discovery import (
     OPENCODE_V2,
     Session,
@@ -125,17 +125,23 @@ def plan_delete(session: Session, sessions: Iterable[Session]) -> DeletePlan:
 
 def delete_session(plan: DeletePlan) -> str:
     """Carry out *plan*. Returns a status line, or raises DeleteFailed."""
-    if plan.command:
-        return _run_provider_delete(plan)
-    for path in plan.paths:
-        try:
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path)
-            else:
-                path.unlink(missing_ok=True)
-        except OSError as exc:
-            raise DeleteFailed(f"Could not remove {path}: {exc}") from exc
-    return f"Deleted {plan.session.provider} session {plan.session.id}"
+    try:
+        if plan.command:
+            return _run_provider_delete(plan)
+        for path in plan.paths:
+            try:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise DeleteFailed(f"Could not remove {path}: {exc}") from exc
+        return f"Deleted {plan.session.provider} session {plan.session.id}"
+    finally:
+        # The parsed text this package cached from the session, and from the
+        # subagents that went with it, must not outlive them. Swept even when
+        # the delete failed part-way: whatever did go is then gone here too.
+        entry_cache.sweep()
 
 
 # ---------------------------------------------------------------------------

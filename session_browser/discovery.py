@@ -7,13 +7,13 @@ import logging
 import os
 import re
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import compressed
+from . import compressed, scan_memo
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +122,7 @@ def scan_claude() -> list[Session]:
     root = Path.home() / ".claude" / "projects"
     if not root.is_dir():
         return sessions
+    memo = scan_memo.open_memo("claude")
     for project_dir in root.iterdir():
         if not project_dir.is_dir():
             continue
@@ -146,7 +147,7 @@ def scan_claude() -> list[Session]:
             continue
         for f in transcripts:
             try:
-                session = _claude_session(f, project_dir)
+                session = _claude_session_remembered(memo, f, project_dir)
             except Exception as exc:
                 log.warning("Skipping claude session %s: %s", f.name, exc)
                 continue
@@ -158,20 +159,80 @@ def scan_claude() -> list[Session]:
                 continue
             for f in subagents.rglob("agent-*.jsonl"):
                 try:
-                    session = _claude_session(
-                        f, project_dir, subagent_of=session_dir.name
+                    session = _claude_session_remembered(
+                        memo, f, project_dir, subagent_of=session_dir.name
                     )
                 except Exception as exc:
                     log.warning("Skipping claude subagent %s: %s", f.name, exc)
                     continue
                 if session is not None:
                     sessions.append(session)
+    if memo is not None:
+        memo.save()
     _link_claude_continuations(sessions)
     live = _claude_live_session_ids()
     for s in sessions:
         if not s.subagent_kind:
             s.live = s.id in live
     return sessions
+
+
+# What a per-file scan decides about a session, which is every field its
+# constructor takes plus the one link the tail read can find. The rest --
+# continued_from, live, segments -- is worked out across sessions afterwards,
+# on every run, and is never remembered.
+_SCANNED_FIELDS = tuple(f.name for f in fields(Session) if f.init)
+
+
+def _scanned_fields(session: Session | None) -> dict | None:
+    """*session* as the scan memo keeps it; None for a file that is no session."""
+    if session is None:
+        return None
+    kept = {name: getattr(session, name) for name in _SCANNED_FIELDS}
+    if session.continued_in is not None:
+        kept["continued_in"] = session.continued_in
+    return kept
+
+
+def _session_from_scanned(kept: dict | None) -> Session | None:
+    if kept is None:
+        return None
+    kept = dict(kept)  # the memo's own copy is written back unchanged
+    continued_in = kept.pop("continued_in", None)
+    session = Session(**kept)
+    if continued_in is not None:
+        session.continued_in = continued_in
+    return session
+
+
+def _claude_session_remembered(
+    memo: scan_memo.Memo | None,
+    f: Path,
+    project_dir: Path,
+    *,
+    subagent_of: str | None = None,
+) -> Session | None:
+    """:func:`_claude_session`, from the scan memo while *f* is unchanged.
+
+    Everything that function reads is in the signature: the transcript, and
+    for a subagent the sidecar beside it that names its kind and its spawner.
+    The project directory and the root session are both part of *f*'s path.
+    """
+    if memo is None:
+        return _claude_session(f, project_dir, subagent_of=subagent_of)
+    path = str(f)
+    if subagent_of is None:
+        sig = scan_memo.signature(path)
+    else:
+        sig = scan_memo.signature(path, path.removesuffix(".jsonl") + ".meta.json")
+    if sig is None:
+        return _claude_session(f, project_dir, subagent_of=subagent_of)
+    known = memo.get(path, sig)
+    if known is not scan_memo.MISS:
+        return _session_from_scanned(known)
+    session = _claude_session(f, project_dir, subagent_of=subagent_of)
+    memo.put(path, sig, _scanned_fields(session))
+    return session
 
 
 def _link_claude_continuations(sessions: list[Session]) -> None:
@@ -572,23 +633,25 @@ def _scan_codex_db(db_path: Path) -> list[Session]:
     # realpath both sides: the index may store resolved paths while the
     # walk starts from a symlinked home (or vice versa), and the two must
     # not disagree for a reason that has nothing to do with the data.
+    realpath = _realpath_by_directory()
     on_disk = {
-        os.path.realpath(logical): actual
+        realpath(os.fspath(logical)): actual
         for logical, actual in _codex_rollout_files().items()
     }
     file_paths = on_disk.keys()
+    row_paths = [realpath(r["rollout_path"]) if r["rollout_path"] else "" for r in rows]
     rows_by_path = {
-        os.path.realpath(r["rollout_path"]): r for r in rows if r["rollout_path"]
+        path: r for path, r in zip(row_paths, rows, strict=True) if r["rollout_path"]
     }
     missing = file_paths - rows_by_path.keys()
     # The index goes on naming a rollout by its .jsonl path after Codex has
     # compressed it, so the row is matched on that spelling and then pointed
     # at whichever file is actually there.
     sessions = []
-    for r in rows:
+    for r, row_path in zip(rows, row_paths, strict=True):
         if not r["rollout_path"] or r["archived"]:
             continue
-        actual = on_disk.get(os.path.realpath(r["rollout_path"]))
+        actual = on_disk.get(row_path)
         if actual is None:
             continue
         s = _codex_session_from_row(r)
@@ -600,6 +663,33 @@ def _scan_codex_db(db_path: Path) -> list[Session]:
         if gap:
             sessions.extend(_codex_index_gap(sessions, gap))
     return sessions
+
+
+def _realpath_by_directory() -> Callable[[str], str]:
+    """``os.path.realpath``, resolving each directory once.
+
+    realpath lstats every component of every path it is given. Rollouts sit
+    a few dozen to a directory under ``sessions/<year>/<month>/<day>/``, so
+    resolving 1,448 of them twice over -- once from the walk, once from the
+    index, and the index's a second time in the loop below -- was 34,802
+    lstats, 75 ms of a 156 ms scan (2026-11-14). Here a directory is resolved
+    the first time it is met and each file costs the one lstat that says
+    whether it is itself a link. Anything but an ordinary last component is
+    handed to realpath unchanged.
+    """
+    directories: dict[str, str] = {}
+
+    def resolve(path: str) -> str:
+        head, tail = os.path.split(path)
+        if tail in ("", os.curdir, os.pardir):
+            return os.path.realpath(path)
+        real_head = directories.get(head)
+        if real_head is None:
+            real_head = directories[head] = os.path.realpath(head)
+        joined = os.path.join(real_head, tail)
+        return os.path.realpath(joined) if os.path.islink(joined) else joined
+
+    return resolve
 
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -1439,70 +1529,88 @@ def scan_pi() -> list[Session]:
     root = Path.home() / ".pi" / "agent" / "sessions"
     if not root.is_dir():
         return sessions
+    memo = scan_memo.open_memo("pi")
     for project_dir in root.iterdir():
         if not project_dir.is_dir():
             continue
         for f in project_dir.glob("*.jsonl"):
             try:
-                session_id, cwd, created_at, summary = "", "", "", ""
-                model = None
-                with open(f) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if not isinstance(obj, dict):
-                            continue
-                        otype = obj.get("type")
-                        if otype == "session":
-                            session_id = obj.get("id", "") or session_id
-                            cwd = obj.get("cwd", "") or cwd
-                            created_at = obj.get("timestamp", "") or created_at
-                        elif otype == "model_change" and model is None:
-                            # Line 2 of a Pi session, above the first user turn
-                            # this scan stops at, so it costs no extra read.
-                            model = _pi_model(obj)
-                        elif otype == "message":
-                            msg = obj.get("message")
-                            if not isinstance(msg, dict):
-                                continue
-                            if msg.get("role") != "user":
-                                continue
-                            summary = _summary_text(_pi_message_text(msg))
-                            # First user turn: everything this scan wants is
-                            # at or above it.
-                            break
-                # The filename's uuid suffix is the same id the header line
-                # carries, so a file whose header is missing or unparseable
-                # still gets the id Pi itself would resume by.
-                session_id = session_id or f.stem.split("_", 1)[-1]
-                sessions.append(
-                    Session(
-                        id=session_id,
-                        provider="pi",
-                        summary=summary,
-                        cwd=cwd,
-                        # Pi records no branch anywhere in its format. None,
-                        # not "" — see the note on the field.
-                        branch=None,
-                        repository=_cwd_project(cwd),
-                        created_at=created_at,
-                        updated_at=(
-                            _last_activity_iso(f, "pi")
-                            or created_at
-                            or _file_mtime_iso(f)
-                        ),
-                        content_path=str(f),
-                        model=model,
-                    )
-                )
+                sessions.append(_pi_session_remembered(memo, f))
             except Exception as exc:
                 log.warning("Skipping pi session %s: %s", f.name, exc)
+    if memo is not None:
+        memo.save()
     return sessions
+
+
+def _pi_session_remembered(memo: scan_memo.Memo | None, f: Path) -> Session:
+    """:func:`_pi_session`, from the scan memo while *f* is unchanged."""
+    if memo is None:
+        return _pi_session(f)
+    path = str(f)
+    sig = scan_memo.signature(path)
+    if sig is None:
+        return _pi_session(f)
+    known = memo.get(path, sig)
+    if known is not scan_memo.MISS:
+        return _session_from_scanned(known)
+    session = _pi_session(f)
+    memo.put(path, sig, _scanned_fields(session))
+    return session
+
+
+def _pi_session(f: Path) -> Session:
+    """One Pi transcript as a Session, read off its head and its tail."""
+    session_id, cwd, created_at, summary = "", "", "", ""
+    model = None
+    with open(f) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            otype = obj.get("type")
+            if otype == "session":
+                session_id = obj.get("id", "") or session_id
+                cwd = obj.get("cwd", "") or cwd
+                created_at = obj.get("timestamp", "") or created_at
+            elif otype == "model_change" and model is None:
+                # Line 2 of a Pi session, above the first user turn
+                # this scan stops at, so it costs no extra read.
+                model = _pi_model(obj)
+            elif otype == "message":
+                msg = obj.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("role") != "user":
+                    continue
+                summary = _summary_text(_pi_message_text(msg))
+                # First user turn: everything this scan wants is
+                # at or above it.
+                break
+    # The filename's uuid suffix is the same id the header line
+    # carries, so a file whose header is missing or unparseable
+    # still gets the id Pi itself would resume by.
+    session_id = session_id or f.stem.split("_", 1)[-1]
+    return Session(
+        id=session_id,
+        provider="pi",
+        summary=summary,
+        cwd=cwd,
+        # Pi records no branch anywhere in its format. None,
+        # not "" — see the note on the field.
+        branch=None,
+        repository=_cwd_project(cwd),
+        created_at=created_at,
+        updated_at=(_last_activity_iso(f, "pi") or created_at or _file_mtime_iso(f)),
+        content_path=str(f),
+        model=model,
+    )
 
 
 def _pi_message_text(msg: dict) -> str:

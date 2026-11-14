@@ -36,7 +36,7 @@ from itertools import accumulate
 from itertools import count as _count
 from pathlib import Path
 
-from session_browser import compressed
+from session_browser import compressed, entry_cache
 from session_browser.discovery import (
     OPENCODE_V2,
     Session,
@@ -1088,8 +1088,16 @@ def search_session(
 
 
 # ---------------------------------------------------------------------------
-# Bulk search: provider-aware, stateless, no persistent index
+# Bulk search: provider-aware, over the entry cache where a session has one
 # ---------------------------------------------------------------------------
+#
+# A session whose parsed entries are on disk (see entry_cache) is searched
+# there: its entry text is scanned and its matches loaded, and none of what
+# follows applies to it. Everything below is the stateless path -- no index,
+# straight off the provider's own files -- which answers for every session the
+# cache does not hold: all of them when it is switched off, and otherwise the
+# few it cannot keep. It is also the reference the cached path is tested
+# against, so it stays exact.
 #
 # Raw prefiltering. File-backed sessions can often be ruled out by scanning
 # the raw transcript bytes for the query phrases, skipping canonical parsing
@@ -1146,6 +1154,28 @@ def _prefilter_needles(query: str | list[str]) -> list[str] | None:
         # json.dumps can synthesize "Infinity" from a raw "1e999" and a lone
         # exponent "e" from float repr; no other letters appear from nowhere.
         if folded in "infinity" or folded == "e":
+            return None
+        needles.append(folded)
+    return needles or None
+
+
+def _entry_text_needles(query: str | list[str]) -> list[str] | None:
+    """Normalized phrases a scan of cached entry text can decide, or None.
+
+    The entry cache holds the text the matcher itself reads, so none of the
+    raw scan's hazards apply: no JSON escapes, no re-serialized numbers, no
+    parts the parser has yet to join. That leaves only what the scanner
+    cannot express -- a phrase outside printable ASCII, whose casefold
+    ripgrep's simple case folding does not reproduce -- and so digits, dots
+    and brackets, which send a raw scan to a full parse, are ordinary here.
+    """
+    queries = [query] if isinstance(query, str) else list(query)
+    needles: list[str] = []
+    for q in queries:
+        folded = normalize_match_text(q.strip())
+        if not folded:
+            continue
+        if not (folded.isascii() and folded.isprintable()):
             return None
         needles.append(folded)
     return needles or None
@@ -1522,6 +1552,122 @@ def _rg_candidate_paths(
     return candidates
 
 
+def _entry_text_may_match(paths: tuple[str, ...], needles: list[str]) -> bool:
+    """In-process candidate check of one session's cached entry text.
+
+    The fallback for a machine without ripgrep, and deliberately the same
+    rule ripgrep is given below. *paths* is the text file, then the folded
+    file if the session has one. The first holds original text: a phrase is
+    there after ASCII lowering, or once markdown markers are skipped. The
+    second is already normalized, so a phrase is there or it is not. An
+    unreadable file is a candidate, so that the load -- and behind it the
+    parse -- decides.
+    """
+    encoded = [n.encode("ascii") for n in needles]
+    try:
+        with open(paths[0], "rb") as fh:
+            hay = fh.read().lower()
+        if any(n in hay for n in encoded):
+            return True
+        if (b"`" in hay or b"*" in hay) and any(
+            _tolerant_re_bytes(n).search(hay) is not None for n in needles
+        ):
+            return True
+        for path in paths[1:]:
+            with open(path, "rb") as fh:
+                folded = fh.read()
+            if any(n in folded for n in encoded):
+                return True
+    except OSError:
+        return True
+    return False
+
+
+def _rg_entry_text_candidates(texts: list[str], needles: list[str]) -> set[str] | None:
+    """Cached entry-text files that hold a needle, found by ripgrep.
+
+    ``None`` means the native scan was unavailable or failed, and the caller
+    falls back to :func:`_entry_text_may_match` per session. The pattern is
+    the marker-tolerant one the raw scan uses and nothing else. That scan's
+    three blanket rules are all gone: parsed text has no ``\\uXXXX`` escapes
+    and no Codex parts left to join, and an entry whose casefold a
+    case-insensitive scan cannot follow is in the session's folded file,
+    already normalized, which is scanned alongside. So a file this returns
+    holds a real match, and a session is loaded only to report one.
+    """
+    rg = shutil.which("rg")
+    if rg is None:
+        return None
+    if not texts:
+        return set()
+    joiner = f"[{re.escape(MATCH_STRIP_CHARS)}]*"
+    args = [
+        rg,
+        "--no-config",
+        "--no-ignore",
+        "--hidden",
+        "--text",
+        "--color=never",
+        "--files-with-matches",
+        "--null",
+    ]
+    for needle in needles:
+        pattern = joiner.join(ch if ch == " " else re.escape(ch) for ch in needle)
+        args.extend(("--regexp", f"(?i:{pattern})"))
+    args.append("--")
+
+    # Named relative to the cache directory and run from inside it. A cache
+    # path is about 100 bytes of which the last 48 say which file it is, so
+    # this is what lets one invocation carry a whole history: 2,574 sessions
+    # fit one argv where absolute paths needed two, and the count-limited
+    # batches the raw scan uses made six. Each invocation is a fork and an
+    # exec of this process -- about 10 ms apiece, measured -- against a scan
+    # that takes 50-100 ms in all, and ripgrep spreads the files over every
+    # core by itself.
+    root = os.fspath(entry_cache.cache_dir())
+    prefix = root + os.sep
+    inside = [t for t in texts if t.startswith(prefix)]
+    if len(inside) != len(texts):
+        return None  # not this cache's files; let the caller read them
+    batches: list[list[str]] = []
+    batch: list[str] = []
+    argv_bytes = 0
+    for path in inside:
+        relative = path[len(prefix) :]
+        size = len(os.fsencode(relative)) + 1
+        if batch and argv_bytes + size > 256_000:
+            batches.append(batch)
+            batch, argv_bytes = [], 0
+        batch.append(relative)
+        argv_bytes += size
+    batches.append(batch)
+
+    def scan(selected: list[str]) -> set[str] | None:
+        try:
+            proc = subprocess.run(
+                [*args, *selected],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+                check=False,
+                cwd=root,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode not in (0, 1):
+            return None  # e.g. a file replaced by a newer parse mid-scan
+        return {prefix + os.fsdecode(p) for p in proc.stdout.split(b"\0") if p}
+
+    with ThreadPoolExecutor(max_workers=min(len(batches), _SEARCH_THREADS)) as ex:
+        scanned = list(ex.map(scan, batches))
+    if any(out is None for out in scanned):
+        return None
+    found: set[str] = set()
+    for out in scanned:
+        found |= out
+    return found
+
+
 # Canonical parsing is GIL-bound Python, so the thread pool above overlaps I/O
 # waits but not the parse itself: measured on an 896-session corpus, one worker
 # takes 2.93s and twenty-four take 2.32s. Processes are the only way to put that
@@ -1664,46 +1810,39 @@ def _process_pool_usable() -> bool:
         return False
 
 
-def _probe_in_processes(
-    pairs: list[tuple[int, Session]],
-    query: str | list[str],
+def _map_in_processes(
+    worker: Callable,
+    jobs: list[tuple[int, object]],
     cancelled: Callable[[], bool] | None,
-) -> dict[int, SessionSearchResult] | object:
-    """Parse *pairs* across worker processes, honouring *cancelled*.
+    tick: Callable[[], None] | None = None,
+) -> dict[int, object] | object:
+    """Run ``worker(payload)`` for each ``(key, payload)`` in worker processes.
+
+    Returns ``{key: result}`` for the jobs that finished -- all of them unless
+    *cancelled* fired -- or ``_PROC_FALLBACK`` when no pool can be used here.
 
     Work is submitted through a bounded window rather than all at once, and
-    ``cancelled`` is polled between completions.  On cancellation the queued
-    futures are dropped and every session that had not finished reports an
-    empty result — exactly what the thread probe returns when it observes
-    cancellation, so a cancelled search still yields one result per input
-    session rather than a short list.
-
-    Cancellation granularity is one session: a worker already inside a parse
-    runs to the end of it, where the in-process path can also break out of a
-    long offset loop.  Returns ``_PROC_FALLBACK`` if the pool cannot be used,
-    so the caller can fall back to threads exactly as a failed native
-    candidate scan does.
+    ``cancelled`` is polled between completions; on cancellation the queued
+    futures are dropped. Granularity is one job: a worker already inside one
+    runs to the end of it. *tick*, when given, is called once per finished
+    job, on this thread.
     """
     if not _process_pool_usable():
         return _PROC_FALLBACK
-    if cancelled is not None and cancelled():
-        # Already cancelled: starting a pool only to tear it down would put
-        # interpreter start-up between the cancel and the return.
-        return {i: SessionSearchResult(s) for i, s in pairs}
-    out: dict[int, SessionSearchResult] = {}
-    remaining = iter(pairs)
+    out: dict[int, object] = {}
+    remaining = iter(jobs)
     ex = None
     try:
         ex = ProcessPoolExecutor(max_workers=_PROC_WORKERS, mp_context=_process_ctx())
-        inflight: dict[Future, tuple[int, Session]] = {}
+        inflight: dict[Future, int] = {}
 
         def feed() -> None:
             while len(inflight) < _PROC_WINDOW:
                 nxt = next(remaining, None)
                 if nxt is None:
                     return
-                i, s = nxt
-                inflight[ex.submit(_parse_worker, (s, query))] = (i, s)
+                key, payload = nxt
+                inflight[ex.submit(worker, payload)] = key
 
         feed()
         while inflight:
@@ -1713,17 +1852,9 @@ def _probe_in_processes(
                     fut.cancel()
                 break
             for fut in done:
-                i, s = inflight.pop(fut)
-                count, matches, warns, unreadable, total = fut.result()
-                out[i] = SessionSearchResult(
-                    s,
-                    count,
-                    matches,
-                    warns,
-                    unreadable,
-                    entries=None,
-                    total_entries=total,
-                )
+                out[inflight.pop(fut)] = fut.result()
+                if tick is not None:
+                    tick()
             feed()
     except Exception as exc:
         # A broken pool, an unpicklable payload, or an environment that cannot
@@ -1740,15 +1871,183 @@ def _probe_in_processes(
     finally:
         if ex is not None:
             ex.shutdown(wait=True, cancel_futures=True)
-    # Sessions dropped by cancellation report exactly what a cancelled thread
-    # probe reports.
-    for i, s in pairs:
-        out.setdefault(i, SessionSearchResult(s))
     return out
 
 
+def _probe_in_processes(
+    pairs: list[tuple[int, Session]],
+    query: str | list[str],
+    cancelled: Callable[[], bool] | None,
+) -> dict[int, SessionSearchResult] | object:
+    """Parse *pairs* across worker processes, honouring *cancelled*.
+
+    On cancellation every session that had not finished reports an empty
+    result — exactly what the thread probe returns when it observes
+    cancellation, so a cancelled search still yields one result per input
+    session rather than a short list.
+
+    Cancellation granularity is one session: a worker already inside a parse
+    runs to the end of it, where the in-process path can also break out of a
+    long offset loop.  Returns ``_PROC_FALLBACK`` if the pool cannot be used,
+    so the caller can fall back to threads exactly as a failed native
+    candidate scan does.
+    """
+    if not _process_pool_usable():
+        return _PROC_FALLBACK
+    if cancelled is not None and cancelled():
+        # Already cancelled: starting a pool only to tear it down would put
+        # interpreter start-up between the cancel and the return.
+        return {i: SessionSearchResult(s) for i, s in pairs}
+    done = _map_in_processes(
+        _parse_worker, [(i, (s, query)) for i, s in pairs], cancelled
+    )
+    if done is _PROC_FALLBACK:
+        return _PROC_FALLBACK
+    out: dict[int, SessionSearchResult] = {}
+    for i, s in pairs:
+        fields = done.get(i)
+        if fields is None:
+            # Dropped by cancellation: exactly what a cancelled thread probe
+            # reports.
+            out[i] = SessionSearchResult(s)
+            continue
+        count, matches, warns, unreadable, total = fields
+        out[i] = SessionSearchResult(
+            s, count, matches, warns, unreadable, entries=None, total_entries=total
+        )
+    return out
+
+
+def _store_parse(session: Session, ref: entry_cache.Ref) -> bool:
+    """Parse *session* and keep the result at *ref*; whether it is now kept.
+
+    False for anything that stops the parse, whatever it is. The session then
+    simply has no cached entries, so search reads it the way it always has and
+    that read reports the failure in its own words -- an unreadable file as
+    ``unreadable``, an undecodable one by raising, exactly as before.
+    """
+    warnings: list[str] = []
+    try:
+        entries = list(_parse_entries(session, warnings))
+    except Exception as exc:
+        log.debug("not caching %s:%s: %s", session.provider, session.id, exc)
+        return False
+    return _keep_parse(session, ref, entries, warnings)
+
+
+def _store_worker(args: tuple[Session, entry_cache.Ref]) -> bool:
+    """:func:`_store_parse` in a worker process. Only a bool crosses back:
+    the entries go to disk from the worker, which is the point of doing the
+    parse there."""
+    return _store_parse(*args)
+
+
+def _store_in_processes(
+    jobs: list[tuple[int, Session, entry_cache.Ref]],
+    cancelled: Callable[[], bool] | None,
+    tick: Callable[[], None] | None = None,
+) -> set[int] | object:
+    """Parse and cache *jobs* across worker processes.
+
+    Returns the keys now cached, or ``_PROC_FALLBACK`` when no pool can be
+    used. Its own function, like :func:`_probe_in_processes`, so the routing
+    decision can be observed apart from the parsing it routes.
+    """
+    done = _map_in_processes(
+        _store_worker, [(i, (s, ref)) for i, s, ref in jobs], cancelled, tick
+    )
+    if done is _PROC_FALLBACK:
+        return _PROC_FALLBACK
+    return {i for i, ok in done.items() if ok}
+
+
+def _ensure_entry_texts(
+    sessions: list[Session],
+    file_ix: list[int],
+    cancelled: Callable[[], bool] | None = None,
+    progress: ProgressFn | None = None,
+) -> dict[int, tuple[str, ...]]:
+    """Bring the entry cache up to date for *file_ix*; map index -> its files
+    to scan: the text file, then the folded file if the session has one.
+
+    A session in the result has its parsed entries on disk, current as of this
+    call: search scans the returned files in place of the raw transcript
+    and reads its entries with a load in place of a parse. A session missing
+    from it could not be cached -- no file, an unreadable one, a cache that
+    cannot be written -- and is searched statelessly, as every session was
+    before the cache existed.
+
+    Sessions whose parse is missing or out of date are parsed here, once, and
+    that is the whole cost of the cache: the first search of a history parses
+    all of it (worker processes, a few seconds), and each later one parses
+    only the transcripts that changed in between. Parsing a stale session
+    outright, instead of first asking the raw prefilter whether it could match
+    this query, is what makes the next query free whatever it is.
+    """
+    present = entry_cache.listing()
+    texts: dict[int, tuple[str, ...]] = {}
+    missing: list[tuple[int, Session, entry_cache.Ref]] = []
+    root = os.fspath(entry_cache.cache_dir())
+    for i in file_ix:
+        s = sessions[i]
+        ref = entry_cache.locate(
+            s.provider, s.id, s.content_path, s.subagent_kind, s.segments, root=root
+        )
+        if ref is None:
+            continue
+        if ref.text in present and ref.index in present:
+            fold = ref.fold
+            texts[i] = (ref.text, fold) if fold in present else (ref.text,)
+        else:
+            missing.append((i, s, ref))
+    # Asked on every search, answered by one stat of a marker file: what was
+    # cached from a transcript its provider has since removed is cleared out
+    # daily whether or not anything new is being parsed.
+    entry_cache.sweep_if_due()
+    if not missing or (cancelled is not None and cancelled()):
+        return texts
+    tick = None
+    if progress is not None:
+        built = _count(1)
+        total = len(missing)
+
+        def tick() -> None:
+            progress("parsing", next(built), total)
+
+        progress("parsing", 0, total)
+    stored = None
+    if len(missing) >= _PROC_MIN_CANDIDATES:
+        stored = _store_in_processes(missing, cancelled, tick)
+        if stored is _PROC_FALLBACK:
+            stored = None  # no pool here; threads build the same files
+    if stored is None:
+
+        def build(job: tuple[int, Session, entry_cache.Ref]) -> bool:
+            if cancelled is not None and cancelled():
+                return False
+            try:
+                return _store_parse(job[1], job[2])
+            finally:
+                if tick is not None:
+                    tick()
+
+        with ThreadPoolExecutor(max_workers=_SEARCH_THREADS) as ex:
+            stored = {
+                job[0]
+                for job, ok in zip(missing, ex.map(build, missing), strict=True)
+                if ok
+            }
+    for i, _s, ref in missing:
+        if i in stored:
+            fold = ref.fold
+            texts[i] = (ref.text, fold) if os.path.exists(fold) else (ref.text,)
+    return texts
+
+
 # (phase, done, total), where phase is "scanning" while the prefilter is
-# ruling sessions out and "reading" while survivors are parsed. Called from
+# ruling sessions out and "reading" while survivors are parsed. "parsing"
+# comes before both, and only when it has work: transcripts that are new or
+# changed since they were last parsed are parsed into the entry cache. Called from
 # the search worker threads, so an implementation must be cheap and must not
 # block — store the numbers and let the UI's own timer pick them up.
 ProgressFn = Callable[[str, int, int], None]
@@ -1785,15 +2084,33 @@ def search_sessions(
             file_ix.append(i)
     needles = _prefilter_needles(query)
     rg_candidates = None
+    # File sessions whose parsed entries are on disk, by index -> the cached
+    # files a scan reads for them. For these the cache answers both questions
+    # the raw files otherwise answer: the candidate scan reads that text, and
+    # a parse is a load. Empty when the cache is off, and for any session it
+    # cannot hold, which is then searched statelessly below exactly as before.
+    texts: dict[int, tuple[str, ...]] = {}
+    text_needles: list[str] | None = None
+    text_candidates: set[str] | None = None
+    # Whether every file session's fate is known without reading it again.
+    scanned = False
 
-    def must_parse(s: Session) -> bool:
-        """Whether the prefilter leaves *s* needing a canonical parse.
+    def must_parse(i: int) -> bool:
+        """Whether the prefilter leaves ``sessions[i]`` needing its entries.
 
         Sole owner of that decision: both the thread probe below and the
         process path's parent-side partition ask this, so the two cannot
         drift apart on a subtlety like a file that vanished between the
         candidate scan and the probe.
         """
+        cached = texts.get(i)
+        if cached is not None:
+            if text_needles is None:
+                return True
+            if text_candidates is not None:
+                return any(path in text_candidates for path in cached)
+            return _entry_text_may_match(cached, text_needles)
+        s = sessions[i]
         if s.segments:
             return _chain_may_match(s, needles, rg_candidates)
         path = _prefilter_file(s)
@@ -1813,10 +2130,11 @@ def search_sessions(
     read_count = _count(1)
     read_total = 0
 
-    def probe(s: Session) -> SessionSearchResult:
+    def probe(i: int) -> SessionSearchResult:
+        s = sessions[i]
         if cancelled is not None and cancelled():
             return SessionSearchResult(s)
-        if not must_parse(s):
+        if not must_parse(i):
             return SessionSearchResult(s)
         try:
             return search_session(
@@ -1841,17 +2159,36 @@ def search_sessions(
                 keep_entries=keep_entries,
                 progress=progress,
             )
-        # The candidate scan runs on this thread while the DB scan runs on its
-        # worker.  It reads only the file corpus and the DB scan reads only the
-        # database, so neither can observe the other and the results are
-        # unchanged whichever finishes first; previously the DB scan could not
-        # even be submitted until rg had returned, so its cost was added to
-        # rg's instead of hidden behind it.  Escaped slashes need an in-process
-        # transformed haystack; all other safe needles share one native scan
-        # across the file corpus.  The probes below do consume rg_candidates,
-        # so they still start only after it is assigned.
-        if needles is not None and not any("/" in n for n in needles):
-            rg_candidates = _rg_candidate_paths([sessions[i] for i in file_ix], needles)
+        if file_ix and entry_cache.enabled():
+            texts = _ensure_entry_texts(sessions, file_ix, cancelled, progress)
+            text_needles = _entry_text_needles(query)
+        raw_ix = [i for i in file_ix if i not in texts] if texts else file_ix
+        # The candidate scans run on this thread while the DB scan runs on its
+        # worker.  They read only the file corpus (or its cached text) and the
+        # DB scan reads only the database, so neither can observe the other
+        # and the results are unchanged whichever finishes first; previously
+        # the DB scan could not even be submitted until rg had returned, so
+        # its cost was added to rg's instead of hidden behind it.  Escaped
+        # slashes need an in-process transformed haystack; all other safe
+        # needles share one native scan across the raw files.  The probes
+        # below do consume the candidates, so they start only after both are
+        # assigned.
+        if raw_ix and needles is not None and not any("/" in n for n in needles):
+            rg_candidates = _rg_candidate_paths([sessions[i] for i in raw_ix], needles)
+        if texts and text_needles is not None:
+            text_candidates = _rg_entry_text_candidates(
+                sorted(path for cached in texts.values() for path in cached),
+                text_needles,
+            )
+        # With every scan answered, deciding a session is a set lookup, and
+        # for a phrase no scan can take it is a constant yes. Only a phrase
+        # that could have been scanned and was not -- no ripgrep, or a slash
+        # for the raw files -- makes the decision read the file, and then the
+        # parent must not ask ahead of the probe: it would read each file
+        # here and again where it is parsed.
+        scanned = (not raw_ix or needles is None or rg_candidates is not None) and (
+            not texts or text_needles is None or text_candidates is not None
+        )
         if progress is not None:
             # The prefilter has answered, so the denominator is knowable and
             # the display can move off "scanning" onto a count that means
@@ -1863,9 +2200,7 @@ def search_sessions(
             # count is exact without asking, and asking would be ruinous:
             # must_parse would read each file here and again in the worker.
             read_total = (
-                len(file_ix)
-                if rg_candidates is None
-                else sum(1 for i in file_ix if must_parse(sessions[i]))
+                sum(1 for i in file_ix if must_parse(i)) if scanned else len(file_ix)
             )
             progress("reading", 0, read_total)
         if file_ix:
@@ -1878,12 +2213,8 @@ def search_sessions(
             # _file_may_match serially in the parent, reading each file once
             # here and again in the worker.
             parsed = None
-            if (
-                not keep_entries
-                and rg_candidates is not None
-                and len(file_ix) >= _PROC_MIN_CANDIDATES
-            ):
-                proc_ix = [i for i in file_ix if must_parse(sessions[i])]
+            if not keep_entries and scanned and len(file_ix) >= _PROC_MIN_CANDIDATES:
+                proc_ix = [i for i in file_ix if must_parse(i)]
                 if len(proc_ix) >= _PROC_MIN_CANDIDATES:
                     parsed = _probe_in_processes(
                         [(i, sessions[i]) for i in proc_ix], query, cancelled
@@ -1895,13 +2226,7 @@ def search_sessions(
                         for i in set(file_ix) - set(proc_ix):
                             parsed[i] = SessionSearchResult(sessions[i])
             if parsed is None:
-                results.update(
-                    zip(
-                        file_ix,
-                        ex.map(probe, [sessions[i] for i in file_ix]),
-                        strict=True,
-                    )
-                )
+                results.update(zip(file_ix, ex.map(probe, file_ix), strict=True))
             else:
                 results.update(parsed)
         if oc_fut is not None:
@@ -2444,30 +2769,55 @@ def search_session_word_hits(
     home = os.path.expanduser("~")
     held = [_metadata_grades(s, terms, home) for s in sessions]
     alive = list(range(len(sessions)))
+    # Sessions with cached entries are narrowed over that text, where every
+    # printable term can be scanned; the rest over their raw files, as before.
+    texts: dict[int, tuple[str, ...]] = {}
+    if entry_cache.enabled():
+        texts = _ensure_entry_texts(
+            sessions,
+            [i for i in alive if sessions[i].provider != "opencode"],
+            cancelled,
+            progress,
+        )
     for t in sorted(range(len(terms)), key=lambda t: -len(terms[t])):
-        needles = _prefilter_needles(terms[t])
-        if needles is None or any("/" in n for n in needles):
-            continue  # this term cannot be scanned raw; the others still narrow
         if cancelled is not None and cancelled():
             return {}
         asked = [
-            sessions[i]
-            for i in alive
-            if sessions[i].provider != "opencode" and not held[i][t]
+            i for i in alive if sessions[i].provider != "opencode" and not held[i][t]
         ]
         if not asked:
             continue
-        found = _rg_candidate_paths(asked, needles)
-        if found is None:
-            break
-        alive = [
-            i
-            for i in alive
-            if sessions[i].provider == "opencode"
-            or held[i][t]
-            or _prefilter_file(sessions[i]) in found
-            or (sessions[i].segments and _chain_may_match(sessions[i], needles, found))
-        ]
+        # None for a group means "not scanned": every session in it survives
+        # this term, and the terms that can be scanned still narrow.
+        in_text: set[str] | None = None
+        text_needles = _entry_text_needles(terms[t])
+        text_asked = [path for i in asked for path in texts.get(i, ())]
+        if text_asked and text_needles is not None:
+            in_text = _rg_entry_text_candidates(sorted(text_asked), text_needles)
+            if in_text is None:
+                break
+        in_raw: set[Path] | None = None
+        needles = _prefilter_needles(terms[t])
+        raw_asked = [sessions[i] for i in asked if i not in texts]
+        if raw_asked and needles is not None and not any("/" in n for n in needles):
+            in_raw = _rg_candidate_paths(raw_asked, needles)
+            if in_raw is None:
+                break
+
+        def survives(i: int, t=t, in_text=in_text, in_raw=in_raw, needles=needles):
+            s = sessions[i]
+            if s.provider == "opencode" or held[i][t]:
+                return True
+            cached = texts.get(i)
+            if cached is not None:
+                return in_text is None or any(path in in_text for path in cached)
+            if in_raw is None:
+                return True
+            return _prefilter_file(s) in in_raw or bool(
+                s.segments and _chain_may_match(s, needles, in_raw)
+            )
+
+        alive = [i for i in alive if survives(i)]
     hits: dict[str, WordsHit] = {}
     results = search_sessions(
         [sessions[i] for i in alive], terms, cancelled=cancelled, progress=progress
@@ -2549,8 +2899,123 @@ def load_transcript(session: Session) -> Transcript:
     return Transcript(session=session, entries=entries, warnings=warnings)
 
 
+def _entry_ref(session: Session) -> entry_cache.Ref | None:
+    """Where *session*'s parsed entries are kept, or None if they never are.
+
+    OpenCode is left out: its transcripts live in one database that is
+    rewritten in place, so there is no per-session file whose size and mtime
+    could say a stored parse still holds.
+    """
+    if session.provider == "opencode" or not entry_cache.enabled():
+        return None
+    return entry_cache.locate(
+        session.provider,
+        session.id,
+        session.content_path,
+        session.subagent_kind,
+        session.segments,
+    )
+
+
 def iter_entries(session: Session, warnings: list[str]) -> Iterator[TranscriptEntry]:
-    """Yield transcript entries for *session*, collecting warnings."""
+    """Yield transcript entries for *session*, collecting warnings.
+
+    From the entry cache when the session's files are as they were when it was
+    last parsed, and from a parse otherwise -- which is then kept, so each
+    version of a transcript is parsed once. A parse abandoned part-way keeps
+    nothing: only a consumer that reads to the end has seen every entry there
+    is to store. Either way the entries, their order and the warnings are the
+    parser's own; see ``entry_cache`` for what makes a stored parse current.
+
+    A plain function handing back one of two generators, rather than a
+    generator delegating to them: a session that is not cached then costs the
+    parser's own iterator and nothing wrapped around it.
+    """
+    ref = _entry_ref(session)
+    if ref is None:
+        return _parse_entries(session, warnings)
+    return _cached_entries(session, ref, warnings)
+
+
+def _cached_entries(
+    session: Session, ref: entry_cache.Ref, warnings: list[str]
+) -> Iterator[TranscriptEntry]:
+    """*session*'s entries from *ref* if stored there, else parsed and stored."""
+    stored = entry_cache.load(ref, TranscriptEntry)
+    if stored is not None:
+        entries, stored_warnings = stored
+        warnings.extend(stored_warnings)
+        yield from entries
+        return
+    first_warning = len(warnings)
+    parsed: list[TranscriptEntry] = []
+    keep = parsed.append
+    for entry in _parse_entries(session, warnings):
+        keep(entry)
+        yield entry
+    _keep_parse(session, ref, parsed, warnings[first_warning:])
+
+
+def _keep_parse(
+    session: Session,
+    ref: entry_cache.Ref,
+    entries: list[TranscriptEntry],
+    warnings: list[str],
+) -> bool:
+    """Store a finished parse at *ref*, unless it may not be the last word.
+
+    A fingerprint says the files have not changed; it cannot say the read went
+    well. For one file that is enough -- it opens or the parse raises -- but a
+    rewound thread reads several, and an earlier one that cannot be opened or
+    decompressed becomes a warning and a shorter transcript rather than an
+    error. Stored, that shorter transcript would be served for as long as the
+    files stayed the same, long after whatever stopped the read had passed.
+    So a rewound thread whose parse warned about anything is parsed afresh
+    each time, as it always was; there are a handful of them at most.
+    """
+    if warnings and session.segments:
+        return False
+    return entry_cache.store(ref, entries, warnings, _fold_text(entries))
+
+
+def _fold_text(entries: list[TranscriptEntry]) -> bytes:
+    """Normalized text of the entries a scan of their original text cannot
+    decide, each followed by a newline; empty for nearly every session.
+
+    A case-insensitive scan of original text finds every match of a
+    printable-ASCII phrase except one made through a character whose casefold
+    is not itself -- "ss" inside a sharp s, "fi" inside a ligature. Those are
+    exactly ``_FOLD_RISK_CHARS``, so an entry holding one is stored a second
+    time as the matcher will see it, and the scan reads both. ``isascii()``
+    is a flag test on a str, so the common entry pays nothing for this.
+    """
+    parts: list[bytes] = []
+    for entry in entries:
+        text = entry.text
+        if not text.isascii() and any(c in text for c in _FOLD_RISK_CHARS):
+            parts.append(normalize_match_text(text).encode("utf-8", "surrogatepass"))
+            parts.append(b"\n")
+    return b"".join(parts)
+
+
+def count_entries(session: Session) -> int:
+    """How many entries *session*'s transcript has.
+
+    From the entry cache's header when the session is cached -- one short
+    line, where counting used to mean parsing the whole transcript for every
+    row a listing returned -- and by reading the entries otherwise, which
+    caches them for next time. Raises as :func:`iter_entries` does.
+    """
+    ref = _entry_ref(session)
+    if ref is not None:
+        known = entry_cache.count(ref)
+        if known is not None:
+            return known
+    return sum(1 for _ in iter_entries(session, []))
+
+
+def _parse_entries(session: Session, warnings: list[str]) -> Iterator[TranscriptEntry]:
+    """Parse *session*'s transcript from its provider's own files."""
     if session.provider == "claude":
         path = _existing_file(session)
         yield from _parse_jsonl(path, warnings, _claude_entries)

@@ -13,6 +13,10 @@ dist/
 # Demo corpus generator output (python -m session_browser.demo)
 demo-home/
 
+# What session-browser caches when a fixture's verifier is run on its own,
+# with HOME pointed at the fixture. The case runner sends it elsewhere.
+docs/fixtures/*/home/.cache/
+
 # Per-clone agent hooks, paired with the untracked settings.local.json that
 # wires them. Tracked hooks belong in .claude/hooks/ under their own names.
 .claude/hooks/*.local.sh

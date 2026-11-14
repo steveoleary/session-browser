@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import statistics
 import time
 from pathlib import Path
@@ -45,6 +46,9 @@ def main() -> None:
     )
     parser.add_argument("--repeats", type=int, default=4)
     args = parser.parse_args()
+    # The raw scans are what search runs with the entry cache off. With it
+    # on, neither is reached and both columns would time the same thing.
+    os.environ["SESSION_BROWSER_CACHE"] = "0"
     sessions = [
         s
         for s in discover_all()

@@ -89,7 +89,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import compressed, discovery, transcript
+from . import compressed, discovery, entry_cache, scan_memo, transcript
 
 BUDGETS_PATH = Path(__file__).resolve().parent.parent / "docs" / "perf_budgets.json"
 
@@ -117,10 +117,28 @@ class WorkLedger:
 
     counts: dict[str, int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _muted: bool = field(default=False, repr=False)
 
     def add(self, name: str, amount: int = 1) -> None:
         with self._lock:
-            self.counts[name] = self.counts.get(name, 0) + amount
+            if not self._muted:
+                self.counts[name] = self.counts.get(name, 0) + amount
+
+    @contextlib.contextmanager
+    def muted(self) -> Iterator[None]:
+        """Run setup that must not be counted as the workload's own work.
+
+        For a workload that measures a steady state: the run that brings the
+        entry cache up to date happens inside this, and the run after it is
+        the one whose counters are recorded.
+        """
+        with self._lock:
+            self._muted = True
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._muted = False
 
     def snapshot(self) -> dict[str, int]:
         """Every counter, including the ones that stayed at zero.
@@ -147,6 +165,13 @@ COUNTERS = (
     "progress_callbacks",
     "row_tick_wrappers",
     "zst_decompressions",
+    "entry_cache_loads",
+    "entry_cache_stores",
+    "entry_cache_index_opens",
+    "entry_cache_bytes_read",
+    "process_pool_stores",
+    "discovery_scans",
+    "scan_memo_hits",
 )
 
 
@@ -159,23 +184,26 @@ class _CountingReader:
     cannot tell the difference.
     """
 
-    def __init__(self, fh, ledger: WorkLedger) -> None:
+    def __init__(
+        self, fh, ledger: WorkLedger, counter: str = "corpus_bytes_read"
+    ) -> None:
         self._fh = fh
         self._ledger = ledger
+        self._counter = counter
 
     def read(self, *args, **kwargs):
         data = self._fh.read(*args, **kwargs)
-        self._ledger.add("corpus_bytes_read", len(data))
+        self._ledger.add(self._counter, len(data))
         return data
 
     def readline(self, *args, **kwargs):
         data = self._fh.readline(*args, **kwargs)
-        self._ledger.add("corpus_bytes_read", len(data))
+        self._ledger.add(self._counter, len(data))
         return data
 
     def readlines(self, *args, **kwargs):
         lines = self._fh.readlines(*args, **kwargs)
-        self._ledger.add("corpus_bytes_read", sum(len(x) for x in lines))
+        self._ledger.add(self._counter, sum(len(x) for x in lines))
         return lines
 
     def __iter__(self):
@@ -183,7 +211,7 @@ class _CountingReader:
 
     def __next__(self):
         line = next(self._fh)
-        self._ledger.add("corpus_bytes_read", len(line))
+        self._ledger.add(self._counter, len(line))
         return line
 
     def __enter__(self):
@@ -220,7 +248,14 @@ def instrumented(
     real_read_bytes = Path.read_bytes
     real_connect = sqlite3.connect
     real_run = transcript.subprocess.run
-    real_iter_entries = transcript.iter_entries
+    real_parse_entries = transcript._parse_entries
+    real_cache_load = entry_cache.load
+    real_cache_store = entry_cache.store
+    real_store_in_processes = transcript._store_in_processes
+    real_rg_text = transcript._rg_entry_text_candidates
+    real_claude_session = discovery._claude_session
+    real_pi_session = discovery._pi_session
+    real_memo_get = scan_memo.Memo.get
     real_file_may_match = transcript._file_may_match
     real_search_entries = transcript._search_entries
     real_probe = transcript._probe_in_processes
@@ -228,18 +263,45 @@ def instrumented(
     real_rg = transcript._rg_candidate_paths
     real_decompress = compressed._decompress
     corpus_str = str(corpus)
+    # The entry cache sits inside the corpus home, and what is read back from
+    # it is this package's own earlier work rather than the provider's files.
+    # Counted apart, so "read less of the corpus" cannot be achieved on paper
+    # by reading the same text from somewhere else.
+    cache_str = os.fspath(entry_cache.cache_dir())
+    memo_str = os.fspath(scan_memo.directory())
+
+    def in_cache(target) -> bool:
+        try:
+            return cache_str in str(target) or memo_str in str(target)
+        except (TypeError, ValueError):
+            return False
 
     def in_corpus(target) -> bool:
         try:
             # Containment, not a prefix test: SQLite is opened through a
             # read-only URI (``file:/path/to/db?mode=ro``), so the corpus path
             # sits in the middle of the string rather than at its start.
-            return corpus_str in str(target)
+            return corpus_str in str(target) and not in_cache(target)
         except (TypeError, ValueError):
             return False
 
     def counting_open(file, *args, **kwargs):
         fh = real_open(file, *args, **kwargs)
+        if in_cache(file):
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if "r" not in mode or "+" in mode or memo_str in str(file):
+                # The scan memo is one file per provider, read once per
+                # discovery; what it saves is counted as scan_memo_hits.
+                return fh
+            # Bytes are counted for the text files only. An index's header
+            # names its source by absolute path, so its length varies with
+            # where the corpus was built, and a count that differs between
+            # two temp directories cannot be pinned. Indexes are counted by
+            # the open instead, which is the same on every machine.
+            if str(file).endswith(entry_cache.INDEX_SUFFIX):
+                ledger.add("entry_cache_index_opens")
+                return fh
+            return _CountingReader(fh, ledger, "entry_cache_bytes_read")
         if not in_corpus(file):
             return fh
         ledger.add("corpus_file_opens")
@@ -267,12 +329,48 @@ def instrumented(
             ledger.add("rg_subprocess_calls")
         return real_run(args, *rest, **kwargs)
 
-    def counting_iter_entries(session, *args, **kwargs):
+    def counting_parse_entries(session, *args, **kwargs):
         # The single gate every canonical parse passes through, whether it was
-        # reached by search, by `get`, or by the TUI's transcript cache. A
-        # counter on `search_session` would have missed retrieval entirely.
+        # reached by search, by `get`, by the TUI's transcript cache, or by
+        # the entry cache filling itself. A counter on `search_session` would
+        # have missed retrieval entirely, and one on `iter_entries` would
+        # count a load from the entry cache as a parse.
         ledger.add("transcripts_parsed")
-        return real_iter_entries(session, *args, **kwargs)
+        return real_parse_entries(session, *args, **kwargs)
+
+    def counting_cache_load(ref, make):
+        loaded = real_cache_load(ref, make)
+        if loaded is not None:
+            ledger.add("entry_cache_loads")
+        return loaded
+
+    def counting_cache_store(ref, entries, warnings, fold=b""):
+        stored = real_cache_store(ref, entries, warnings, fold)
+        if stored:
+            ledger.add("entry_cache_stores")
+        return stored
+
+    def counting_claude_session(f, *args, **kwargs):
+        # A transcript opened by discovery to read its head and tail: the
+        # work the scan memo exists to do once per version of a file.
+        ledger.add("discovery_scans")
+        return real_claude_session(f, *args, **kwargs)
+
+    def counting_pi_session(f):
+        ledger.add("discovery_scans")
+        return real_pi_session(f)
+
+    def counting_memo_get(self, path, sig):
+        known = real_memo_get(self, path, sig)
+        if known is not scan_memo.MISS:
+            ledger.add("scan_memo_hits")
+        return known
+
+    def recording_store_in_processes(jobs, cancelled, tick=None):
+        # As for the probe below: record the routing decision, then let the
+        # threads do the work where the counters can see it.
+        ledger.add("process_pool_stores", len(jobs))
+        return transcript._PROC_FALLBACK
 
     def counting_file_may_match(path, *args, **kwargs):
         ledger.add("prefilter_file_scans")
@@ -311,7 +409,13 @@ def instrumented(
     Path.read_bytes = counting_read_bytes
     sqlite3.connect = counting_connect
     transcript.subprocess.run = counting_run
-    transcript.iter_entries = counting_iter_entries
+    transcript._parse_entries = counting_parse_entries
+    entry_cache.load = counting_cache_load
+    entry_cache.store = counting_cache_store
+    transcript._store_in_processes = recording_store_in_processes
+    discovery._claude_session = counting_claude_session
+    discovery._pi_session = counting_pi_session
+    scan_memo.Memo.get = counting_memo_get
     transcript._file_may_match = counting_file_may_match
     transcript._search_entries = counting_search_entries
     transcript._probe_in_processes = recording_probe_in_processes
@@ -319,6 +423,7 @@ def instrumented(
     compressed._decompress = counting_decompress
     if disable_rg:
         transcript._rg_candidate_paths = no_rg
+        transcript._rg_entry_text_candidates = no_rg
     try:
         yield
     finally:
@@ -326,7 +431,14 @@ def instrumented(
         Path.read_bytes = real_read_bytes
         sqlite3.connect = real_connect
         transcript.subprocess.run = real_run
-        transcript.iter_entries = real_iter_entries
+        transcript._parse_entries = real_parse_entries
+        entry_cache.load = real_cache_load
+        entry_cache.store = real_cache_store
+        transcript._store_in_processes = real_store_in_processes
+        transcript._rg_entry_text_candidates = real_rg_text
+        discovery._claude_session = real_claude_session
+        discovery._pi_session = real_pi_session
+        scan_memo.Memo.get = real_memo_get
         transcript._file_may_match = real_file_may_match
         transcript._search_entries = real_search_entries
         transcript._probe_in_processes = real_probe
@@ -1108,6 +1220,69 @@ def _with_opencode_v2(run: Callable[[], None]) -> None:
         parked.rename(v1)
 
 
+def _stateless(run: Callable[[], None]) -> None:
+    """Run *run* with the entry cache switched off.
+
+    The stateless path is what runs wherever the cache cannot -- switched off,
+    an unwritable home, a session it will not hold -- so it keeps its own
+    budgets rather than being trusted to stay as it was."""
+    saved = os.environ.get("SESSION_BROWSER_CACHE")
+    os.environ["SESSION_BROWSER_CACHE"] = "0"
+    try:
+        run()
+    finally:
+        if saved is None:
+            os.environ.pop("SESSION_BROWSER_CACHE", None)
+        else:
+            os.environ["SESSION_BROWSER_CACHE"] = saved
+
+
+def _warmed(ledger: WorkLedger, run: Callable[[], None]) -> None:
+    """Run *run* against an entry cache that already holds every session.
+
+    The same command twice: the first, uncounted, parses whatever it reaches
+    into the cache; the second is the steady state a user meets on every
+    search after their first, and is what the workload records."""
+    with ledger.muted():
+        run()
+    run()
+
+
+def _with_appended_transcript(run: Callable[[], None]) -> None:
+    """Run *run* after one Claude transcript has grown by a turn.
+
+    What a live session looks like to the cache: one file whose size and
+    mtime moved since it was parsed. Written through ``io.open`` so the setup
+    is not counted, and the original bytes are put back afterwards even on
+    failure."""
+    home = _corpus_home_guard()
+    target = (
+        home
+        / ".claude"
+        / "projects"
+        / "-Users-perf-project1"
+        / ("perf-claude-0001.jsonl")
+    )
+    with io.open(target, "rb") as fh:  # noqa: UP020 - open() is the counted one
+        original = fh.read()
+    extra = json.dumps(
+        {
+            "type": "user",
+            "cwd": "/Users/perf/project1",
+            "gitBranch": "main",
+            "timestamp": "2026-02-01T09:00:00.000Z",
+            "message": {"role": "user", "content": "one more turn, typed later"},
+        }
+    )
+    with io.open(target, "ab") as fh:  # noqa: UP020
+        fh.write(extra.encode() + b"\n")
+    try:
+        run()
+    finally:
+        with io.open(target, "wb") as fh:  # noqa: UP020
+            fh.write(original)
+
+
 def _tui_search(ledger: WorkLedger, query: str) -> None:
     """The TUI's shape: full entries retained, progress reported throughout."""
     sessions = discovery.discover_all()
@@ -1119,29 +1294,164 @@ def _tui_search(ledger: WorkLedger, query: str) -> None:
     )
 
 
+def _after_append(ledger: WorkLedger, run: Callable[[], None]) -> None:
+    """Warm the cache, uncounted, then count *run* once a transcript grew."""
+    with ledger.muted():
+        run()
+    _with_appended_transcript(run)
+
+
+# What a ".stateless" twin's guard opens with.
+_STATELESS = "With the entry cache switched off, the raw files answer. "
+
+
 def workloads(ledger: WorkLedger) -> list[Workload]:
+    """Every scenario the gate runs.
+
+    A workload that parses or searches comes in up to three states of the
+    entry cache, because they are three different amounts of work and a
+    regression in one hides behind the others:
+
+    * its plain name is the steady state -- the entry cache holds every
+      session and the scan memo every transcript's metadata, which is what
+      every command after a history's first one meets;
+    * ``.cold`` is that first one, with nothing cached;
+    * ``.stateless`` is the cache switched off, the path that ran before the
+      cache existed and still runs wherever it cannot.
+    """
+
+    def warm(run: Callable[[], None]) -> Callable[[], None]:
+        return lambda: _warmed(ledger, run)
+
+    def off(run: Callable[[], None]) -> Callable[[], None]:
+        return lambda: _stateless(run)
+
+    def search_absent() -> None:
+        _cli("search", QUERY_ABSENT)
+
+    def search_rare() -> None:
+        _cli("search", QUERY_RARE)
+
+    def search_common() -> None:
+        _cli("search", QUERY_COMMON)
+
+    def search_pi() -> None:
+        _cli("search", QUERY_RARE, "--provider", "pi")
+
+    def search_zst_twice() -> None:
+        _with_compressed_codex_rollouts(
+            lambda: (
+                _cli("search", QUERY_RARE, "--provider", "codex"),
+                compressed._known.clear(),
+                _cli("search", QUERY_RARE, "--provider", "codex"),
+            )
+        )
+
+    def search_rewound() -> None:
+        _cli("search", QUERY_REWOUND, "--provider", "codex")
+
+    def stats() -> None:
+        _cli("stats")
+
+    def list_plain() -> None:
+        _cli("list", "--limit", "50")
+
+    def list_preview() -> None:
+        _cli("list", "--limit", "50", "--preview", "ending")
+
+    def get_one() -> None:
+        _cli("get", "claude:perf-claude-0000")
+
+    def tui_rare() -> None:
+        _tui_search(ledger, QUERY_RARE)
+
+    def tui_words() -> None:
+        transcript.search_session_word_hits(
+            discovery.discover_all(),
+            f"sighted {QUERY_RARE}",
+            progress=lambda *_a: ledger.add("progress_callbacks"),
+        )
+
+    def lib_snippets() -> None:
+        transcript.search_sessions(
+            discovery.discover_all(), QUERY_COMMON, keep_entries=False
+        )
+
+    def lib_entries() -> None:
+        transcript.search_sessions(
+            discovery.discover_all(), QUERY_COMMON, keep_entries=True
+        )
+
     return [
         Workload(
             "cli.search.absent",
-            "A term in no session must cost zero canonical parses: the "
-            "prefilter, not the parser, answers a miss.",
-            lambda: _cli("search", QUERY_ABSENT),
+            "A term in no session must cost no parse and no load. Every "
+            "session's entries are already cached, and the scan of that text "
+            "-- not the parser, and not a read of the raw transcripts -- "
+            "answers a miss.",
+            warm(search_absent),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.absent.stateless",
+            _STATELESS + "A term in no session must cost zero canonical "
+            "parses: the prefilter, not the parser, answers a miss.",
+            off(search_absent),
             needs_rg=True,
         ),
         Workload(
             "cli.search.rare",
-            "The prefilter must rule out the corpus and leave only genuine "
-            "candidates to parse. This is the number that grows to the whole "
-            "corpus if the native scan is dropped.",
-            lambda: _cli("search", QUERY_RARE),
+            "A warm entry cache leaves only genuine matches to load and "
+            "nothing to parse. transcripts_parsed rising from zero means a "
+            "session that had not changed was parsed again; entry_cache_loads "
+            "rising towards the corpus means the scan of cached text was "
+            "dropped; corpus_bytes_read rising above cli.list's means a raw "
+            "transcript was read to answer a search the cache already could.",
+            warm(search_rare),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.rare.cold",
+            "The first search of a history, nothing cached. Every file-backed "
+            "session is parsed exactly once and stored, the build is routed "
+            "to worker processes, and the search then loads only its matches. "
+            "transcripts_parsed above the file session count means a session "
+            "was parsed once to cache it and again to search it.",
+            search_rare,
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.rare.appended",
+            "One transcript grew since it was cached, which is what a live "
+            "session looks like. It alone is parsed again: transcripts_parsed "
+            "and entry_cache_stores are both 1. More means a change to one "
+            "file discarded what was known about the others.",
+            lambda: _after_append(ledger, search_rare),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.rare.stateless",
+            _STATELESS + "The prefilter must rule out the corpus and leave "
+            "only genuine candidates to parse. This is the number that grows "
+            "to the whole corpus if the native scan is dropped.",
+            off(search_rare),
             needs_rg=True,
         ),
         Workload(
             "cli.search.rare.no_rg",
-            "Same, with ripgrep unavailable: the in-process byte prefilter "
-            "must still read each candidate file exactly once, not once to "
-            "partition and again to parse.",
-            lambda: _cli("search", QUERY_RARE),
+            "With ripgrep unavailable, the in-process scan must read each "
+            "cached text file exactly once and load only the candidates: "
+            "entry_cache_bytes_read is every text file once plus the "
+            "candidates' own pairs, never the text twice.",
+            warm(search_rare),
+            disable_rg=True,
+        ),
+        Workload(
+            "cli.search.rare.no_rg.stateless",
+            _STATELESS + "With ripgrep unavailable too, the in-process byte "
+            "prefilter must still read each candidate file exactly once, not "
+            "once to partition and again to parse.",
+            off(search_rare),
             disable_rg=True,
         ),
         Workload(
@@ -1150,27 +1460,38 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "must equal cli.search.rare's. A role filter that re-read a "
             "transcript to learn its roles, or that skipped the prefilter to "
             "classify candidates first, shows here as a rise over it.",
-            lambda: _cli("search", QUERY_RARE, "--role", "user,assistant"),
+            warm(lambda: _cli("search", QUERY_RARE, "--role", "user,assistant")),
             needs_rg=True,
         ),
         Workload(
             "cli.search.common",
-            "The unavoidable upper bound -- a term in every session. Nothing "
-            "may read the corpus more than once even when nothing is skipped.",
-            lambda: _cli("search", QUERY_COMMON),
+            "The unavoidable upper bound -- a term in every session. Each "
+            "session is loaded once and none is parsed, and above the "
+            "threshold the loads are routed to worker processes.",
+            warm(search_common),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.common.stateless",
+            _STATELESS + "The unavoidable upper bound -- a term in every "
+            "session. Nothing may read the corpus more than once even when "
+            "nothing is skipped.",
+            off(search_common),
             needs_rg=True,
         ),
         Workload(
             "cli.search.claude",
             "Provider scoping must confine the work to that provider: no "
-            "SQLite connection is opened when opencode was not asked for.",
-            lambda: _cli("search", QUERY_RARE, "--provider", "claude"),
+            "SQLite connection is opened when opencode was not asked for, and "
+            "no other provider's cached entries are scanned or loaded.",
+            warm(lambda: _cli("search", QUERY_RARE, "--provider", "claude")),
             needs_rg=True,
         ),
         Workload(
             "cli.search.opencode",
             "The thin raw-part scan must rule sessions out before the ordered "
-            "join, so only survivors reach a canonical parse.",
+            "join, so only survivors reach a canonical parse. OpenCode is "
+            "never held in the entry cache: every cache counter stays zero.",
             lambda: _cli("search", QUERY_RARE, "--provider", "opencode"),
         ),
         Workload(
@@ -1185,41 +1506,77 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
         ),
         Workload(
             "cli.search.pi",
-            "Pi transcripts are ordinary JSONL, so they must be ruled out by "
-            "the same candidate scan the claude files go through. A parse per "
-            "session here means Pi fell out of the prefilter path.",
-            lambda: _cli("search", QUERY_RARE, "--provider", "pi"),
+            "Pi transcripts are ordinary JSONL, so they are cached and "
+            "scanned like the claude files. A parse here means Pi fell out of "
+            "the entry cache; a load per session means it fell out of the "
+            "scan.",
+            warm(search_pi),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.pi.stateless",
+            _STATELESS + "Pi transcripts must be ruled out by the same "
+            "candidate scan the claude files go through. A parse per session "
+            "here means Pi fell out of the prefilter path.",
+            off(search_pi),
             needs_rg=True,
         ),
         Workload(
             "cli.search.codex_zst",
-            "Codex compresses old rollouts to .jsonl.zst, and decompressing "
-            "them per query cost ~1s over 684 real rollouts. Each must be "
-            "decompressed once, into the on-disk cache, and the second of "
-            "these two searches -- a fresh process as far as the cache can "
-            "tell -- must read only the copies: zst_decompressions is the "
-            "rollout count, not twice it.",
-            lambda: _with_compressed_codex_rollouts(
-                lambda: (
-                    _cli("search", QUERY_RARE, "--provider", "codex"),
-                    compressed._known.clear(),
-                    _cli("search", QUERY_RARE, "--provider", "codex"),
-                )
-            ),
+            "Codex compresses old rollouts to .jsonl.zst. The first of these "
+            "two searches decompresses each one once, to parse it into the "
+            "entry cache; the second -- a fresh process as far as either "
+            "cache can tell -- must decompress nothing and parse nothing. "
+            "zst_decompressions and transcripts_parsed are both the rollout "
+            "count, not twice it.",
+            search_zst_twice,
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.codex_zst.stateless",
+            _STATELESS + "Decompressing compressed rollouts per query cost "
+            "~1s over 684 real ones. Each must be decompressed once, into "
+            "the on-disk cache, and the second of these two searches must "
+            "read only the copies: zst_decompressions is the rollout count, "
+            "not twice it.",
+            off(search_zst_twice),
             needs_rg=True,
         ),
         Workload(
             "cli.list",
-            "Listing is metadata only. It must never parse a transcript, and "
-            "its read volume must stay bounded by the discovery window rather "
-            "than by session length.",
-            lambda: _cli("list", "--limit", "50"),
+            "Listing is metadata plus each returned session's entry count, "
+            "and the count comes from one header line of the entry cache. It "
+            "must never parse a transcript or load one, and its corpus reads "
+            "must stay bounded by the discovery window rather than by "
+            "session length: they equal cli.stats's.",
+            warm(list_plain),
+        ),
+        Workload(
+            "cli.list.cold",
+            "A listing over sessions nothing has cached reads each returned "
+            "session once to count it, and keeps what it read: one parse and "
+            "one store per row returned, none for the rows the limit dropped.",
+            list_plain,
+        ),
+        Workload(
+            "cli.list.stateless",
+            _STATELESS + "A listing counts each returned session's entries "
+            "by reading it once -- the returned rows only, never the corpus.",
+            off(list_plain),
         ),
         Workload(
             "cli.list.preview",
-            "Ending previews must reuse the listing's count scan, limited to "
-            "the returned sessions, rather than load transcripts again.",
-            lambda: _cli("list", "--limit", "50", "--preview", "ending"),
+            "Ending previews must take each returned session's entries from "
+            "the cache, once, and parse nothing: the count and the ending "
+            "come from the same load.",
+            warm(list_preview),
+        ),
+        Workload(
+            "cli.list.preview.stateless",
+            _STATELESS + "Ending previews must reuse the listing's count "
+            "scan, limited to the returned sessions, rather than load "
+            "transcripts again.",
+            off(list_preview),
         ),
         Workload(
             "cli.list.no_codex_db",
@@ -1229,7 +1586,7 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "reads rollout files, so it is where a Codex vocabulary the head "
             "or tail scan no longer recognises shows up -- as a rise, since "
             "finding no turn means reading the whole file to discover it.",
-            lambda: _without_codex_db(lambda: _cli("list", "--limit", "50")),
+            lambda: _without_codex_db(warm(list_plain)),
         ),
         Workload(
             "cli.list.codex_db_stale",
@@ -1239,29 +1596,38 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "gap fell back to scanning the whole tree it put ~1.5 s on every "
             "call on a real machine. If this rises to cli.list.no_codex_db's "
             "opens, the whole-tree fallback is back.",
-            lambda: _with_extra_codex_rollout(lambda: _cli("list", "--limit", "50")),
+            lambda: _with_extra_codex_rollout(warm(list_plain)),
         ),
         Workload(
             "cli.calls.absent",
-            "calls finds its sessions through search's prefilter: a pattern "
-            "in no session parses nothing, whatever the corpus holds.",
-            lambda: _cli("calls", QUERY_ABSENT),
+            "calls finds its sessions through search's scan: a pattern in no "
+            "session loads nothing and parses nothing, whatever the corpus "
+            "holds.",
+            warm(lambda: _cli("calls", QUERY_ABSENT)),
             needs_rg=True,
         ),
         Workload(
             "cli.calls.rare",
-            "calls must parse only the prefilter's candidates, and once each: "
-            "the call's output is paired from the entries the search already "
+            "calls must load only the scan's candidates, and once each: the "
+            "call's output is paired from the entries the search already "
             "holds, never by reading a transcript again.",
-            lambda: _cli("calls", QUERY_RARE),
+            warm(lambda: _cli("calls", QUERY_RARE)),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.calls.rare.stateless",
+            _STATELESS + "calls must parse only the prefilter's candidates, "
+            "and once each: the call's output is paired from the entries the "
+            "search already holds, never by reading a transcript again.",
+            off(lambda: _cli("calls", QUERY_RARE)),
             needs_rg=True,
         ),
         Workload(
             "cli.calls.common",
             "A pattern in every session: calls keeps every candidate's "
-            "entries to pair outputs, so this pins how many transcripts a "
-            "broad pattern parses and that it still reads each one once.",
-            lambda: _cli("calls", QUERY_COMMON),
+            "entries to pair outputs, so this pins how many sessions a broad "
+            "pattern loads and that it still reads each one once.",
+            warm(lambda: _cli("calls", QUERY_COMMON)),
             needs_rg=True,
         ),
         Workload(
@@ -1270,77 +1636,142 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "never opened in discovery: every counter equals cli.list's. The "
             "gap reader used to open each one, decompressing a 39 MB first "
             "file on a real machine, only to drop it for a known id.",
-            lambda: _with_rewound_codex_thread(lambda: _cli("list", "--limit", "50")),
+            lambda: _with_rewound_codex_thread(warm(list_plain)),
         ),
         Workload(
             "cli.search.codex_rewound",
             "A phrase said only before a rewind lives only in a file the "
-            "index does not name. The prefilter must scan that file too and "
-            "send exactly the one thread to a parse; zero parses means text "
-            "said before a rewind is unsearchable again.",
-            lambda: _with_rewound_codex_thread(
-                lambda: _cli("search", QUERY_REWOUND, "--provider", "codex")
-            ),
+            "index does not name. The thread's cached entries span every one "
+            "of its files, so the scan finds the phrase and exactly the one "
+            "thread is loaded; zero loads means text said before a rewind is "
+            "unsearchable again.",
+            lambda: _with_rewound_codex_thread(warm(search_rewound)),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.codex_rewound.stateless",
+            _STATELESS + "A phrase said only before a rewind lives only in a "
+            "file the index does not name. The prefilter must scan that file "
+            "too and send exactly the one thread to a parse; zero parses "
+            "means text said before a rewind is unsearchable again.",
+            lambda: _with_rewound_codex_thread(off(search_rewound)),
             needs_rg=True,
         ),
         Workload(
             "cli.stats",
-            "Statistics come from discovery metadata alone; no transcript "
-            "may be parsed to produce them.",
-            lambda: _cli("stats"),
+            "Statistics come from discovery metadata alone, and discovery "
+            "remembers what it read from each Claude and Pi transcript: with "
+            "nothing changed, no transcript is opened at all -- "
+            "discovery_scans is zero and scan_memo_hits is every such file. "
+            "What is left in corpus_bytes_read is what no memo covers.",
+            warm(stats),
+        ),
+        Workload(
+            "cli.stats.cold",
+            "The first discovery of a history: each Claude and Pi transcript "
+            "is opened once, for its head and its tail, and remembered. "
+            "discovery_scans above the file count means one was read twice.",
+            stats,
+        ),
+        Workload(
+            "cli.stats.appended",
+            "One transcript grew since the last discovery. It alone is "
+            "opened again: discovery_scans is 1.",
+            lambda: _after_append(ledger, stats),
+        ),
+        Workload(
+            "cli.stats.stateless",
+            _STATELESS + "Statistics come from discovery metadata alone: no "
+            "transcript may be parsed to produce them, and the read volume "
+            "is bounded by the discovery window, not by session length.",
+            off(stats),
         ),
         Workload(
             "cli.get",
-            "Retrieving one session must read one transcript, on top of the "
-            "discovery pass that located it.",
-            lambda: _cli("get", "claude:perf-claude-0000"),
+            "Retrieving a session whose entries are cached must load it once "
+            "and parse nothing, on top of the discovery pass that located it.",
+            warm(get_one),
+        ),
+        Workload(
+            "cli.get.cold",
+            "Retrieving one session nothing has cached must read one "
+            "transcript, on top of the discovery pass that located it, and "
+            "store it: one parse, one store, and no load.",
+            get_one,
         ),
         Workload(
             "cli.get.recent",
-            "A recent conversation and its text budget must use one transcript "
-            "read, not separate user and assistant retrievals.",
-            lambda: _cli("get", "claude:perf-claude-0000", "--recent"),
+            "A recent conversation and its text budget must use one load of "
+            "the session's entries, not separate user and assistant "
+            "retrievals.",
+            warm(lambda: _cli("get", "claude:perf-claude-0000", "--recent")),
         ),
         Workload(
             "tui.search.rare",
             "The progress readout the TUI displays. Callback volume is capped "
             "by design -- per session and per 4096 database rows, never per "
             "row or per entry.",
-            lambda: _tui_search(ledger, QUERY_RARE),
+            warm(tui_rare),
+            needs_rg=True,
+        ),
+        Workload(
+            "tui.search.rare.stateless",
+            _STATELESS + "The progress readout must observe the scan the CLI "
+            "runs, not re-walk it: its corpus reads equal "
+            "cli.search.rare.stateless's.",
+            off(tui_rare),
             needs_rg=True,
         ),
         Workload(
             "tui.search.unordered",
-            "The TUI's words wave. It must parse each candidate ONCE, in one "
-            "scan for all the typed words together, after one native "
+            "The TUI's words wave. It must load each candidate ONCE, in one "
+            "scan for all the typed words together, after one native scan of "
+            "the cached text per word has narrowed the sessions -- never a "
+            "loading scan per word. The key keeps its old name so a bless "
+            "shows this workload's counters moving rather than a new "
+            "workload.",
+            warm(tui_words),
+            needs_rg=True,
+        ),
+        Workload(
+            "tui.search.unordered.stateless",
+            _STATELESS + "The words wave must parse each candidate ONCE, in "
+            "one scan for all the typed words together, after one native "
             "candidate scan per word has narrowed the files -- never a "
             "parsing scan per word, which would read the corpus once for "
-            "each word typed. The key keeps its old name so a bless shows "
-            "this workload's counters moving rather than a new workload.",
-            lambda: transcript.search_session_word_hits(
-                discovery.discover_all(),
-                f"sighted {QUERY_RARE}",
-                progress=lambda *_a: ledger.add("progress_callbacks"),
-            ),
+            "each word typed.",
+            off(tui_words),
             needs_rg=True,
         ),
         Workload(
             "lib.search.process_route",
             "The ids/snippets shape above the candidate threshold must be "
-            "routed to worker processes, and the prefiltered-out majority "
-            "must not be sent with it.",
-            lambda: transcript.search_sessions(
-                discovery.discover_all(), QUERY_COMMON, keep_entries=False
-            ),
+            "routed to worker processes, and the ruled-out majority must not "
+            "be sent with it.",
+            warm(lib_snippets),
+            needs_rg=True,
+        ),
+        Workload(
+            "lib.search.process_route.stateless",
+            _STATELESS + "The ids/snippets shape above the candidate "
+            "threshold must be routed to worker processes, and the "
+            "prefiltered-out majority must not be sent with it.",
+            off(lib_snippets),
             needs_rg=True,
         ),
         Workload(
             "lib.search.keep_entries",
             "The entries-retaining shape must stay in this process: shipping "
             "whole transcripts back from workers would pickle the corpus.",
-            lambda: transcript.search_sessions(
-                discovery.discover_all(), QUERY_COMMON, keep_entries=True
-            ),
+            warm(lib_entries),
+            needs_rg=True,
+        ),
+        Workload(
+            "lib.search.keep_entries.stateless",
+            _STATELESS + "The entries-retaining shape must stay in this "
+            "process: shipping whole transcripts back from workers would "
+            "pickle the corpus.",
+            off(lib_entries),
             needs_rg=True,
         ),
     ]
@@ -1830,6 +2261,12 @@ def measure(root: Path) -> dict[str, dict[str, int]]:
             # Rebuilt per workload so the closure over `ledger` in tui.search
             # reports into the ledger being measured.
             live = next(w for w in workloads(ledger) if w.name == workload.name)
+            # Every workload starts with no entry cache and no scan memo, so
+            # none inherits what the one before it read and the counts do not
+            # depend on the order they run in. A workload that measures a
+            # warm cache warms it itself, under ledger.muted().
+            shutil.rmtree(entry_cache.cache_dir(), ignore_errors=True)
+            shutil.rmtree(scan_memo.directory(), ignore_errors=True)
             with instrumented(ledger, home, disable_rg=live.disable_rg):
                 live.run()
             measured[workload.name] = ledger.snapshot()

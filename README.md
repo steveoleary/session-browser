@@ -38,9 +38,12 @@ agents.
   required.
 - **Keep your history local.** Session Browser reads the providers' native
   histories directly.
-- **Light by design.** There is no second copy of your history, indexing pass,
-  daemon, embedding model, or separate database to set up and maintain. Install
-  it, run it, and search the histories you already have.
+- **Light by design.** There is no daemon, embedding model, or separate
+  database to set up and maintain. Install it, run it, and search the histories
+  you already have. To stay fast it keeps a disposable cache of the text it
+  parsed out of each transcript, about a thirteenth of the size of the history
+  itself, which it builds and refreshes by itself (see [the search
+  cache](#the-search-cache)).
 
 ## Ask your agent
 
@@ -207,6 +210,31 @@ Codex keeps its rollouts, and recent versions compress older ones to
 that reads it, into `~/.cache/session-browser/zst` (or under `$XDG_CACHE_HOME`).
 That copy takes about five times the compressed size, and the cache is safe to
 delete.
+
+### The search cache
+
+A provider's transcript is mostly not conversation: images, tool results stored
+twice, file snapshots. On one machine 6.7 GB of transcripts held 0.5 GB of text
+a search could ever match. So the first time Session Browser reads a session it
+keeps the parsed text in `~/.cache/session-browser/entries` (or under
+`$XDG_CACHE_HOME`), and from then on searches that instead of the original.
+Beside it, `discovery` remembers what listing a session needs (its summary,
+directory and last activity), so that listing does not reopen every transcript.
+
+- The first search of a history parses all of it once, which takes about as
+  long as one search used to. After that only sessions that changed are parsed
+  again: on that machine a search that took four seconds takes a third of one,
+  and one for a file name or a commit hash, which took fifteen, takes the same.
+- It is checked against each transcript's size and modification time on every
+  read, and rebuilt after an upgrade changes how transcripts are parsed. It can
+  be stale only by being slow, never by being wrong.
+- It holds the text of your sessions, readable by you alone, like the
+  transcripts it came from. Deleting a session from the TUI deletes its cached
+  text too, and text cached from a transcript the provider has since removed
+  is cleared out by the next day's first search.
+- It is safe to delete, and `SESSION_BROWSER_CACHE=0` turns it off: every
+  command then reads the providers' files directly, as it did before the cache
+  existed.
 
 Use `session-browser COMMAND --help` for filters, output formats, date ranges,
 and retrieval windows. Commands return JSON by default where it is useful for

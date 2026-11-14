@@ -32,6 +32,7 @@ from .transcript import (
     codex_fork_base,
     codex_prefix_entries,
     codex_thread_of_segment,
+    count_entries,
     entry_matches_roles,
     is_command_noise,
     iter_entries,
@@ -1421,7 +1422,7 @@ def _discover_for_idents(idents: list[str]) -> list[Session]:
 def _entry_count(s: Session) -> int | None:
     """Transcript length without materializing it; None when unreadable."""
     try:
-        return sum(1 for _ in iter_entries(s, []))
+        return count_entries(s)
     except (TranscriptUnreadable, OSError):
         return None
 

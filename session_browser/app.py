@@ -424,6 +424,18 @@ def _progress_forms(
             f"{glyph} indexing {done:,}",
             glyph,
         ]
+    # Transcripts that are new, or changed since they were last parsed, are
+    # parsed before anything can be scanned. Nearly always a handful, done
+    # before a frame is drawn; the first search of a history is all of them.
+    parsing = ratio("parsing")
+    if parsing and parsing[0] < parsing[1]:
+        done, total = parsing
+        return [
+            f"{glyph} parsing {done:,} of {total:,} new transcripts",
+            f"{glyph} parsing {done:,} of {total:,}",
+            f"{glyph} {done:,}/{total:,}",
+            glyph,
+        ]
     # Reading owns the line until it finishes; the database scan then takes
     # over, because it is what the search is still waiting on.
     reading = ratio("reading")
@@ -3899,14 +3911,10 @@ class SessionBrowser(App):
         self._scroll_detail(-max(1, scroll.size.height // 2))
 
 
-def main() -> None:
-    if len(sys.argv) > 1:
-        from .cli import run_cli
-
-        raise SystemExit(run_cli(sys.argv[1:]))
-    app = SessionBrowser()
-    app.run()
-
+# The command's entry point lives in launch.py, which does not import this
+# module unless the TUI is what was asked for. Re-exported for callers that
+# still reach it as ``session_browser.app.main``.
+from .launch import main
 
 if __name__ == "__main__":
     main()

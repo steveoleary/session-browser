@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -120,20 +122,27 @@ def run_committed_cases(
         if not cases:
             raise CaseError(f"unknown committed case: {case}")
     results = []
-    for item in cases:
-        selected_state = item.accepted_state if state == "accepted" else state
-        result = subprocess.run(
-            [sys.executable, str(item.verifier), selected_state],
-            cwd=_repository_root(),
-            check=False,
-        )
-        results.append(
-            CaseRunResult(
-                name=item.name,
-                state=selected_state,
-                returncode=result.returncode,
+    # A verifier points HOME at its fixture's committed tree, and this package
+    # caches what it parses under the home it is given. Sent to a directory
+    # that is thrown away, so a run leaves the fixtures as it found them and
+    # every case starts with nothing cached.
+    with tempfile.TemporaryDirectory(prefix="sb-cases-cache-") as cache_home:
+        env = {**os.environ, "XDG_CACHE_HOME": cache_home}
+        for item in cases:
+            selected_state = item.accepted_state if state == "accepted" else state
+            result = subprocess.run(
+                [sys.executable, str(item.verifier), selected_state],
+                cwd=_repository_root(),
+                check=False,
+                env=env,
             )
-        )
+            results.append(
+                CaseRunResult(
+                    name=item.name,
+                    state=selected_state,
+                    returncode=result.returncode,
+                )
+            )
     return results
 
 

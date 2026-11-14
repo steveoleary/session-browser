@@ -26,7 +26,7 @@ source .venv/bin/activate
 python -m pytest session_browser/ -q
 ```
 
-The whole suite takes about 2.5 minutes (990 tests, 2026-11-12) — longer than an
+The whole suite takes about 2 minutes (1,196 tests, 2026-11-14) — right at an
 agent harness's default 2-minute command timeout, which kills it with exit 137 and
 no output. Run it in the background or with a longer timeout.
 
@@ -161,6 +161,79 @@ regex is about one opcode either way. The blind spot is now "in-loop CPU that
 never returns to the interpreter" rather than all of it — smaller, and far more
 visible in review. A green suite is still not proof a hot loop got no heavier.
 
+## The entry cache
+
+`session_browser/entry_cache.py` keeps each file-backed session's parsed
+entries on disk, in `$XDG_CACHE_HOME/session-browser/entries`, and its module
+docstring has the measurements and the file layout. What binds you:
+
+**A cached parse is current when its name says so, and nothing else decides.**
+The name carries a fingerprint of the size and mtime of every file the parse
+read, plus a hash of the parser's own source (`transcript.py`, `discovery.py`,
+`compressed.py`, `entry_cache.py`, `scan_memo.py`). So there is no version
+constant to bump and none to forget, and the cost is yours to expect: **edit
+any of those five files and the next search parses the whole history again**,
+once. On the author's corpus that is about five seconds. Time a change on its
+second run, not its first.
+
+`scan_memo.py` is the same idea for discovery: what `_claude_session` and
+`_pi_session` read off each transcript's head and tail is remembered in
+`$XDG_CACHE_HOME/session-browser/discovery`, keyed by size and mtime and named
+for the same source hash, so a transcript is opened by discovery only when it
+has changed. Codex and OpenCode come out of their own indexes and are not in it.
+A per-file scan that starts reading anything beyond the transcript -- as a
+subagent's sidecar already is -- has to put that file in the signature too.
+
+**The stateless path is still the reference.** `SESSION_BROWSER_CACHE=0` runs
+every command as it ran before the cache existed, and the cache is only ever an
+optimisation of that: `test_entry_cache.py` holds search to the same answer
+cold, warm, without ripgrep and switched off. A new kind of phrase or record
+belongs in that file's `QUERIES` or `_corpus`.
+
+`benchmarks/cache_agreement.py` asks the same of the history on your own
+machine, which holds record shapes no fixture has thought of: discovery three
+ways, every session's cached entries against a fresh parse, and each query you
+give it cached against stateless. It builds its caches in a temporary directory,
+so it never touches the real ones; run it after changing a parser, a scanner or
+either cache. To try a change by hand without disturbing your real cache, point
+`XDG_CACHE_HOME` at a scratch directory first -- the editable install means
+`session-browser` is already running your working tree.
+
+**Each workload in the perf gate comes in up to three states**, because they
+are three amounts of work: its plain name is the steady state (everything
+cached), `.cold` is the first search of a history, `.stateless` is the cache
+switched off. A workload measuring the steady state warms the cache itself,
+under `ledger.muted()`, and `measure()` empties the cache before each one.
+`transcripts_parsed` counts real parses; `entry_cache_loads`, `_stores` and
+`_bytes_read` count what replaced them, apart from `corpus_bytes_read` on
+purpose -- reading the same text from somewhere else must not pass as reading
+less.
+
+**In a test:**
+
+- The suite's cache directory is a temporary one (`conftest.py`), shared by the
+  whole run. `test_entry_cache.py` gives each test its own.
+- A test about the raw prefilter -- `_rg_candidate_paths`, `_file_may_match`,
+  the Codex part join -- sets `SESSION_BROWSER_CACHE=0`, or it is testing a
+  path that no longer runs by default.
+- A test that patches a parser function and re-reads a file it has not changed
+  is served the entries cached before the patch. Change the file, or switch the
+  cache off.
+- "Changed" means size or mtime. A test that rewrites a file in place to the
+  same length can be served the earlier read on a filesystem whose timestamps
+  are coarser than the gap between its two writes. Transcripts only ever grow,
+  so this is a hazard for fixtures, not for users: change the length.
+
+**Entry metadata has to survive JSON.** A tuple, a non-string key or a NaN in
+`TranscriptEntry.metadata` makes `store()` refuse that session, which then
+parses on every search: slower, never wrong, and silent. The gate's
+`cli.search.rare.cold` workload pins `entry_cache_stores` to the session count,
+so a parser that starts emitting one shows up there.
+
+**Deleting a session sweeps the cache** (`deletion.delete_session`), and a
+daily sweep removes what was cached from transcripts a provider has pruned.
+Anything new that copies transcript text to disk needs the same two answers.
+
 ## Comparing a retrieval change against another revision
 
 Before shipping a change to search behaviour or the transcript parser, check it
@@ -202,6 +275,12 @@ Reading the result:
     silently dropped.
 - A change that does not alter what search reads cannot show a speed
   difference. Pick queries and a workload that actually exercise the change.
+- **What it times is the steady state.** Both revisions run with the same
+  `$XDG_CACHE_HOME`, and the runs that prove equivalence come before any that
+  are timed, so by then the candidate's entry cache holds every session. To
+  time the first search of a history instead, empty
+  `session-browser/entries` and `session-browser/discovery` under the cache
+  directory between runs yourself; the comparator will not.
 
 ### What moves a timing measurement, and what does not
 

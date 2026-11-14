@@ -3641,7 +3641,12 @@ class TestSearchSessionsBulk:
             results = search_sessions([s], "strasse")
         assert results[0].match_count == 1
 
-    def test_ripgrep_failure_falls_back_to_python_prefilter(self, tmp_path):
+    def test_ripgrep_failure_falls_back_to_python_prefilter(
+        self, tmp_path, monkeypatch
+    ):
+        # The raw prefilter is the stateless path's; with the entry cache on
+        # the scan reads cached text instead (see test_entry_cache.py).
+        monkeypatch.setenv("SESSION_BROWSER_CACHE", "0")
         path = tmp_path / "hit.jsonl"
         write_claude_jsonl(
             path, [{"type": "user", "message": {"content": "a wombat appears"}}]
@@ -3656,7 +3661,10 @@ class TestSearchSessionsBulk:
             assert search_sessions([session], "wombat")[0].match_count == 1
             assert fallback.call_count == 1
 
-    def test_unsafe_query_always_scans_canonically(self, tmp_path):
+    def test_unsafe_query_always_scans_canonically(self, tmp_path, monkeypatch):
+        # Stateless only: over cached entry text a digit is an ordinary
+        # character and this query is ruled out by the scan.
+        monkeypatch.setenv("SESSION_BROWSER_CACHE", "0")
         f = tmp_path / "s.jsonl"
         write_claude_jsonl(
             f, [{"type": "user", "message": {"content": "only pangolins here"}}]
@@ -3924,18 +3932,47 @@ class TestProcessPoolParse:
             assert search_sessions(sessions, "wombat")[0].match_count == 1
         spy.assert_not_called()
 
-    def test_missing_candidate_scan_stays_on_threads(self, tmp_path):
+    @pytest.mark.parametrize("cache", ["0", "1"])
+    def test_missing_candidate_scan_stays_on_threads(
+        self, tmp_path, monkeypatch, cache
+    ):
         """Without ripgrep the parent would have to run the expensive
-        in-process prefilter serially to partition, so threads keep the job."""
+        in-process prefilter serially to partition, so threads keep the job.
+        True of either scan: the raw files' or the cached entry text's."""
+        monkeypatch.setenv("SESSION_BROWSER_CACHE", cache)
         sessions = self._corpus(tmp_path)
         with (
             patch.object(transcript_mod, "_PROC_MIN_CANDIDATES", 2),
             patch.object(transcript_mod, "_rg_candidate_paths", return_value=None),
+            patch.object(
+                transcript_mod, "_rg_entry_text_candidates", return_value=None
+            ),
+            patch.object(transcript_mod, "_store_in_processes") as build_spy,
             patch.object(transcript_mod, "_probe_in_processes") as spy,
         ):
+            build_spy.return_value = transcript_mod._PROC_FALLBACK
             results = search_sessions(sessions, "wombat")
         spy.assert_not_called()
         assert sum(r.match_count for r in results) == 3
+
+    def test_a_phrase_no_scan_can_take_still_goes_to_processes(
+        self, tmp_path, monkeypatch
+    ):
+        """A phrase the raw prefilter cannot take makes every session a
+        candidate, and deciding that reads nothing -- so above the threshold
+        the parse belongs in worker processes like any other. It used to stay
+        on threads: 14.7 s for a query with a dot in it over 2,574 sessions,
+        against 4.6 s once routed (2026-11-14)."""
+        monkeypatch.setenv("SESSION_BROWSER_CACHE", "0")
+        sessions = self._corpus(tmp_path)
+        with (
+            patch.object(transcript_mod, "_PROC_MIN_CANDIDATES", 2),
+            patch.object(transcript_mod, "_probe_in_processes") as spy,
+        ):
+            spy.return_value = transcript_mod._PROC_FALLBACK
+            results = search_sessions(sessions, "reply 2")
+        assert len(spy.call_args.args[0]) == len(sessions)
+        assert sum(r.match_count for r in results) == 1
 
     def test_unusable_pool_falls_back_silently(self, tmp_path):
         """An environment that cannot spawn must still answer, via threads."""

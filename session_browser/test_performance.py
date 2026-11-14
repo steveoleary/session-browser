@@ -244,18 +244,29 @@ class TestBlessedDelta:
 class TestPrefilterInvariants:
     """Properties that must hold whatever the budgets happen to say."""
 
-    def test_a_term_in_no_session_parses_no_transcript(self, measured):
-        counts = measured["cli.search.absent"]
+    @pytest.mark.parametrize(
+        "workload", ["cli.search.absent", "cli.search.absent.stateless"]
+    )
+    def test_a_term_in_no_session_parses_no_transcript(self, measured, workload):
+        counts = measured[workload]
         assert counts["transcripts_parsed"] == 0
+        assert counts["entry_cache_loads"] == 0
         assert counts["opencode_sessions_parsed"] == 0
 
     def test_rare_term_parses_far_less_than_the_whole_corpus(self, measured):
-        rare = measured["cli.search.rare"]["transcripts_parsed"]
-        everything = measured["cli.search.common"]["transcripts_parsed"]
+        rare = measured["cli.search.rare.stateless"]["transcripts_parsed"]
+        everything = measured["cli.search.common.stateless"]["transcripts_parsed"]
         assert rare * 10 < everything, (
             f"the prefilter parsed {rare} of {everything} sessions for a term "
             "present in a handful; it is no longer ruling the corpus out"
         )
+
+    def test_rare_term_loads_far_less_than_the_whole_cache(self, measured):
+        """The same property one layer up: a scan of cached text that stops
+        ruling sessions out turns every search into a load of everything."""
+        rare = measured["cli.search.rare"]["entry_cache_loads"]
+        everything = measured["cli.search.common"]["entry_cache_loads"]
+        assert rare > 0 and rare * 10 < everything
 
     def test_native_scan_reads_less_of_the_corpus_than_the_fallback(self, measured):
         """Why ripgrep is worth a subprocess at all.
@@ -263,8 +274,8 @@ class TestPrefilterInvariants:
         Stated as a comparison rather than an absolute so it keeps meaning if
         the corpus is ever resized.
         """
-        native = measured["cli.search.rare"]["corpus_bytes_read"]
-        fallback = measured["cli.search.rare.no_rg"]["corpus_bytes_read"]
+        native = measured["cli.search.rare.stateless"]["corpus_bytes_read"]
+        fallback = measured["cli.search.rare.no_rg.stateless"]["corpus_bytes_read"]
         assert native < fallback
 
     def test_candidate_files_are_not_read_twice_to_partition_them(self, measured):
@@ -274,14 +285,135 @@ class TestPrefilterInvariants:
         worker reads every file twice. One prefilter scan per file-backed
         session is the ceiling.
         """
-        counts = measured["cli.search.rare.no_rg"]
-        file_sessions = (
-            perf_budget.CLAUDE_SESSIONS
-            + perf_budget.CLAUDE_SUBAGENTS
-            + perf_budget.CODEX_SESSIONS
-            + perf_budget.PI_SESSIONS
+        counts = measured["cli.search.rare.no_rg.stateless"]
+        assert counts["prefilter_file_scans"] == _file_sessions()
+
+
+def _file_sessions() -> int:
+    """Sessions in the corpus that live in a file of their own."""
+    return (
+        perf_budget.CLAUDE_SESSIONS
+        + perf_budget.CLAUDE_SUBAGENTS
+        + perf_budget.CODEX_SESSIONS
+        + perf_budget.PI_SESSIONS
+    )
+
+
+_CACHE_COUNTERS = (
+    "entry_cache_loads",
+    "entry_cache_stores",
+    "entry_cache_index_opens",
+    "entry_cache_bytes_read",
+    "process_pool_stores",
+    "scan_memo_hits",
+)
+
+
+def _scanned_files() -> int:
+    """Transcripts discovery has to open: the providers with no index."""
+    return (
+        perf_budget.CLAUDE_SESSIONS
+        + perf_budget.CLAUDE_SUBAGENTS
+        + perf_budget.PI_SESSIONS
+    )
+
+
+class TestScanMemoInvariants:
+    """Discovery opens a transcript once per version of it, not once per
+    command. Asserted because nothing else would notice: a memo that stopped
+    being consulted returns the same sessions, only slower."""
+
+    def test_a_warm_discovery_opens_no_transcript(self, measured):
+        counts = measured["cli.stats"]
+        assert counts["discovery_scans"] == 0
+        assert counts["scan_memo_hits"] == _scanned_files()
+        assert counts["corpus_bytes_read"] == 0
+
+    def test_the_first_discovery_opens_each_transcript_exactly_once(self, measured):
+        counts = measured["cli.stats.cold"]
+        assert counts["discovery_scans"] == _scanned_files()
+        assert counts["scan_memo_hits"] == 0
+
+    def test_one_changed_transcript_costs_one_scan(self, measured):
+        counts = measured["cli.stats.appended"]
+        assert counts["discovery_scans"] == 1
+        assert counts["scan_memo_hits"] == _scanned_files() - 1
+
+    def test_switched_off_every_transcript_is_scanned(self, measured):
+        counts = measured["cli.stats.stateless"]
+        assert counts["discovery_scans"] == _scanned_files()
+        assert (
+            counts["corpus_bytes_read"]
+            == (measured["cli.stats.cold"]["corpus_bytes_read"])
         )
-        assert counts["prefilter_file_scans"] == file_sessions
+
+
+class TestEntryCacheInvariants:
+    """What the entry cache is for, in terms that survive a re-bless.
+
+    The cache trades one parse of each transcript for never reading it again
+    until it changes. Each half of that trade can be lost without any output
+    changing, so each is asserted: the steady state reads no transcript, and
+    the first search parses each one once, not twice.
+    """
+
+    @pytest.mark.skipif(not rg_available(), reason="ripgrep absent")
+    @pytest.mark.parametrize(
+        "workload", ["cli.search.absent", "cli.search.rare", "cli.search.common"]
+    )
+    def test_a_warm_search_reads_no_transcript(self, measured, workload):
+        counts = measured[workload]
+        assert counts["transcripts_parsed"] == 0
+        assert counts["entry_cache_stores"] == 0
+        # Discovery still reads the heads and tails it always did, and that
+        # is all: statistics are the workload that does nothing else.
+        assert counts["corpus_bytes_read"] == measured["cli.stats"]["corpus_bytes_read"]
+
+    def test_a_warm_search_without_ripgrep_reads_no_transcript_either(self, measured):
+        counts = measured["cli.search.rare.no_rg"]
+        assert counts["transcripts_parsed"] == 0
+        assert counts["corpus_bytes_read"] == measured["cli.stats"]["corpus_bytes_read"]
+
+    @pytest.mark.skipif(not rg_available(), reason="ripgrep absent")
+    def test_the_first_search_parses_each_session_exactly_once(self, measured):
+        counts = measured["cli.search.rare.cold"]
+        assert counts["transcripts_parsed"] == _file_sessions()
+        assert counts["entry_cache_stores"] == _file_sessions()
+
+    @pytest.mark.skipif(not rg_available(), reason="ripgrep absent")
+    def test_the_first_build_is_routed_to_worker_processes(self, measured):
+        """Parsing a whole history is the one job big enough to need them."""
+        routed = measured["cli.search.rare.cold"]["process_pool_stores"]
+        assert routed == _file_sessions() >= transcript._PROC_MIN_CANDIDATES
+
+    @pytest.mark.skipif(not rg_available(), reason="ripgrep absent")
+    def test_one_changed_transcript_costs_one_parse(self, measured):
+        counts = measured["cli.search.rare.appended"]
+        assert counts["transcripts_parsed"] == 1
+        assert counts["entry_cache_stores"] == 1
+
+    def test_switched_off_means_never_touched(self, measured):
+        """``SESSION_BROWSER_CACHE=0`` is a promise that nothing is written
+        and nothing read back, not merely that results are the same."""
+        stateless = [name for name in measured if name.endswith(".stateless")]
+        assert stateless
+        for name in stateless:
+            touched = {c: measured[name][c] for c in _CACHE_COUNTERS}
+            assert not any(touched.values()), f"{name}: {touched}"
+
+    def test_a_listing_counts_entries_without_loading_them(self, measured):
+        counts = measured["cli.list"]
+        assert counts["entry_cache_loads"] == 0
+        assert counts["corpus_bytes_read"] == measured["cli.stats"]["corpus_bytes_read"]
+        # One header line per row returned, and not a byte of entry text --
+        # where a preview of the same rows has to read all of it.
+        assert counts["entry_cache_index_opens"] == 50
+        assert counts["entry_cache_bytes_read"] == 0
+        assert measured["cli.list.preview"]["entry_cache_bytes_read"] > 0
+
+    def test_a_cold_listing_parses_only_the_rows_it_returns(self, measured):
+        assert measured["cli.list.cold"]["transcripts_parsed"] == 50
+        assert measured["cli.list.cold"]["entry_cache_stores"] == 50
 
 
 class TestProviderScoping:
@@ -304,7 +436,14 @@ class TestMetadataPathsStayCheap:
         assert measured[workload]["transcripts_parsed"] == 0
 
     def test_get_parses_exactly_one_transcript(self, measured):
-        assert measured["cli.get"]["transcripts_parsed"] == 1
+        cold = measured["cli.get.cold"]
+        assert cold["transcripts_parsed"] == 1
+        assert cold["entry_cache_stores"] == 1
+
+    def test_get_of_a_cached_session_loads_it_once_and_parses_nothing(self, measured):
+        warm = measured["cli.get"]
+        assert warm["transcripts_parsed"] == 0
+        assert warm["entry_cache_loads"] == 1
 
 
 @pytest.mark.skipif(
@@ -321,12 +460,14 @@ class TestTheCliDoesNotPayForTheTui:
     def test_cli_search_fires_no_progress_callbacks(self, measured):
         assert measured["cli.search.rare"]["progress_callbacks"] == 0
 
-    def test_the_readout_costs_the_tui_no_extra_corpus_reads(self, measured):
+    @pytest.mark.parametrize("state", ["", ".stateless"])
+    def test_the_readout_costs_the_tui_no_extra_corpus_reads(self, measured, state):
         """Reporting progress must observe the scan, not re-walk it."""
-        cli = measured["cli.search.rare"]
-        tui = measured["tui.search.rare"]
+        cli = measured["cli.search.rare" + state]
+        tui = measured["tui.search.rare" + state]
         assert tui["corpus_bytes_read"] == cli["corpus_bytes_read"]
         assert tui["corpus_file_opens"] == cli["corpus_file_opens"]
+        assert tui["entry_cache_bytes_read"] == cli["entry_cache_bytes_read"]
 
     def test_row_progress_stays_outside_the_scan_loop(self, measured):
         """The regression that prompted all of this, pinned structurally.
@@ -358,13 +499,16 @@ class TestTheCliDoesNotPayForTheTui:
     not rg_available(), reason="ripgrep absent: native candidate scan not exercised"
 )
 class TestProcessRouting:
-    def test_snippet_shape_above_the_threshold_goes_to_processes(self, measured):
-        routed = measured["lib.search.process_route"]["process_pool_sessions"]
+    @pytest.mark.parametrize("state", ["", ".stateless"])
+    def test_snippet_shape_above_the_threshold_goes_to_processes(self, measured, state):
+        routed = measured["lib.search.process_route" + state]["process_pool_sessions"]
         assert routed >= transcript._PROC_MIN_CANDIDATES
 
-    def test_entry_retaining_shape_stays_in_process(self, measured):
+    @pytest.mark.parametrize("state", ["", ".stateless"])
+    def test_entry_retaining_shape_stays_in_process(self, measured, state):
         """Whole transcripts must not be pickled back from worker processes."""
-        assert measured["lib.search.keep_entries"]["process_pool_sessions"] == 0
+        counts = measured["lib.search.keep_entries" + state]
+        assert counts["process_pool_sessions"] == 0
 
 
 class TestTheCorpusCoversEveryCodexEra:
