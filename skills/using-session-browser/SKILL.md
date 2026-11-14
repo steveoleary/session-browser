@@ -164,6 +164,8 @@ where they disagree, `--help` describes the binary you are actually running.
 | Whole transcript | `session-browser get ID --output build/session.md` |
 | Drop harness/scratch noise | `--exclude-cwd /private/tmp/` (repeatable, applied before `--limit`) |
 | A stable snapshot while other agents are working | add `--until -30m` |
+| Today's or yesterday's sessions | `--since today`, or `--since yesterday --until yesterday` (local days) |
+| When each turn happened | `get ID --format text` stamps every entry (UTC); JSON has `timestamp` |
 | Every match, not the first N | omit `--limit` entirely — it is unbounded by default |
 | Who said it, without reading snippets | `match_roles` on each result |
 | Which session handed this one its work (via Herdr) | `get ID` reports `briefed_by` when its opening names a brief in a Claude scratchpad |
