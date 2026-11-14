@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -3352,6 +3353,57 @@ class TestPrefilterSafety:
             if any(c.isascii() for c in chr(cp).casefold())
         }
         assert set(transcript_mod._FOLD_RISK_CHARS) == risky
+
+    @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep unavailable")
+    def test_ripgrep_folds_onto_ascii_exactly_as_casefold_does(self, tmp_path):
+        """A cached session's scan is trusted as an answer, not a hint: a
+        limited search reports it as a match without loading it. That holds
+        only if ripgrep's case-insensitive match of a needle character admits
+        no codepoint whose casefold is something else -- its tables and
+        Python's are separate copies of Unicode, and either can move.
+
+        Every codepoint, one per line, against the production pattern of
+        each character a normalized needle can hold. One scan for all of
+        them finds every codepoint any of them admits; one scan each then
+        says which, over those few."""
+        lines = [chr(cp) for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF]
+        lines = [c for c in lines if c not in "\n\r"]
+        everything = tmp_path / "every-codepoint.txt"
+        everything.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        needle_chars = sorted(
+            {
+                transcript_mod.normalize_match_text(chr(cp))
+                for cp in range(32, 127)
+                if transcript_mod.normalize_match_text(chr(cp))
+            }
+        )
+
+        def admitted(patterns: list[str], path: Path) -> set[str]:
+            out = subprocess.run(
+                ["rg", "--no-config", "--text", "--line-regexp"]
+                + [arg for p in patterns for arg in ("--regexp", p)]
+                + ["--", str(path)],
+                capture_output=True,
+                check=False,
+            )
+            assert out.returncode in (0, 1), out.stderr
+            return {line for line in out.stdout.decode("utf-8").split("\n") if line}
+
+        pattern = transcript_mod._entry_text_pattern
+        some = admitted([pattern(c) for c in needle_chars], everything)
+        assert set(needle_chars) <= some  # the scan ran and saw them
+        # ... and folds past ASCII, or every check below passes vacuously:
+        # the Kelvin sign and the long s really are k and s to both.
+        assert {"K", "ſ"} <= some
+        few = tmp_path / "admitted.txt"
+        few.write_text("\n".join(sorted(some)) + "\n", encoding="utf-8")
+        wrong = {
+            (c, hex(ord(hit)))
+            for c in needle_chars
+            for hit in admitted([pattern(c)], few)
+            if transcript_mod.normalize_match_text(hit) != c
+        }
+        assert not wrong
 
 
 class TestSearchSessionsBulk:

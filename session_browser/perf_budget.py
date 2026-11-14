@@ -1335,6 +1335,12 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
     def search_common() -> None:
         _cli("search", QUERY_COMMON)
 
+    def search_common_limited() -> None:
+        _cli("search", QUERY_COMMON, "--limit", "5")
+
+    def search_common_limited_many() -> None:
+        _cli("search", QUERY_COMMON, "--limit", "160")
+
     def search_pi() -> None:
         _cli("search", QUERY_RARE, "--provider", "pi")
 
@@ -1469,6 +1475,26 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "session is loaded once and none is parsed, and above the "
             "threshold the loads are routed to worker processes.",
             warm(search_common),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.common.limit",
+            "A term in every session, and --limit 5. The scan of cached text "
+            "says which sessions match and discovery says when each was last "
+            "active, so only the rows shown are loaded: entry_cache_loads is "
+            "the file-backed sessions among those five, not the corpus. "
+            "Rising towards cli.search.common's means --limit went back to "
+            "bounding the output and not the work.",
+            warm(search_common_limited),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.common.limit_many",
+            "The same with --limit 160, enough rows that loading them is "
+            "routed to worker processes, as the unlimited search's loads are. "
+            "process_pool_sessions falling to zero means a large limit loads "
+            "on threads, which is slower than the search it replaced.",
+            warm(search_common_limited_many),
             needs_rg=True,
         ),
         Workload(

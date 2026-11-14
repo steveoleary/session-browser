@@ -10,7 +10,11 @@ machine, which holds record shapes no fixture has thought of yet:
 1. discovery returns the same sessions with the memo off, empty, and full;
 2. every session's entries, loaded back from the cache, equal a fresh parse,
    warnings included;
-3. each query finds the same sessions, counts and offsets cached as stateless.
+3. each query finds the same sessions, counts and offsets cached as stateless;
+4. and the same again when the cached ones are only scanned and deferred,
+   as a limited search defers them, then loaded -- with not one of them
+   holding no match, since a limited search reports a deferred session as a
+   match without ever reading it.
 
 It builds its caches in a temporary directory and deletes them, so it neither
 reads nor disturbs the real ones, and it exits non-zero on any disagreement.
@@ -81,6 +85,29 @@ def _answers(sessions, query) -> dict:
     }
 
 
+def _deferred_answers(sessions, query) -> tuple[dict, int, int]:
+    """:func:`_answers` by way of ``defer=True``, the deferred sessions loaded
+    afterwards; with how many were deferred and how many of those held no
+    match, which must be none."""
+    from session_browser import transcript
+
+    results = transcript.search_sessions(sessions, query, defer=True)
+    deferred = [i for i, r in enumerate(results) if r.deferred]
+    loaded = transcript.search_each([results[i].session for i in deferred], query)
+    for i, r in zip(deferred, loaded, strict=True):
+        results[i] = r
+    answers = {
+        transcript.canonical_id(r.session): (
+            r.match_count,
+            r.total_entries,
+            [(m.entry_index, m.offsets) for m in r.matches],
+        )
+        for r in results
+        if r.match_count or r.unreadable
+    }
+    return answers, len(deferred), sum(1 for r in loaded if not r.match_count)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
@@ -135,18 +162,22 @@ def main() -> int:
 
         for query in args.queries:
             cached = _answers(sessions, query)
+            deferred, held_back, empty = _deferred_answers(sessions, query)
             os.environ["SESSION_BROWSER_CACHE"] = "0"
             stateless = _answers(sessions, query)
             del os.environ["SESSION_BROWSER_CACHE"]
-            agrees = cached == stateless
+            agrees = cached == stateless and deferred == stateless and not empty
             failures += not agrees
             print(
-                f"search {query!r}: {len(stateless)} sessions, "
-                f"{'same' if agrees else 'DIFFERENT'}"
+                f"search {query!r}: {len(stateless)} sessions, {held_back} "
+                f"deferred, {'same' if agrees else 'DIFFERENT'}"
             )
+            if empty:
+                print(f"  {empty} deferred session(s) held no match")
             if not agrees:
-                for ident in sorted(cached.keys() ^ stateless.keys())[:5]:
-                    print(f"  only one side: {ident}")
+                for side in (cached, deferred):
+                    for ident in sorted(side.keys() ^ stateless.keys())[:5]:
+                        print(f"  only one side: {ident}")
     print("agreed" if not failures else f"{failures} disagreement(s)")
     return 1 if failures else 0
 

@@ -21,8 +21,10 @@ those instead:
 
 * **search** scans the entry text with ripgrep. It is the canonical text, so
   there are no JSON escapes to see through and no parts the parser would have
-  joined, which makes every printable-ASCII query scannable and nearly every
-  candidate a real match. 0.05-0.12 s over the same corpus.
+  joined, which makes every printable-ASCII query scannable and every
+  candidate a real match: the scan is exact, not merely safe, so a search
+  that shows only some of its matches loads only those. 0.05-0.12 s over the
+  same corpus.
 * **a parse** becomes a load: 54 sessions in 0.025 s against about a second.
 
 Two files per session, and for a few a third, in

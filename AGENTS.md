@@ -190,10 +190,21 @@ optimisation of that: `test_entry_cache.py` holds search to the same answer
 cold, warm, without ripgrep and switched off. A new kind of phrase or record
 belongs in that file's `QUERIES` or `_corpus`.
 
+**The scan of cached text is an answer, not a hint.** `search --limit` under a
+metadata sort takes a cached session's match from that scan alone and loads
+only the rows it shows, so the truncation warning's count and dates rest on
+the scan being exact in both directions. Change how the matcher normalizes
+text -- `normalize_match_text`, `MATCH_STRIP_CHARS` -- and
+`_entry_text_pattern` has to say the same thing in ripgrep's terms.
+`test_ripgrep_folds_onto_ascii_exactly_as_casefold_does` holds ripgrep's case
+folding to `str.casefold` codepoint by codepoint, and the deferred-search tests
+in `test_entry_cache.py` hold the rest.
+
 `benchmarks/cache_agreement.py` asks the same of the history on your own
 machine, which holds record shapes no fixture has thought of: discovery three
 ways, every session's cached entries against a fresh parse, and each query you
-give it cached against stateless. It builds its caches in a temporary directory,
+give it cached, and deferred as a limited search defers it, against stateless.
+It builds its caches in a temporary directory,
 so it never touches the real ones; run it after changing a parser, a scanner or
 either cache. To try a change by hand without disturbing your real cache, point
 `XDG_CACHE_HOME` at a scratch directory first -- the editable install means

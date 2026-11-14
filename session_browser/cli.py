@@ -40,6 +40,7 @@ from .transcript import (
     make_snippet,
     normalize_match_text,
     render_markdown,
+    search_each,
     search_sessions,
     session_duration_seconds,
     session_to_dict,
@@ -2320,6 +2321,47 @@ def _truncation_warning(args, dropped) -> str:
     return f"--limit {args.limit} dropped {len(dropped)} {noun}(s){span}; {hint}"
 
 
+def _settle_deferred(
+    matched: list, queries: list[str], keep: bool, limit: int, summaries
+) -> tuple[list, list]:
+    """Load the deferred matches --limit will show; returns (matched, the
+    rows found unreadable on the way, which drop out of it).
+
+    ``search_sessions(defer=True)`` settles whether a session matches from
+    the scan of its cached entry text alone and loads none of them. Under
+    --sort recent or oldest the order comes from session metadata too, so the
+    rows --limit keeps are known before anything is read: they are loaded
+    here, and the rest lend only their dates to the truncation warning. For
+    "the" over 2,574 sessions that was 1.6 s to 0.3 s (2026-11-14).
+
+    A loaded row is checked, not trusted. One that holds no match after all,
+    and has no summary match to stand on, is dropped and the next one pulled
+    in. The scan is exact, so that can only happen to a transcript changed
+    or removed between the scan and the load, which is also the only way a
+    row here turns out unreadable. The rows past the limit are never read:
+    one that went unreadable that way is not reported, and the warning
+    counts it as a match.
+    """
+    out: list = []
+    unreadable: list = []
+    pos = 0
+    while len(out) < limit and pos < len(matched):
+        batch = matched[pos : pos + limit - len(out)]
+        pos += len(batch)
+        pending = [r.session for r in batch if r.deferred]
+        loaded = iter(search_each(pending, queries, keep_entries=keep))
+        for r in batch:
+            if r.deferred:
+                r = next(loaded)
+                if r.unreadable:
+                    unreadable.append(r)
+                    continue
+                if r.match_count == 0 and canonical_id(r.session) not in summaries:
+                    continue
+            out.append(r)
+    return out + matched[pos:], unreadable
+
+
 def cmd_search(args) -> int:
     queries = [q.strip() for q in args.query]
     if not all(queries):
@@ -2344,7 +2386,18 @@ def cmd_search(args) -> int:
     anchor_ts = around[1] if around is not None else None
     candidates = apply_filters(discovered, args, apply_limit=False, warnings=warnings)
     keep = args.mode == "full"
-    results = search_sessions(candidates, queries, keep_entries=keep)
+    # --limit bounds the work and not only the output when nothing but
+    # session metadata decides which matches it keeps: see _settle_deferred.
+    # --role and --match-all decide from the matches themselves, and so do
+    # --sort matches and first-said.
+    defer = (
+        args.limit is not None
+        and args.limit >= 0
+        and args.sort in ("recent", "oldest")
+        and roles is None
+        and not (args.match_all and len(queries) > 1)
+    )
+    results = search_sessions(candidates, queries, keep_entries=keep, defer=defer)
     if roles is not None:
         _keep_matches_in_roles(results, set(roles))
     summary_map = {
@@ -2360,14 +2413,13 @@ def cmd_search(args) -> int:
         r
         for r in results
         if not r.unreadable
-        and (r.match_count > 0 or canonical_id(r.session) in qualifying_summaries)
+        and (
+            r.match_count > 0
+            or r.deferred
+            or canonical_id(r.session) in qualifying_summaries
+        )
     ]
     skipped = [r for r in results if r.unreadable]
-    for r in matched:
-        # Summary-only matches were often prefilter-skipped, never parsed:
-        # their total_entries would read 0 and look like a corrupt record.
-        if r.match_count == 0 and r.total_entries == 0:
-            r.total_entries = _entry_count(r.session) or 0
     if args.match_all and len(queries) > 1:
         wanted = {q.casefold() for q in queries}
         matched = [
@@ -2392,10 +2444,26 @@ def cmd_search(args) -> int:
         _ceiling = datetime.max.replace(tzinfo=UTC)
         # Stable: sessions that never said it keep their recency order, last.
         matched.sort(key=lambda r: _first_said_time(r) or _ceiling)
+    if defer:
+        matched, unreadable = _settle_deferred(
+            matched, queries, keep, args.limit, qualifying_summaries
+        )
+        if unreadable:
+            # Reported where every other skipped session is, in input order.
+            order = {id(r.session): i for i, r in enumerate(results)}
+            skipped = sorted(skipped + unreadable, key=lambda r: order[id(r.session)])
+            for r in unreadable:
+                summary_map.pop(canonical_id(r.session), None)
     if args.limit is not None and len(matched) > args.limit >= 0:
         warnings.append(_truncation_warning(args, matched[args.limit :]))
     if args.limit is not None:
         matched = _limited(matched, args.limit)
+    for r in matched:
+        # Summary-only matches were often prefilter-skipped, never parsed:
+        # their total_entries would read 0 and look like a corrupt record.
+        # Only a row that is shown reports it, so this waits for the limit.
+        if r.match_count == 0 and r.total_entries == 0:
+            r.total_entries = _entry_count(r.session) or 0
     if args.output_dir:
         _report_warnings_stderr(warnings)
         _report_skipped_stderr(skipped)

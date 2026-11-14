@@ -19,12 +19,18 @@ import pytest
 
 import session_browser.transcript as transcript_mod
 from session_browser import deletion, entry_cache
+from session_browser.cli import run_cli
 from session_browser.discovery import Session, scan_claude
-from session_browser.test_transcript import _result_view, write_claude_jsonl
+from session_browser.test_transcript import (
+    _result_view,
+    make_opencode_db_multi,
+    write_claude_jsonl,
+)
 from session_browser.transcript import (
     TranscriptEntry,
     count_entries,
     iter_entries,
+    search_each,
     search_session_word_hits,
     search_sessions,
 )
@@ -550,6 +556,36 @@ class TestSearchAgreesWithTheStatelessPath:
             _answer(r) for r in search_sessions(sessions, query, keep_entries=True)
         ]
 
+    @pytest.mark.parametrize("query", QUERIES, ids=str)
+    def test_what_a_deferred_search_defers_settles_to_the_reference(
+        self, tmp_path, monkeypatch, query
+    ):
+        """defer=True takes the scan's word that a cached session matches
+        and loads nothing. Loading what it deferred must give back the
+        reference exactly, and nothing may be deferred that holds no match:
+        a limited search shows a deferred session's date as a match without
+        ever reading it."""
+        sessions = _corpus(tmp_path)
+        monkeypatch.setenv("SESSION_BROWSER_CACHE", "0")
+        reference = [_answer(r) for r in search_sessions(sessions, query)]
+        monkeypatch.delenv("SESSION_BROWSER_CACHE")
+        search_sessions(sessions, "anything")  # the first search fills the cache
+        results = search_sessions(sessions, query, defer=True)
+        deferred = [i for i, r in enumerate(results) if r.deferred]
+        loaded = search_each([results[i].session for i in deferred], query)
+        assert all(r.match_count for r in loaded)
+        for i, r in zip(deferred, loaded, strict=True):
+            results[i] = r
+        assert [_answer(r) for r in results] == reference
+        if query == "wombat":  # and it does defer, or this proves nothing
+            assert {sessions[i].id for i in deferred} == {
+                "plain",
+                "marked",
+                "upper",
+                "escaped",
+                "joined",
+            }
+
     def test_the_reference_actually_finds_what_these_queries_are_for(
         self, tmp_path, monkeypatch
     ):
@@ -651,6 +687,259 @@ class TestWhatAWarmSearchCosts:
         )
         assert _files(cache_home, ".txt") == []
         assert _files(cache_home, ".idx") == []
+
+
+def _on(session: Session, day: int, summary: str = "") -> Session:
+    """*session*, last active on 2026-06-<day>, under *summary*."""
+    session.updated_at = f"2026-06-{day:02d}T10:00:00+00:00"
+    session.summary = summary
+    return session
+
+
+def _dated_corpus(tmp_path) -> list[Session]:
+    """Sessions in a known recency order, each reaching a match another way.
+
+    Newest first: a miss, then a match from every path a limited search can
+    take -- cached Claude, Pi and Codex sessions, OpenCode's database, one
+    the cache will not hold, one matching on its summary alone, one that
+    cannot be read -- so a window of any size cuts across all of them.
+    """
+    pi = tmp_path / "pi10.jsonl"
+    pi.write_text(
+        json.dumps(
+            {
+                "type": "message",
+                "timestamp": "2026-06-10T10:00:00Z",
+                "message": {"role": "user", "content": "pi says wombat"},
+            }
+        )
+        + "\n"
+    )
+    make_opencode_db_multi(tmp_path, {"oc8": ["an opencode wombat", "and more"]})
+    codex = _codex(
+        tmp_path,
+        "codex5",
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "codex saw a wombat"}],
+            },
+        },
+    )
+    return [
+        _on(_claude(tmp_path, "newest-miss", "nothing to see", "still nothing"), 12),
+        _on(_claude(tmp_path, "c11", "a wombat at dawn", "noted"), 11),
+        _on(Session(id="pi10", provider="pi", content_path=str(pi)), 10),
+        _on(_claude(tmp_path, "census", "no animals", "none"), 9, "Wombat census"),
+        _on(Session(id="oc8", provider="opencode"), 8),
+        _on(_claude(tmp_path, "c7", "a wombat, a wombat", "two of them"), 7),
+        _on(_claude(tmp_path, "uncached6", "a wombat it will not keep", "ok"), 6),
+        _on(codex, 5),
+        _on(
+            Session(
+                id="gone4", provider="claude", content_path=str(tmp_path / "gone4")
+            ),
+            4,
+        ),
+        _on(_claude(tmp_path, "c3", "a `wom`**bat** in markers", "a quokka"), 3),
+        _on(_claude(tmp_path, "c2", "wombat", "quokka"), 2),
+        _on(_claude(tmp_path, "c1", "only a quokka", "fine"), 1),
+    ]
+
+
+# Each is run with the cache off, which is the reference, then cold, warm and
+# without ripgrep, and all four must print the same thing.
+LIMITED = [
+    ("wombat", "--limit", "0"),
+    ("wombat", "--limit", "1"),
+    ("wombat", "--limit", "3"),
+    ("wombat", "--limit", "50"),
+    ("wombat", "--sort", "oldest", "--limit", "2"),
+    ("wombat", "--mode", "full", "--limit", "2"),
+    ("wombat", "--mode", "ids", "--format", "text", "--limit", "4"),
+    ("wombat", "--format", "jsonl", "--limit", "2"),
+    ("wombat", "quokka", "--limit", "3"),  # alternates
+    ("census", "--limit", "1"),  # a summary and nothing else
+    ("wombat", "--around", "claude:c7", "--limit", "3"),  # nearest first
+    ("wombat", "--provider", "claude", "--limit", "2"),
+]
+
+
+class TestALimitedSearchLoadsOnlyWhatItShows:
+    """--limit under a metadata sort bounds the work, not just the output.
+
+    The cached-text scan says which sessions match, and discovery says when
+    each was last active, so the rows a limit keeps are known before any is
+    read and only those are loaded. Whatever that skips, the output must be
+    the stateless path's, byte for byte, in every shape search prints.
+    """
+
+    @pytest.fixture
+    def run(self, tmp_path, monkeypatch, capsys):
+        sessions = _dated_corpus(tmp_path)
+        refused = next(s for s in sessions if s.id == "uncached6").content_path
+        real_store = entry_cache.store
+
+        def store(ref, *args, **kwargs):
+            # One session the cache will not hold, which is then searched the
+            # stateless way inside an otherwise cached search.
+            if ref.source == refused:
+                return False
+            return real_store(ref, *args, **kwargs)
+
+        monkeypatch.setattr(entry_cache, "store", store)
+        monkeypatch.setattr(
+            "session_browser.cli.discover_all", lambda *a, **k: sessions
+        )
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+
+        def run(*argv, cache=True, rg=True):
+            with pytest.MonkeyPatch.context() as mp:
+                if not cache:
+                    mp.setenv("SESSION_BROWSER_CACHE", "0")
+                if not rg:
+                    mp.setattr(transcript_mod, "_rg_entry_text_candidates", _none)
+                    mp.setattr(transcript_mod, "_rg_candidate_paths", _none)
+                code = run_cli(["search", *argv])
+            captured = capsys.readouterr()
+            return code, captured.out, captured.err
+
+        run.sessions = sessions
+        return run
+
+    @pytest.mark.parametrize("argv", LIMITED, ids=" ".join)
+    def test_prints_what_the_stateless_path_prints(self, run, argv):
+        reference = run(*argv, cache=False)
+        assert reference[0] == 0
+        assert run(*argv) == reference  # cold
+        assert run(*argv) == reference  # warm
+        assert run(*argv, rg=False) == reference
+
+    def test_the_reference_is_worth_agreeing_with(self, run):
+        _, out, _ = run("wombat", "--limit", "3", cache=False)
+        data = json.loads(out)
+        assert [r["id"] for r in data["results"]] == [
+            "claude:c11",
+            "pi:pi10",
+            "claude:census",
+        ]
+        assert data["results"][2]["summary_matches"] == ["wombat"]
+        assert [s["id"] for s in data["skipped"]] == ["claude:gone4"]
+        assert any("--limit 3 dropped 6 matched" in w for w in data["warnings"])
+
+    def test_only_the_rows_shown_are_loaded(self, tmp_path, run):
+        run("wombat")  # the first search fills the cache
+        with (
+            patch.object(entry_cache, "load", wraps=entry_cache.load) as load,
+            patch.object(
+                transcript_mod, "_parse_entries", wraps=transcript_mod._parse_entries
+            ) as parse,
+        ):
+            code, out, _ = run("wombat", "--limit", "2")
+        assert code == 0
+        assert [r["id"] for r in json.loads(out)["results"]] == [
+            "claude:c11",
+            "pi:pi10",
+        ]
+        hits = {Path(c.args[0].source).stem for c in load.call_args_list}
+        # The two shown, and the one session the cache refuses, which is
+        # searched as it always was: a load that misses, then a parse.
+        assert hits == {"c11", "pi10", "uncached6"}
+        # Nothing is parsed but what the cache does not hold, limit or none.
+        assert {c.args[0].id for c in parse.call_args_list} == {"uncached6", "gone4"}
+
+    def test_a_false_candidate_is_dropped_and_the_next_one_shown(self, run):
+        """The scan is exact, so this cannot happen -- which is why a shown
+        row is still checked rather than trusted."""
+        reference = run("wombat", "--limit", "2", cache=False)
+        run("wombat")
+        miss = next(s for s in run.sessions if s.id == "newest-miss")
+        planted = entry_cache.locate(miss.provider, miss.id, miss.content_path).text
+        real = transcript_mod._rg_entry_text_candidates
+
+        def scan(texts, needles):
+            found = real(texts, needles)
+            return None if found is None else found | {planted}
+
+        with patch.object(transcript_mod, "_rg_entry_text_candidates", scan):
+            assert run("wombat", "--limit", "2") == reference
+
+    def test_a_session_gone_before_its_load_is_skipped_as_ever(self, run):
+        """Removed after the scan named it and before the load: reported as
+        unreadable, in the place it would have been, and the next row shown."""
+        run("wombat")
+        victim = next(s for s in run.sessions if s.id == "c11").content_path
+        real = transcript_mod._rg_entry_text_candidates
+
+        def scan(texts, needles):
+            found = real(texts, needles)
+            os.unlink(victim)
+            return found
+
+        with patch.object(transcript_mod, "_rg_entry_text_candidates", scan):
+            got = run("wombat", "--limit", "2")
+        reference = run("wombat", "--limit", "2", cache=False)  # gone from the start
+        assert got == reference
+        assert [s["id"] for s in json.loads(got[1])["skipped"]] == [
+            "claude:c11",
+            "claude:gone4",
+        ]
+
+    def test_many_rows_are_loaded_on_worker_processes(self, run):
+        run("wombat")
+        with (
+            patch.object(transcript_mod, "_PROC_MIN_CANDIDATES", 3),
+            patch.object(
+                transcript_mod,
+                "_probe_in_processes",
+                return_value=transcript_mod._PROC_FALLBACK,
+            ) as route,
+        ):
+            code, out, _ = run("wombat", "--provider", "claude", "--limit", "5")
+        assert code == 0
+        # The deferred rows among the five shown, in one batch. The summary
+        # match needs no load, and the session the cache refuses was searched
+        # with the rest, on threads: two raw sessions are below the threshold.
+        assert route.call_count == 1
+        assert [s.id for _, s in route.call_args.args[0]] == ["c11", "c7", "c3"]
+        # The pool was unusable here, so threads loaded the same rows.
+        assert [r["id"] for r in json.loads(out)["results"]] == [
+            "claude:c11",
+            "claude:census",
+            "claude:c7",
+            "claude:uncached6",
+            "claude:c3",
+        ]
+
+    def test_output_files_match_too(self, tmp_path, run):
+        def written(out_dir, **kw):
+            code, _, _ = run(
+                "wombat",
+                "--mode",
+                "full",
+                "--limit",
+                "2",
+                "--output-dir",
+                str(out_dir),
+                **kw,
+            )
+            assert code == 0
+            files = {p.name: p.read_text() for p in sorted(out_dir.iterdir())}
+            manifest = json.loads(files.pop("manifest.json"))
+            manifest.pop("generated_at")
+            return manifest, files
+
+        reference = written(tmp_path / "reference", cache=False)
+        run("wombat")
+        assert written(tmp_path / "cached") == reference
+        assert len(reference[1]) == 2  # a transcript per row, and not empty
+        assert all("wombat" in text for text in reference[1].values())
+
+
+def _none(*_args, **_kwargs):
+    return None
 
 
 class TestBuildingInWorkerProcesses:

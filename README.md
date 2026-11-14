@@ -225,6 +225,10 @@ directory and last activity), so that listing does not reopen every transcript.
   long as one search used to. After that only sessions that changed are parsed
   again: on that machine a search that took four seconds takes a third of one,
   and one for a file name or a commit hash, which took fifteen, takes the same.
+  With `--limit`, so does a word in nearly every session: the cached text says
+  which sessions match before any of them is read, so only the rows shown are
+  read -- unless `--role`, `--match-all` or `--sort matches` or `first-said`
+  needs every match counted first.
 - It is checked against each transcript's size and modification time on every
   read, and rebuilt after an upgrade changes how transcripts are parsed. It can
   be stale only by being slow, never by being wrong.

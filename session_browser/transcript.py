@@ -412,6 +412,10 @@ class SessionSearchResult:
     unreadable: bool = False
     entries: list[TranscriptEntry] | None = None
     total_entries: int = 0
+    # Known to match, and not yet loaded: only ever set when the caller asked
+    # search_sessions to defer, and then everything above is still empty.
+    # search_each loads it.
+    deferred: bool = False
 
 
 @dataclass(frozen=True)
@@ -1583,6 +1587,23 @@ def _entry_text_may_match(paths: tuple[str, ...], needles: list[str]) -> bool:
     return False
 
 
+def _entry_text_pattern(needle: str) -> str:
+    """The ripgrep pattern a scan of cached entry text looks for *needle* by.
+
+    Case-insensitive, with a run of the stripped markdown markers allowed
+    between any two characters, which is the matcher's normalization spelled
+    as a pattern. That makes the scan exact rather than merely safe, and
+    search leans on it: ``search_sessions(defer=True)`` reports a session as
+    a match on this pattern's word alone. It holds because ripgrep folds no
+    character onto a printable-ASCII one that ``str.casefold`` does not, and
+    ``test_ripgrep_folds_onto_ascii_exactly_as_casefold_does`` holds ripgrep
+    to that for every codepoint.
+    """
+    joiner = f"[{re.escape(MATCH_STRIP_CHARS)}]*"
+    pattern = joiner.join(ch if ch == " " else re.escape(ch) for ch in needle)
+    return f"(?i:{pattern})"
+
+
 def _rg_entry_text_candidates(texts: list[str], needles: list[str]) -> set[str] | None:
     """Cached entry-text files that hold a needle, found by ripgrep.
 
@@ -1600,7 +1621,6 @@ def _rg_entry_text_candidates(texts: list[str], needles: list[str]) -> set[str] 
         return None
     if not texts:
         return set()
-    joiner = f"[{re.escape(MATCH_STRIP_CHARS)}]*"
     args = [
         rg,
         "--no-config",
@@ -1612,8 +1632,7 @@ def _rg_entry_text_candidates(texts: list[str], needles: list[str]) -> set[str] 
         "--null",
     ]
     for needle in needles:
-        pattern = joiner.join(ch if ch == " " else re.escape(ch) for ch in needle)
-        args.extend(("--regexp", f"(?i:{pattern})"))
+        args.extend(("--regexp", _entry_text_pattern(needle)))
     args.append("--")
 
     # Named relative to the cache directory and run from inside it. A cache
@@ -2060,6 +2079,7 @@ def search_sessions(
     keep_entries: bool = False,
     cancelled: Callable[[], bool] | None = None,
     progress: ProgressFn | None = None,
+    defer: bool = False,
 ) -> list[SessionSearchResult]:
     """Search many sessions; returns one result per session, in input order.
 
@@ -2071,6 +2091,15 @@ def search_sessions(
     sessions are reported exactly as search_session reports them. Sessions
     the prefilter rules out report total_entries == 0 without being parsed;
     they have no matches, so search output never surfaces them.
+
+    *defer* is for a caller that will show only some of the matches. A
+    session whose parsed entries are cached is then decided by the scan of
+    that text alone, which is exact -- a file it returns holds a match and
+    one it passes over holds none -- and a match comes back ``deferred``,
+    with nothing loaded, for :func:`search_each` to load if it is wanted.
+    Every other session is searched as it would be without the flag: one the
+    cache does not hold, one in OpenCode's database, and every session when
+    no scan of cached text ran (no ripgrep, or a phrase it cannot take).
     """
     results: dict[int, SessionSearchResult] = {}
     opencode_ix: list[int] = []
@@ -2180,6 +2209,24 @@ def search_sessions(
                 sorted(path for cached in texts.values() for path in cached),
                 text_needles,
             )
+        # The file sessions still to probe. Deferring takes the cached ones
+        # out here, answered, so nothing below sees them: not the probes, not
+        # the process route, not the progress count. A broad phrase then
+        # costs its caller the scan and no more -- "the" over 2,574 sessions
+        # was 1.6 s, 1.4 s of it loading 2,384 matches to show five
+        # (2026-11-14).
+        probe_ix = file_ix
+        if defer and text_candidates is not None:
+            probe_ix = []
+            for i in file_ix:
+                cached = texts.get(i)
+                if cached is None:
+                    probe_ix.append(i)
+                else:
+                    results[i] = SessionSearchResult(
+                        sessions[i],
+                        deferred=any(path in text_candidates for path in cached),
+                    )
         # With every scan answered, deciding a session is a set lookup, and
         # for a phrase no scan can take it is a constant yes. Only a phrase
         # that could have been scanned and was not -- no ripgrep, or a slash
@@ -2200,10 +2247,10 @@ def search_sessions(
             # count is exact without asking, and asking would be ruinous:
             # must_parse would read each file here and again in the worker.
             read_total = (
-                sum(1 for i in file_ix if must_parse(i)) if scanned else len(file_ix)
+                sum(1 for i in probe_ix if must_parse(i)) if scanned else len(probe_ix)
             )
             progress("reading", 0, read_total)
-        if file_ix:
+        if probe_ix:
             # Only the ids/snippets shape goes to processes. keep_entries=True
             # asks for every entry of every matching session, which is the
             # whole corpus text for a broad query -- and it is what the TUI's
@@ -2213,8 +2260,8 @@ def search_sessions(
             # _file_may_match serially in the parent, reading each file once
             # here and again in the worker.
             parsed = None
-            if not keep_entries and scanned and len(file_ix) >= _PROC_MIN_CANDIDATES:
-                proc_ix = [i for i in file_ix if must_parse(i)]
+            if not keep_entries and scanned and len(probe_ix) >= _PROC_MIN_CANDIDATES:
+                proc_ix = [i for i in probe_ix if must_parse(i)]
                 if len(proc_ix) >= _PROC_MIN_CANDIDATES:
                     parsed = _probe_in_processes(
                         [(i, sessions[i]) for i in proc_ix], query, cancelled
@@ -2223,10 +2270,10 @@ def search_sessions(
                         parsed = None  # no pool here; threads answer
                     else:
                         # Prefiltered-out sessions never left the parent.
-                        for i in set(file_ix) - set(proc_ix):
+                        for i in set(probe_ix) - set(proc_ix):
                             parsed[i] = SessionSearchResult(sessions[i])
             if parsed is None:
-                results.update(zip(file_ix, ex.map(probe, file_ix), strict=True))
+                results.update(zip(probe_ix, ex.map(probe, probe_ix), strict=True))
             else:
                 results.update(parsed)
         if oc_fut is not None:
@@ -2236,6 +2283,34 @@ def search_sessions(
             # to it once the file phase is done.
             results.update(zip(opencode_ix, oc_fut.result(), strict=True))
     return [results[i] for i in range(len(sessions))]
+
+
+def search_each(
+    sessions: list[Session],
+    query: str | list[str],
+    *,
+    keep_entries: bool = False,
+) -> list[SessionSearchResult]:
+    """:func:`search_session` for each of *sessions*, in order, and no scan.
+
+    For sessions already known to match -- the ones ``search_sessions(...,
+    defer=True)`` left unloaded -- so there is nothing to rule out first and
+    the whole cost is the load. Routed as search_sessions routes its own:
+    enough of them in the ids/snippets shape go to worker processes, and the
+    rest are read on threads.
+    """
+    if not keep_entries and len(sessions) >= _PROC_MIN_CANDIDATES:
+        done = _probe_in_processes(list(enumerate(sessions)), query, None)
+        if done is not _PROC_FALLBACK:
+            return [done[i] for i in range(len(sessions))]
+    if len(sessions) < 2:
+        return [search_session(s, query, keep_entries=keep_entries) for s in sessions]
+    with ThreadPoolExecutor(max_workers=min(len(sessions), _SEARCH_THREADS)) as ex:
+        return list(
+            ex.map(
+                lambda s: search_session(s, query, keep_entries=keep_entries), sessions
+            )
+        )
 
 
 def _ticking_rows(rows: Iterable[tuple], progress: ProgressFn):
