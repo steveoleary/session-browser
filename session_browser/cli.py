@@ -246,6 +246,7 @@ _SEARCH_RESULT_KEYS = _SESSION_KEYS + (
     "match_roles",
     "first_authored_match",
     "last_authored_match",
+    "first_said_at",
     "parse_warnings",
     "snippets",
     "snippets_omitted",
@@ -268,7 +269,8 @@ With any match, "match_roles" counts every match by its entry's role (role ->
 count, summing to match_count, never capped by --max-snippets), and
 "first_authored_match"/"last_authored_match" are the entry indices of the
 first and last matching user or assistant entry: null when only tool or
-system text matched.
+system text matched. "first_said_at" is when that first one was written (null
+when it was not timestamped), and what --sort first-said orders by.
 With --role, a match counts only if its entry has one of those roles, and
 everything is computed from those matches alone: which sessions are returned
 (before --limit), match_count, match_roles, first/last_match, snippets and
@@ -668,11 +670,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_search.add_argument(
         "--sort",
-        choices=["recent", "matches", "oldest"],
+        choices=["recent", "matches", "oldest", "first-said"],
         default="recent",
         help="result order: last activity, newest first (default); "
-        "match count; or oldest, by that same last-activity time, not by "
-        "when a session started (for targets buried under newer matches)",
+        "match count; oldest, by that same last-activity time, not by "
+        "when a session started (for targets buried under newer matches); "
+        "or first-said, by first_said_at, earliest first -- for 'when was "
+        "this first said', which last activity cannot answer for a session "
+        "that ran on long after. Sessions that only quote it come last",
     )
     p_search.add_argument(
         "--context",
@@ -2307,6 +2312,7 @@ def _truncation_warning(args, dropped) -> str:
         f"may be old, narrow with --since/--until, or use {alts}",
         "oldest": f"the newest {what} were dropped first",
         "matches": "the lowest match counts were dropped first",
+        "first-said": "the sessions that said it latest were dropped first",
     }[args.sort]
     return f"--limit {args.limit} dropped {len(dropped)} {noun}(s){span}; {hint}"
 
@@ -2379,6 +2385,10 @@ def cmd_search(args) -> int:
     elif args.sort == "oldest":
         _floor = datetime.min.replace(tzinfo=UTC)
         matched.sort(key=lambda r: _session_time(r.session) or _floor)
+    elif args.sort == "first-said":
+        _ceiling = datetime.max.replace(tzinfo=UTC)
+        # Stable: sessions that never said it keep their recency order, last.
+        matched.sort(key=lambda r: _first_said_time(r) or _ceiling)
     if args.limit is not None and len(matched) > args.limit >= 0:
         warnings.append(_truncation_warning(args, matched[args.limit :]))
     if args.limit is not None:
@@ -2596,6 +2606,28 @@ def _clip_to(text: str, limit: int) -> str:
     if limit == 0 or len(text) <= limit:
         return text
     return text[:limit] + f"… [clipped {len(text) - limit} chars]"
+
+
+def _first_said(r):
+    """The first match in an entry a person or agent wrote (user or
+    assistant), among the matches --role kept; None if only tools matched."""
+    for m in r.matches:
+        if m.entry.role == "user" or m.entry.role == "assistant":
+            return m
+    return None
+
+
+def _first_said_time(r) -> datetime | None:
+    """When _first_said's entry was written, or None when it was not stamped.
+    From the entry search already holds: nothing is read for it."""
+    m = _first_said(r)
+    if m is None or not m.entry.timestamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(m.entry.timestamp)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 def _keep_matches_in_roles(results, roles: set[str]) -> None:
@@ -2821,6 +2853,8 @@ def _result_item(
         item["match_roles"] = dict(sorted(roles.items()))
         item["first_authored_match"] = authored[0] if authored else None
         item["last_authored_match"] = authored[-1] if authored else None
+        first = _first_said(r)
+        item["first_said_at"] = first.entry.timestamp or None if first else None
     if r.warnings:
         item["parse_warnings"] = r.warnings
     multi = len(args.query) > 1

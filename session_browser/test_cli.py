@@ -4343,3 +4343,70 @@ class TestCalls:
         assert contract["call"] == _key_union(calls)
         assert contract["count"] == _key_union(payloads[1]["counts"])
         assert contract["filters"] == _key_union(p["filters"] for p in payloads)
+
+
+class TestSortFirstSaid:
+    """--sort oldest orders by last activity, so 'when was this first said'
+    landed on whichever session went quiet earliest. first-said orders by
+    the first entry that said it."""
+
+    def _session(self, tmp_path, sid, said_at, updated, *, quoted=False):
+        path = tmp_path / f"{sid}.jsonl"
+        record = (
+            {
+                "type": "user",
+                "timestamp": said_at,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t",
+                            "content": "the numbat plan",
+                        }
+                    ]
+                },
+            }
+            if quoted
+            else {
+                "type": "user",
+                "timestamp": said_at,
+                "message": {"content": "the numbat plan"},
+            }
+        )
+        path.write_text(json.dumps(record) + "\n")
+        return Session(
+            id=sid,
+            provider="claude",
+            summary=sid,
+            updated_at=updated,
+            content_path=str(path),
+        )
+
+    def test_orders_by_when_it_was_first_said(self, tmp_path, monkeypatch, capsys):
+        sess = [
+            # Said first, but went on long after.
+            self._session(tmp_path, "early", "2026-06-01T09:00:00Z", "2026-06-10"),
+            self._session(tmp_path, "later", "2026-06-05T09:00:00Z", "2026-06-06"),
+            self._session(
+                tmp_path, "quote", "2026-05-01T09:00:00Z", "2026-05-02", quoted=True
+            ),
+        ]
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setattr("session_browser.cli.discover_all", lambda *a, **k: sess)
+
+        def ids(*argv):
+            assert run_cli(["search", "numbat plan", "--mode", "ids", *argv]) == 0
+            results = json.loads(capsys.readouterr().out)["results"]
+            return [(r["id"], r["first_said_at"]) for r in results]
+
+        assert ids("--sort", "first-said") == [
+            ("claude:early", "2026-06-01T09:00:00Z"),
+            ("claude:later", "2026-06-05T09:00:00Z"),
+            # Only quoted in tool output: never said, so last.
+            ("claude:quote", None),
+        ]
+        assert [i for i, _ in ids("--sort", "oldest")] == [
+            "claude:quote",
+            "claude:later",
+            "claude:early",
+        ]
