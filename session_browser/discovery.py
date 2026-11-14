@@ -53,9 +53,10 @@ class Session:
     subagent_kind: str | None = None
     # The model the session ran on, spelled as that tool's own --model flag
     # takes it: "gpt-6.1-sol" for Codex, "opencode-go/deepseek-v4.1-flash"
-    # for Pi. None when it is not recorded anywhere discovery reads -- Claude
-    # writes it only on assistant records past the head, OpenCode 1.x only
-    # per message -- so None is "not known", never "no model".
+    # for Pi, "opencode/deepseek-v4.1-flash-free" for OpenCode 2.x. None when
+    # it is not recorded anywhere discovery reads -- Claude writes it only on
+    # assistant records past the head, OpenCode 1.x only per message -- so
+    # None is "not known", never "no model".
     model: str | None = None
     # One conversation in two files. When Claude Code resumes a session into
     # a new one, it copies the history into the new file and writes a
@@ -960,9 +961,9 @@ def _codex_session_from_file(f: Path) -> Session | None:
         # A child whose rollout opens with its spawner's history: the
         # first user message in the file is the ROOT's prompt, not
         # this session's. Named as the index names it instead.
-        summary = _codex_child_label(payload)
+        summary, model = _codex_child_label(payload), None
     else:
-        summary = _codex_first_user_message(readable)
+        summary, model = _codex_head(readable)
     return Session(
         id=sid,
         provider="codex",
@@ -977,6 +978,7 @@ def _codex_session_from_file(f: Path) -> Session | None:
         content_path=str(f),
         parent_id=parent_id,
         subagent_kind=kind,
+        model=model,
     )
 
 
@@ -1174,13 +1176,27 @@ def _codex_repo_name(cwd: str, origin_url: str) -> str:
 
 
 def _codex_first_user_message(path: Path) -> str:
-    """Extract first user message from a codex JSONL for the summary.
+    """Extract first user message from a codex JSONL for the summary."""
+    return _codex_head(path)[0]
+
+
+def _codex_head(path: Path) -> tuple[str, str | None]:
+    """(summary, model) from a rollout's head: the first user message, and the
+    model of a ``turn_context`` the scan passes on the way to it.
 
     All three eras, for the same reason ``_is_turn`` covers all three: a
     paginated rollout carries no ``user_message`` event, so this returned ""
     for 171 of 784 real sessions -- after reading every one of them to the
     end, 106 MB to produce a blank.
+
+    The model is only what the scan reads anyway. Measured 2026-11-14 over
+    1,453 rollouts: 757 of the 1,040 with a user turn record a turn_context
+    above it, and the scan reads the 413 without one to the end regardless,
+    304 of which carry one. The other 283 keep model None rather than pay for
+    reading past their first turn. It is the thread's FIRST model, where the
+    index records its latest.
     """
+    model: str | None = None
     try:
         with open(path) as fh:
             for line in fh:
@@ -1195,6 +1211,14 @@ def _codex_first_user_message(path: Path) -> str:
                 # envelope; only the oldest rollouts put the record itself at
                 # the top level.
                 otype = obj.get("type")
+                if otype == "turn_context":
+                    if model is None:
+                        context = obj.get("payload")
+                        if isinstance(context, dict):
+                            found = context.get("model")
+                            if isinstance(found, str) and found:
+                                model = found
+                    continue
                 if otype in ("event_msg", "response_item"):
                     payload = obj.get("payload", {})
                 else:
@@ -1205,23 +1229,23 @@ def _codex_first_user_message(path: Path) -> str:
                 if ptype == "user_message":
                     msg = payload.get("message", "")
                     if isinstance(msg, str) and msg:
-                        return _summary_text(msg)
+                        return _summary_text(msg), model
                     content = payload.get("content", "")
                     if isinstance(content, str) and content:
-                        return _summary_text(content)
+                        return _summary_text(content), model
                     if isinstance(content, list):
                         for part in content:
                             if (
                                 isinstance(part, dict)
                                 and part.get("type") == "input_text"
                             ):
-                                return _summary_text(part.get("text", ""))
+                                return _summary_text(part.get("text", "")), model
                 elif ptype == "item_completed":
                     item = payload.get("item")
                     if isinstance(item, dict) and item.get("type") == "UserMessage":
                         text = _codex_parts_text(item.get("content"), "text")
                         if text:
-                            return _summary_text(text)
+                            return _summary_text(text), model
                 elif otype == "response_item" and ptype == "message":
                     if payload.get("role") != "user":
                         continue
@@ -1232,12 +1256,12 @@ def _codex_first_user_message(path: Path) -> str:
                     # in the repository identically.
                     text = _codex_parts_text(payload.get("content"), "input_text")
                     if text and not _codex_injected(text):
-                        return _summary_text(text)
+                        return _summary_text(text), model
     except Exception as exc:
         # Best-effort summary: an unreadable file costs a blank summary, not
         # the session. Logged at debug so it is recoverable when one is blank.
         log.debug("No codex summary from %s: %s", path.name, exc)
-    return ""
+    return "", model
 
 
 def scan_opencode() -> list[Session]:
@@ -1250,7 +1274,15 @@ def scan_opencode() -> list[Session]:
         conn = sqlite3.connect(_readonly_uri(db_path), uri=True, timeout=3)
         conn.row_factory = sqlite3.Row
         try:
-            rows = opencode_execute(conn, _OPENCODE_SESSIONS_SQL)[0].fetchall()
+            try:
+                rows = opencode_execute(conn, _OPENCODE_SESSIONS_SQL)[0].fetchall()
+            except sqlite3.OperationalError as exc:
+                # Rejected while preparing, before any row is read.
+                if "no such column" not in str(exc) or "model" not in str(exc):
+                    raise
+                rows = opencode_execute(
+                    conn, _OPENCODE_SESSIONS_SQL_NO_MODEL, schema=OPENCODE_V2
+                )[0].fetchall()
         finally:
             conn.close()
         for r in rows:
@@ -1285,6 +1317,7 @@ def scan_opencode() -> list[Session]:
                     subagent_kind=(
                         (r["agent"] or "subagent") if r["parent_id"] else ""
                     ),
+                    model=r["model"],
                 )
             )
     except (sqlite3.Error, OSError) as exc:
@@ -1304,6 +1337,16 @@ def _opencode_db_path() -> Path:
 # statement here comes as a (v1, v2) pair and opencode_execute picks one.
 OPENCODE_V1, OPENCODE_V2 = 1, 2
 
+# Same columns from v2. fork_session_id (a fork, not a spawn) is left out on
+# purpose: reading it as parent_id would file a fork as a subagent.
+_OPENCODE_V2_SESSIONS = (
+    "SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, "
+    "       s.parent_id, s.agent, {MODEL} AS model, "
+    "       p.worktree, p.name AS project_name "
+    "FROM session_v2 s "
+    "LEFT JOIN project p ON s.project_id = p.id "
+    "ORDER BY s.time_updated DESC"
+)
 _OPENCODE_SESSIONS_SQL = (
     # parent_id and agent are two more columns on a query that already reads
     # this table, so the sqlite_statements counter is unmoved. agent names the
@@ -1312,22 +1355,32 @@ _OPENCODE_SESSIONS_SQL = (
     # being one -- parent_id is the only thing that says "this was spawned".
     (
         "SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, "
-        "       s.parent_id, s.agent, "
+        "       s.parent_id, s.agent, NULL AS model, "
         "       p.worktree, p.name AS project_name "
         "FROM session s "
         "LEFT JOIN project p ON s.project_id = p.id "
         "ORDER BY s.time_updated DESC"
     ),
-    # Same columns from v2. fork_session_id (a fork, not a spawn) is left out
-    # on purpose: reading it as parent_id would file a fork as a subagent.
-    (
-        "SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, "
-        "       s.parent_id, s.agent, "
-        "       p.worktree, p.name AS project_name "
-        "FROM session_v2 s "
-        "LEFT JOIN project p ON s.project_id = p.id "
-        "ORDER BY s.time_updated DESC"
+    # v2 records the session's model as JSON, {"id": ..., "providerID": ...,
+    # "variant": ...}, spelled here providerID/id as opencode's own --model
+    # takes it; v1 records it only per message, hence NULL above. Built in
+    # SQL so the row loop stays a plain read. json_valid guards it, since
+    # json_extract raises on malformed input.
+    _OPENCODE_V2_SESSIONS.replace(
+        "{MODEL}",
+        "CASE WHEN json_valid(s.model) "
+        "      AND json_extract(s.model, '$.id') IS NOT NULL "
+        "  THEN COALESCE(json_extract(s.model, '$.providerID') || '/', '') "
+        "       || json_extract(s.model, '$.id') "
+        "END",
     ),
+)
+# model is migration-added to session_v2. A 2.x install from before it still
+# serves every other column, and losing all its sessions over one optional
+# field would be the wrong trade, so this asks again without it.
+_OPENCODE_SESSIONS_SQL_NO_MODEL = (
+    _OPENCODE_SESSIONS_SQL[0],
+    _OPENCODE_V2_SESSIONS.replace("{MODEL}", "NULL"),
 )
 
 

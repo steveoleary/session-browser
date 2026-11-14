@@ -585,6 +585,31 @@ class TestClaudeSummary:
 
 
 class TestScanCodex:
+    def test_the_file_scan_reads_a_model_the_head_already_passes(self, tmp_path):
+        """A turn_context above the first prompt names the model for free; one
+        below it would cost reading past the prompt, so it is not read."""
+        day = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
+        day.mkdir(parents=True)
+
+        def rollout(sid, context_first):
+            meta = {"type": "session_meta", "payload": {"id": sid, "cwd": "/p"}}
+            context = {"type": "turn_context", "payload": {"model": "gpt-6.1-sol"}}
+            prompt = {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "hello"},
+            }
+            records = (
+                [meta, context, prompt] if context_first else [meta, prompt, context]
+            )
+            path = day / f"rollout-2026-04-10T13-00-00-{sid}.jsonl"
+            path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+        rollout("above", True)
+        rollout("below", False)
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            found = {s.id: (s.model, s.summary) for s in scan_codex()}
+        assert found == {"above": ("gpt-6.1-sol", "hello"), "below": (None, "hello")}
+
     def test_scan_codex_sessions(self, tmp_path):
         sessions_dir = tmp_path / ".codex" / "sessions" / "2026" / "04" / "10"
         sessions_dir.mkdir(parents=True)

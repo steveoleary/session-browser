@@ -123,7 +123,9 @@ _SUBAGENT_CONTRACT = (
     "the kind.\n"
     '"model" is spelled as that tool\'s --model flag takes it, and is null '
     "when it is not\nrecorded where discovery reads: always for Claude and "
-    'OpenCode, so null is\n"not known", never "no model".\n'
+    "OpenCode 1.x, and for a Codex\nsession read without its index whose "
+    "first turn is not above its first prompt.\nSo null is "
+    '"not known", never "no model".\n'
     '"continued_in"/"continued_from" link one Claude conversation resumed into '
     "a new\nfile: the new session holds a copy of the old one's history, so "
     "read the newer\nand treat the pair as one. Raw ids, null when no link is "

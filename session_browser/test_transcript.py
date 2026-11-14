@@ -2122,6 +2122,43 @@ class TestOpencodeV2:
             patch("session_browser.discovery.Path.home", return_value=tmp_path),
         )
 
+    def test_the_model_is_spelled_as_opencode_takes_it(self, tmp_path):
+        from session_browser.discovery import scan_opencode
+
+        db = make_opencode_v2_db(
+            tmp_path, {"ses_a": {}, "ses_b": {}, "ses_c": {}, "ses_d": {}}
+        )
+        conn = sqlite3.connect(str(db))
+        conn.execute("ALTER TABLE session_v2 ADD COLUMN model TEXT")
+        for sid, model in (
+            ("ses_a", {"id": "deepseek-v4.1-flash-free", "providerID": "opencode"}),
+            ("ses_b", {"id": "local-model"}),  # no provider recorded
+            ("ses_c", "not json"),
+        ):
+            value = model if isinstance(model, str) else json.dumps(model)
+            conn.execute("UPDATE session_v2 SET model = ? WHERE id = ?", (value, sid))
+        conn.commit()
+        conn.close()
+        h1, h2 = self._home(tmp_path)
+        with h1, h2:
+            found = {s.id: s.model for s in scan_opencode()}
+        assert found == {
+            "ses_a": "opencode/deepseek-v4.1-flash-free",
+            "ses_b": "local-model",
+            "ses_c": None,
+            "ses_d": None,
+        }
+
+    def test_an_install_from_before_the_model_column_keeps_its_sessions(self, tmp_path):
+        # make_opencode_v2_db has no model column, as older 2.x installs.
+        from session_browser.discovery import scan_opencode
+
+        make_opencode_v2_db(tmp_path, {"ses_a": {}, "ses_b": {}})
+        h1, h2 = self._home(tmp_path)
+        with h1, h2:
+            found = {s.id: s.model for s in scan_opencode()}
+        assert found == {"ses_a": None, "ses_b": None}
+
     def test_discovery_reads_session_v2(self, tmp_path):
         from session_browser.discovery import scan_opencode
 
