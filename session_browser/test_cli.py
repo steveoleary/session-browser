@@ -3847,6 +3847,26 @@ class TestCurrentSessionExclusion:
         assert "pi:ppp" not in {s["id"] for s in data["sessions"]}
         assert any("pi:ppp" in w for w in data["warnings"])
 
+    def test_excludes_caller_session_by_opencode_env(self, cli, monkeypatch, sessions):
+        # OpenCode 2.3 exports OPENCODE_SESSION_ID, the session_v2 id, to the
+        # commands it runs.
+        sessions.append(
+            Session(
+                id="ses_live",
+                provider="opencode",
+                summary="echo",
+                cwd="/home/u/projE",
+                updated_at="2026-06-07T10:00:00+00:00",
+            )
+        )
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+        monkeypatch.setenv("OPENCODE_SESSION_ID", "ses_live")
+        _, out, _ = cli("list")
+        data = json.loads(out)
+        assert "opencode:ses_live" not in {s["id"] for s in data["sessions"]}
+        assert any("opencode:ses_live" in w for w in data["warnings"])
+
     def test_union_excludes_whole_spawn_chain(self, cli, monkeypatch):
         # A Claude session that launched Codex carries both vars.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "ccc")

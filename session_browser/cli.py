@@ -910,6 +910,9 @@ _CURRENT_SESSION_ENV = {
     "claude": "CLAUDE_CODE_SESSION_ID",
     "codex": "CODEX_THREAD_ID",
     "pi": "PI_SESSION_ID",
+    # OpenCode 2.3 exports the session_v2 id (ses_...) to the commands it
+    # runs, which is the id discovery assigns. Checked 2026-11-14.
+    "opencode": "OPENCODE_SESSION_ID",
 }
 
 
@@ -920,8 +923,8 @@ def _current_session_ids() -> set[str]:
     Codex carries both CLAUDE_CODE_SESSION_ID and CODEX_THREAD_ID — so this set
     naturally covers the whole live parent/child chain, not just the innermost
     caller. The values match the ids `discovery` assigns (Claude file stem,
-    Codex session_meta id, Pi session-header id), so canonical-id equality is
-    exact."""
+    Codex session_meta id, Pi session-header id, OpenCode session id), so
+    canonical-id equality is exact."""
     ids: set[str] = set()
     for provider, var in _CURRENT_SESSION_ENV.items():
         val = os.environ.get(var, "").strip()
