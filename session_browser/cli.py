@@ -17,7 +17,7 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 from .config import ConfigError, load_ignore
@@ -740,15 +740,15 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         "--since",
         action=_Once,
         help="lower bound on last activity (newest message, not "
-        "file mtime): ISO 8601, or relative like "
+        "file mtime): ISO 8601, today, yesterday, or relative like "
         "-30m/-2h/-1d/-1w; a date-only value means from the "
-        "start of that day",
+        "start of that day (today and yesterday: local midnight)",
     )
     p.add_argument(
         "--until",
         action=_Once,
         help="upper bound on last activity (newest message, not "
-        "file mtime): ISO 8601, or relative like "
+        "file mtime): ISO 8601, today, yesterday, or relative like "
         "-30m/-2h/-1d/-1w; a date-only value includes that "
         "whole day",
     )
@@ -837,16 +837,38 @@ def _relative_delta(value: str) -> timedelta | None:
     return timedelta(**{_REL_UNITS[m.group(2)]: int(m.group(1))})
 
 
+# "today" and "yesterday" are the commonest date anyone asks about, and an
+# agent asked to look at today's sessions otherwise has to work out the date
+# and spell it. Local days, because that is the day the person means.
+_NAMED_DAYS = {"today": 0, "yesterday": 1}
+
+
+def _named_day(value: str) -> date | None:
+    back = _NAMED_DAYS.get(value.strip().lower())
+    today = datetime.now(UTC).astimezone().date()  # the local date
+    return None if back is None else today - timedelta(days=back)
+
+
+def _local_midnight(day: date) -> datetime:
+    """The instant *day* begins here, with that day's own UTC offset: a
+    naive midnight given to astimezone() is read as local time, DST and all,
+    where subtracting a day from an aware time keeps the wrong offset."""
+    return datetime.combine(day, time()).astimezone()
+
+
 def _parse_date(value: str, flag: str) -> datetime:
     delta = _relative_delta(value)
     if delta is not None:
         return datetime.now(UTC) - delta
+    day = _named_day(value)
+    if day is not None:
+        return _local_midnight(day)
     try:
         dt = datetime.fromisoformat(value)
     except ValueError:
         raise CliError(
-            f"invalid {flag} date: {value!r} "
-            f"(expected ISO 8601 or relative like -30m/-2h/-1d)",
+            f"invalid {flag} date: {value!r} (expected ISO 8601, today, "
+            f"yesterday, or relative like -30m/-2h/-1d)",
             code="invalid_date",
         ) from None
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
@@ -1040,7 +1062,11 @@ def apply_filters(
             # date-only (e.g. "2026-06-10") includes the whole day; relative
             # bounds ("-30m") are precise instants, so they must not get the
             # +1 day bump.
-            if "T" not in args.until and _relative_delta(args.until) is None:
+            named = _named_day(args.until)
+            if named is not None:
+                # The whole of that day, to the next local midnight.
+                until_excl = _local_midnight(named + timedelta(days=1))
+            elif "T" not in args.until and _relative_delta(args.until) is None:
                 until_excl = until + timedelta(days=1)
     if since or until:
         kept = []

@@ -4004,6 +4004,25 @@ class TestRelativeDates:
         _, out, _ = cli("list", "--since=-1d")
         assert json.loads(out)["sessions"] == []
 
+    def test_today_and_yesterday_are_local_days(self, cli, sessions, monkeypatch):
+        from datetime import datetime, time, timedelta
+
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+        today = datetime.now(UTC).astimezone().date()
+        midnight = datetime.combine(today, time()).astimezone()
+        # One session late yesterday, one early today, both local time.
+        sessions[0].updated_at = (midnight - timedelta(minutes=5)).isoformat()
+        sessions[1].updated_at = (midnight + timedelta(minutes=5)).isoformat()
+        ids = {s.id: f"{s.provider}:{s.id}" for s in sessions[:2]}
+
+        def listed(*argv):
+            return {s["id"] for s in json.loads(cli("list", *argv)[1])["sessions"]}
+
+        assert listed("--since", "today") == {ids["bbb"]}
+        assert listed("--since", "yesterday", "--until", "yesterday") == {ids["aaa"]}
+        assert listed("--since", "Today") == {ids["bbb"]}
+
     def test_garbage_relative_is_a_structured_error(self, cli):
         code, _, err = cli("list", "--since", "-30x")
         assert code == 1
