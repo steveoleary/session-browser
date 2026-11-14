@@ -1450,17 +1450,23 @@ _PROC_WORKERS = min(10, max(1, (os.cpu_count() or 4) - 2))
 _PROC_WINDOW = _PROC_WORKERS * 2
 
 
-def _parse_worker(args: tuple[str, str, str, str | list[str]]):
+def _parse_worker(args: tuple[Session, str | list[str]]):
     """Canonically parse one file-backed session in a worker process.
 
     Returns the result's fields rather than a SessionSearchResult, because the
     parent must re-attach its *own* Session object: callers read summary, cwd
-    and branch off ``result.session``, and a worker only receives the three
-    fields it needs to read the transcript.  Never raises for the same reason
-    :func:`search_session` never does.
+    and branch off ``result.session``, and the worker's is a pickled copy.
+    Never raises for the same reason :func:`search_session` never does.
+
+    The worker gets the whole Session, not just the fields that locate its
+    file. How a file is read depends on more than where it is: a thread_spawn
+    child skips its spawner's copied history, and a guardian's prompt is
+    relabelled. Rebuilt from id, provider and path, a worker read both as
+    plain rollouts, so a search that crossed the process threshold answered
+    differently from one that did not.
     """
-    provider, sid, path, query = args
-    r = search_session(Session(id=sid, provider=provider, content_path=path), query)
+    session, query = args
+    r = search_session(session, query)
     return r.match_count, r.matches, r.warnings, r.unreadable, r.total_entries
 
 
@@ -1572,9 +1578,7 @@ def _probe_in_processes(
                 if nxt is None:
                     return
                 i, s = nxt
-                inflight[
-                    ex.submit(_parse_worker, (s.provider, s.id, s.content_path, query))
-                ] = (i, s)
+                inflight[ex.submit(_parse_worker, (s, query))] = (i, s)
 
         feed()
         while inflight:

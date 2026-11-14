@@ -3738,6 +3738,30 @@ class TestProcessPoolParse:
             )
         return sessions
 
+    def test_a_worker_reads_a_session_as_its_kind_says(self, tmp_path):
+        """The worker gets the whole Session, not id, provider and path.
+
+        A guardian's prompt quotes its parent and is relabelled system; a
+        worker that rebuilt the Session from three fields lost the kind and
+        credited the guardian with saying the parent's words."""
+        path = tmp_path / "guardian.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "a quoted wombat"},
+                }
+            )
+            + "\n"
+        )
+        guardian = Session(
+            id="g1", provider="codex", content_path=str(path), subagent_kind="guardian"
+        )
+        count, matches, _w, _u, _t = transcript_mod._parse_worker((guardian, "wombat"))
+        in_thread = search_session(guardian, "wombat")
+        assert count == in_thread.match_count == 1
+        assert matches[0].entry.role == in_thread.matches[0].entry.role == "system"
+
     def test_process_results_identical_to_threads(self, tmp_path):
         """Real worker processes, compared against the thread path."""
         sessions = self._corpus(tmp_path)
