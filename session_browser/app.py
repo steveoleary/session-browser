@@ -103,6 +103,16 @@ _FILTER_DEBOUNCE = 0.15
 # Every literal result counts, including sessions that only quote the phrase
 # in tool output. Counting only the ones where it was said was tried and is
 # what produced the second pair of numbers above.
+#
+# Decided 2026-11-14 to keep it that way, on a second look at what the
+# narrower trigger (run the wave when NO literal hit was said) would buy. Of
+# seven real queries with ten or more literal hits, every one had a said hit
+# too ("perf budget" 21 hits, 2 said; "bd ready" 465, 36), so the gate was
+# not hiding anything there. The one quote-only case found, "rolling window,
+# not an archive" (10 hits, all tool output), is made of words common enough
+# that a capped wave would give up after its ripgrep narrowing -- and that
+# narrowing alone measured 1.1-2.5 s a query on 2,573 sessions. Paying seconds
+# on every such query to find nothing, almost always, is the wrong trade.
 _UNORDERED_BELOW = 10
 
 _CONVERSATION_ROLES = ("user", "assistant")
