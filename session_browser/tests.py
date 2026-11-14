@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import json
 import os
 import re
@@ -1565,6 +1566,23 @@ class TestCompressedCodexRollouts:
         assert compressed.sweep(now) == 1
         assert copies[0].exists() and not copies[1].exists()
         assert fresh.exists() and not partial.exists()
+
+    def test_a_rollout_that_will_not_open_leaves_nothing_to_finalize(
+        self, tmp_path, cache_home
+    ):
+        """An open that fails is an OSError and nothing more. A reader built
+        around a file it never managed to open used to be left half-made, and
+        its finalizer then failed too, printing a traceback to stderr -- which
+        agents read and the TUI captures -- for a permission error, a lost
+        race with a delete, or a directory with a rollout's name."""
+        not_a_file = tmp_path / "rollout-x.jsonl.zst"
+        not_a_file.mkdir()
+        unraisable: list = []
+        with patch.object(sys, "unraisablehook", unraisable.append):
+            with pytest.raises(OSError):
+                compressed._stream(not_a_file)
+            gc.collect()
+        assert unraisable == []
 
     def test_the_sweep_is_rationed_and_makes_nothing_where_nothing_was(
         self, tmp_path, cache_home

@@ -151,11 +151,17 @@ def open_binary(path: Path, mode: str = "rb", buffering: int = -1):
 
 
 class _Decompressing(io.RawIOBase):
-    """A compressed rollout as the plain bytes it holds, failing as OSError."""
+    """A compressed rollout as the plain bytes it holds, failing as OSError.
 
-    def __init__(self, path: Path) -> None:
+    Handed a source already open, and never asked to open one: an open that
+    failed inside the constructor would leave a half-made reader whose
+    finalizer then failed as well, printing a traceback for what is only an
+    unreadable file.
+    """
+
+    def __init__(self, source, path: Path) -> None:
         self._path = path
-        self._source = zstd.ZstdFile(path, "rb")
+        self._source = source
 
     def readable(self) -> bool:
         return True
@@ -179,7 +185,8 @@ def _stream(path: Path, buffering: int = -1) -> io.BufferedReader:
     # ZstdFile splits lines in Python, one call per line, and the reader
     # around it does that in C -- 0.23 s against 0.11 s over 400 rollouts.
     size = buffering if buffering > 1 else io.DEFAULT_BUFFER_SIZE
-    return io.BufferedReader(_Decompressing(path), buffer_size=size)
+    source = zstd.ZstdFile(path, "rb")  # raises OSError before anything is built
+    return io.BufferedReader(_Decompressing(source, path), buffer_size=size)
 
 
 def _decompress(path: Path, target: Path) -> None:
