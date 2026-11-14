@@ -418,6 +418,72 @@ def _output_path(value: str) -> str | None:
     return None if value == "-" else value
 
 
+_CALLS_TEXT_COLUMNS = ("timestamp", "id", "entry_index", "tool", "input")
+_CALL_KEYS = (
+    "id",
+    "entry_index",
+    "timestamp",
+    "tool",
+    "input",
+    "input_chars",
+    "result_index",
+    "result",
+    "result_chars",
+    "is_error",
+    "exit_code",
+)
+
+_CALLS_EPILOG = """Output contract:
+Default format: json. jsonl emits the envelope on line 1 with "calls" replaced
+by "records" (how many lines follow), then one call per line.
+{keys}
+{text}
+One record per tool call whose input contains PATTERN (case-insensitive), with
+the output that answered it. "input" is the call as get prints it, tool name
+and arguments; "result" is the output entry, null when none was recorded.
+Both are clipped to --clip characters; *_chars give the full lengths.
+"is_error" is true when the provider marked the output failed, false when it
+did not, and null when no output was recorded; "exit_code" is null unless the
+provider recorded one (Codex does). A call is paired with its output by
+the provider's call id where it records one (Claude), else by order: each
+output answers the oldest unanswered call before it, of the same tool. Sessions come newest first, as
+list orders them (--sort oldest reverses it); a session's calls are in order.
+"counts" appears only with --count-by: the word that follows PATTERN in each
+call's input, with how many calls used it, most first -- a subcommand table.
+{subagents}
+""".format(
+    subagents=_SUBAGENT_CONTRACT,
+    text=_text_column_contract(
+        "calls",
+        _CALLS_TEXT_COLUMNS,
+        "Each call header is followed by one INDENTED line, '-> ' and the "
+        "result on one line (or '-> (no result recorded)'), so a header line "
+        "is a record but a line is not. With --count-by, text is instead "
+        "'count<TAB>word' per line.",
+    ),
+    keys=_json_key_contract(
+        (
+            "envelope",
+            (
+                "pattern",
+                "tool",
+                "errors",
+                "filters",
+                "calls",
+                "counts",
+                "skipped",
+                "warnings",
+            ),
+        ),
+        ("filters", _FILTER_KEYS),
+        ("call", _CALL_KEYS),
+        ("count", ("word", "count")),
+        ("skipped", ("id", "error")),
+        *_ERROR_GROUPS,
+    ),
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="session-browser",
@@ -667,6 +733,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="output format (default: text)",
     )
     p_stats.set_defaults(handler=cmd_stats)
+
+    p_calls = sub.add_parser(
+        "calls",
+        help="every tool call whose input contains a pattern, with what came "
+        "back: how a command was really used",
+        epilog=_CALLS_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_calls.add_argument(
+        "pattern",
+        help="literal text to find in a call's input, case-insensitive (a "
+        "command name like cue, or a fuller 'cue list')",
+    )
+    _add_filter_args(p_calls)
+    p_calls.add_argument(
+        "--tool",
+        action=_Once,
+        help="only calls of this tool, case-insensitive (Bash, exec_command, "
+        "shell, Read, ...)",
+    )
+    p_calls.add_argument(
+        "--errors",
+        action="store_true",
+        help="only calls whose provider marked them failed",
+    )
+    p_calls.add_argument(
+        "--count-by",
+        action="store_true",
+        help="count calls by the word after PATTERN in their input instead "
+        "of listing them -- for cue, the subcommand table",
+    )
+    p_calls.add_argument(
+        "--clip",
+        type=int,
+        default=300,
+        metavar="N",
+        help="cap input and result at N characters each (default 300; 0 disables)",
+    )
+    p_calls.add_argument(
+        "--sort",
+        choices=["recent", "oldest"],
+        default="recent",
+        help="session order: last activity (default), or oldest first",
+    )
+    p_calls.add_argument(
+        "--format",
+        choices=["json", "text", "jsonl"],
+        default="json",
+        help="output format (default: json); text is two lines per call, so "
+        "a few hundred fit in one read",
+    )
+    p_calls.set_defaults(handler=cmd_calls)
 
     return parser
 
@@ -2296,6 +2414,188 @@ def cmd_search(args) -> int:
         _report_warnings_stderr(warnings)
         _report_skipped_stderr(skipped)
     return 0
+
+
+def cmd_calls(args) -> int:
+    pattern = args.pattern.strip()
+    if not pattern:
+        raise CliError("empty calls pattern", code="invalid_query")
+    if args.clip < 0:
+        raise CliError("--clip must be >= 0 (0 disables)", code="invalid_filter")
+    warnings: list[str] = []
+    discovered = _discover(args)
+    candidates = apply_filters(discovered, args, apply_limit=False, warnings=warnings)
+    if args.sort == "oldest":
+        _floor = datetime.min.replace(tzinfo=UTC)
+        candidates.sort(key=lambda s: _session_time(s) or _floor)
+    # Search does the finding: its prefilter rules out every session whose raw
+    # bytes lack the pattern, and keep_entries leaves each parsed transcript in
+    # hand, so pairing a call with its output reads nothing a second time.
+    results = search_sessions(candidates, [pattern], keep_entries=True)
+    tool = args.tool.casefold() if args.tool else None
+    calls: list[dict] = []
+    words: dict[str, int] = {}
+    for r in results:
+        if r.unreadable or not r.matches or r.entries is None:
+            continue
+        hits = {
+            m.entry_index: m
+            for m in r.matches
+            if m.entry.metadata and m.entry.metadata.get("kind") == "call"
+        }
+        if not hits:
+            continue
+        answers = _pair_tool_outputs(r.entries)
+        for index, m in hits.items():
+            meta = m.entry.metadata
+            name = str(meta.get("tool") or "")
+            if tool is not None and name.casefold() != tool:
+                continue
+            answer = answers.get(index)
+            out = r.entries[answer] if answer is not None else None
+            out_meta = (out.metadata or {}) if out is not None else {}
+            # Every provider marks only failure; an output without the flag
+            # is one that succeeded, and no output at all says nothing.
+            is_error = bool(out_meta.get("is_error")) if out is not None else None
+            if args.errors and not is_error:
+                continue
+            if args.count_by:
+                word = _word_after(m.entry.text, m.offsets[0] + len(pattern))
+                words[word] = words.get(word, 0) + 1
+                continue
+            calls.append(
+                {
+                    "id": canonical_id(r.session),
+                    "entry_index": index,
+                    "timestamp": m.entry.timestamp,
+                    "tool": name,
+                    "input": _clip_to(m.entry.text, args.clip),
+                    "input_chars": len(m.entry.text),
+                    "result_index": answer,
+                    "result": _clip_to(out.text, args.clip) if out else None,
+                    "result_chars": len(out.text) if out else None,
+                    "is_error": is_error,
+                    "exit_code": out_meta.get("exit_code"),
+                }
+            )
+    skipped = [r for r in results if r.unreadable]
+    counts = sorted(
+        ({"word": w, "count": n} for w, n in words.items()),
+        key=lambda c: (-c["count"], c["word"]),
+    )
+    if args.limit is not None and args.limit >= 0:
+        if args.count_by:
+            counts = counts[: args.limit]
+        elif len(calls) > args.limit:
+            warnings.append(
+                f"--limit {args.limit} kept {args.limit} of {len(calls)} calls; "
+                "omit it for every one"
+            )
+            calls = calls[: args.limit]
+    if args.format == "text":
+        if args.count_by:
+            for c in counts:
+                print(f"{c['count']}\t{c['word']}")
+        else:
+            for c in calls:
+                print(
+                    "\t".join(
+                        (
+                            c["timestamp"],
+                            c["id"],
+                            str(c["entry_index"]),
+                            c["tool"],
+                            " ".join(c["input"].split()),
+                        )
+                    )
+                )
+                if c["result"] is None:
+                    print("  -> (no result recorded)")
+                else:
+                    flag = " [error]" if c["is_error"] else ""
+                    print(f"  ->{flag} {' '.join(c['result'].split())}")
+        if not (counts if args.count_by else calls):
+            print("no calls matched", file=sys.stderr)
+        _report_warnings_stderr(warnings)
+        _report_skipped_stderr(skipped)
+        return 0
+    payload: dict = {
+        "pattern": pattern,
+        "tool": args.tool,
+        "errors": args.errors,
+        "filters": _filters_dict(args),
+        "calls": calls,
+        "skipped": _skipped_list(skipped),
+        "warnings": warnings,
+    }
+    if args.count_by:
+        payload["counts"] = counts
+    if args.format == "jsonl":
+        _print_jsonl(payload, "counts" if args.count_by else "calls")
+    else:
+        print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _pair_tool_outputs(entries) -> dict[int, int]:
+    """{call entry index: the output entry index that answered it}.
+
+    By id where the provider records one on both sides (Claude, which writes
+    no entry for an empty result, so order would pair every later call with
+    the wrong output). Otherwise by order: a call's output follows it, and
+    parallel calls are answered in the order they were made, so an output
+    answers the oldest unanswered call before it -- of its own tool, when
+    the output names one. Codex writes an output for every call, even a
+    silent command's carries its exit header, so order is sound there."""
+    pending: list[int] = []
+    by_id: dict[str, int] = {}
+    answered: dict[int, int] = {}
+    for i, e in enumerate(entries):
+        meta = e.metadata
+        if e.role != "tool" or not meta:
+            continue
+        kind = meta.get("kind")
+        if kind == "call":
+            call_id = meta.get("id")
+            if call_id:
+                by_id[call_id] = i
+            else:
+                pending.append(i)
+        elif kind == "output":
+            call_id = meta.get("call_id")
+            if call_id:
+                call = by_id.pop(call_id, None)
+                if call is not None:
+                    answered[call] = i
+                continue
+            if not pending:
+                continue
+            name = meta.get("tool")
+            pick = 0
+            if name:
+                pick = next(
+                    (
+                        n
+                        for n, c in enumerate(pending)
+                        if entries[c].metadata.get("tool") == name
+                    ),
+                    0,
+                )
+            answered[pending.pop(pick)] = i
+    return answered
+
+
+def _word_after(text: str, start: int) -> str:
+    """The first word after *start*, stripped of quoting; '' at the end."""
+    rest = text[start:].lstrip(" \t\"'")
+    word = rest.split(None, 1)[0] if rest.split(None, 1) else ""
+    return word.strip("\"',;)(}{[]\\") or "(none)"
+
+
+def _clip_to(text: str, limit: int) -> str:
+    if limit == 0 or len(text) <= limit:
+        return text
+    return text[:limit] + f"… [clipped {len(text) - limit} chars]"
 
 
 def _keep_matches_in_roles(results, roles: set[str]) -> None:

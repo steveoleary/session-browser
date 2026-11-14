@@ -1242,6 +1242,21 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             lambda: _with_extra_codex_rollout(lambda: _cli("list", "--limit", "50")),
         ),
         Workload(
+            "cli.calls.absent",
+            "calls finds its sessions through search's prefilter: a pattern "
+            "in no session parses nothing, whatever the corpus holds.",
+            lambda: _cli("calls", QUERY_ABSENT),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.calls.rare",
+            "calls must parse only the prefilter's candidates, and once each: "
+            "the call's output is paired from the entries the search already "
+            "holds, never by reading a transcript again.",
+            lambda: _cli("calls", QUERY_RARE),
+            needs_rg=True,
+        ),
+        Workload(
             "cli.list.codex_rewound",
             "A rewound Codex thread's earlier files are attached by name and "
             "never opened in discovery: every counter equals cli.list's. The "

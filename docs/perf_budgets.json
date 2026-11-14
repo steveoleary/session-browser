@@ -5,8 +5,8 @@
     "python": "3.14",
     "moved": {},
     "added": [
-      "cli.list.codex_rewound",
-      "cli.search.codex_rewound"
+      "cli.calls.absent",
+      "cli.calls.rare"
     ]
   },
   "guards": {
@@ -24,6 +24,8 @@
     "cli.list.preview": "Ending previews must reuse the listing's count scan, limited to the returned sessions, rather than load transcripts again.",
     "cli.list.no_codex_db": "The file-scan fallback is the safety net for a missing or stale Codex index. It must stay budgeted so a regression in it cannot hide behind the DB fast path. It is also the only workload that reads rollout files, so it is where a Codex vocabulary the head or tail scan no longer recognises shows up -- as a rise, since finding no turn means reading the whole file to discover it.",
     "cli.list.codex_db_stale": "A Codex index lacking one rollout must cost that rollout's read and no more: corpus_file_opens is cli.list's plus one file's worth. Codex leaves some rollouts unindexed for good, and when a gap fell back to scanning the whole tree it put ~1.5 s on every call on a real machine. If this rises to cli.list.no_codex_db's opens, the whole-tree fallback is back.",
+    "cli.calls.absent": "calls finds its sessions through search's prefilter: a pattern in no session parses nothing, whatever the corpus holds.",
+    "cli.calls.rare": "calls must parse only the prefilter's candidates, and once each: the call's output is paired from the entries the search already holds, never by reading a transcript again.",
     "cli.list.codex_rewound": "A rewound Codex thread's earlier files are attached by name and never opened in discovery: every counter equals cli.list's. The gap reader used to open each one, decompressing a 39 MB first file on a real machine, only to drop it for a known id.",
     "cli.search.codex_rewound": "A phrase said only before a rewind lives only in a file the index does not name. The prefilter must scan that file too and send exactly the one thread to a parse; zero parses means text said before a rewind is unsearchable again.",
     "cli.stats": "Statistics come from discovery metadata alone; no transcript may be parsed to produce them.",
@@ -35,6 +37,34 @@
     "lib.search.keep_entries": "The entries-retaining shape must stay in this process: shipping whole transcripts back from workers would pickle the corpus."
   },
   "workloads": {
+    "cli.calls.absent": {
+      "corpus_bytes_read": 1175688,
+      "corpus_file_opens": 494,
+      "transcripts_parsed": 0,
+      "prefilter_file_scans": 0,
+      "rg_subprocess_calls": 2,
+      "sqlite_connections": 3,
+      "sqlite_statements": 3,
+      "opencode_sessions_parsed": 0,
+      "process_pool_sessions": 0,
+      "progress_callbacks": 0,
+      "row_tick_wrappers": 0,
+      "zst_decompressions": 0
+    },
+    "cli.calls.rare": {
+      "corpus_bytes_read": 1206447,
+      "corpus_file_opens": 502,
+      "transcripts_parsed": 8,
+      "prefilter_file_scans": 0,
+      "rg_subprocess_calls": 2,
+      "sqlite_connections": 3,
+      "sqlite_statements": 4,
+      "opencode_sessions_parsed": 1,
+      "process_pool_sessions": 0,
+      "progress_callbacks": 0,
+      "row_tick_wrappers": 0,
+      "zst_decompressions": 0
+    },
     "cli.get": {
       "corpus_bytes_read": 929038,
       "corpus_file_opens": 415,

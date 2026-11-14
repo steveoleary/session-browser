@@ -4212,3 +4212,134 @@ class TestStats:
         code, _, err = stats_cli("stats", "--top", "-1", "--format", "json")
         assert code == 1
         assert json.loads(err)["error"]["code"] == "invalid_filter"
+
+
+def _claude_tool_turns(path: Path) -> None:
+    """A Claude transcript with three cue calls, one of them silent.
+
+    Claude writes no entry for an empty tool result, so the silent call is
+    the case order alone pairs wrongly: the id must carry it."""
+
+    def use(i, cmd):
+        return {
+            "type": "assistant",
+            "timestamp": f"2026-06-05T10:00:0{i}Z",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"toolu_{i}",
+                        "name": "Bash",
+                        "input": {"command": cmd},
+                    }
+                ]
+            },
+        }
+
+    def result(i, content, error=False):
+        block = {"type": "tool_result", "tool_use_id": f"toolu_{i}", "content": content}
+        if error:
+            block["is_error"] = True
+        return {"type": "user", "message": {"content": [block]}}
+
+    records = [
+        {"type": "user", "message": {"content": "use cue to plan the week"}},
+        use(1, "cue list --json"),
+        result(1, "[]"),
+        use(2, "cue add 'buy milk'"),
+        result(2, ""),  # silent: no entry is written for it
+        use(3, "cue frobnicate"),
+        result(3, "unknown command: frobnicate", error=True),
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_4",
+                        "name": "Read",
+                        "input": {"file_path": "/p/cue.md"},
+                    }
+                ]
+            },
+        },
+        result(4, "notes about cue"),
+    ]
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+
+@pytest.fixture
+def calls_cli(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "tools.jsonl"
+    _claude_tool_turns(path)
+    sess = [
+        Session(
+            id="tools",
+            provider="claude",
+            summary="cue",
+            cwd="/p",
+            updated_at="2026-06-05T10:00:09+00:00",
+            content_path=str(path),
+        )
+    ]
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setattr("session_browser.cli.discover_all", lambda *a, **k: sess)
+
+    def run(*argv):
+        code = run_cli(list(argv))
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    return run
+
+
+class TestCalls:
+    def test_every_call_with_the_output_that_answered_it(self, calls_cli):
+        code, out, _ = calls_cli("calls", "cue", "--tool", "bash")
+        assert code == 0
+        calls = json.loads(out)["calls"]
+        assert [(c["entry_index"], c["result"], c["is_error"]) for c in calls] == [
+            (1, "[]", False),
+            # The silent call has no result, rather than the next call's.
+            (3, None, None),
+            (4, "unknown command: frobnicate", True),
+        ]
+        assert calls[0]["input"] == 'Bash({"command": "cue list --json"})'
+
+    def test_errors_keeps_only_failed_calls(self, calls_cli):
+        _, out, _ = calls_cli("calls", "cue", "--errors")
+        assert [c["entry_index"] for c in json.loads(out)["calls"]] == [4]
+
+    def test_count_by_tables_the_word_after_the_pattern(self, calls_cli):
+        _, out, _ = calls_cli("calls", "cue", "--tool", "Bash", "--count-by")
+        assert json.loads(out)["counts"] == [
+            {"word": "add", "count": 1},
+            {"word": "frobnicate", "count": 1},
+            {"word": "list", "count": 1},
+        ]
+
+    def test_text_is_two_lines_per_call(self, calls_cli, capsys):
+        _, out, _ = calls_cli("calls", "cue", "--tool", "Bash", "--format", "text")
+        lines = out.splitlines()
+        assert len(lines) == 6
+        _, help_text = _help_contract("calls", capsys)
+        columns = _text_columns(help_text, "calls")
+        for header, result in zip(lines[::2], lines[1::2], strict=True):
+            assert len(header.split("\t")) == len(columns)
+            assert result.startswith("  -> ")
+        assert lines[3] == "  -> (no result recorded)"
+        assert lines[5] == "  -> [error] unknown command: frobnicate"
+
+    def test_contract_matches_runtime(self, calls_cli, capsys):
+        payloads = []
+        for argv in (("calls", "cue"), ("calls", "cue", "--count-by")):
+            code, out, _ = calls_cli(*argv)
+            assert code == 0
+            payloads.append(json.loads(out))
+        contract, _ = _help_contract("calls", capsys)
+        assert contract["envelope"] == _key_union(payloads)
+        calls = [c for p in payloads for c in p["calls"]]
+        assert calls, "the fixture must emit calls, or this compares nothing"
+        assert contract["call"] == _key_union(calls)
+        assert contract["count"] == _key_union(payloads[1]["counts"])
+        assert contract["filters"] == _key_union(p["filters"] for p in payloads)
