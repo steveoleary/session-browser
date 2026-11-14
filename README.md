@@ -206,10 +206,13 @@ whose first line gives the date range of what is still there. See Claude Code's
 for what else the sweep removes.
 
 Codex keeps its rollouts, and recent versions compress older ones to
-`.jsonl.zst`. Session Browser decompresses each one once, on the first search
-that reads it, into `~/.cache/session-browser/zst` (or under `$XDG_CACHE_HOME`).
-That copy takes about five times the compressed size, and the cache is safe to
-delete.
+`.jsonl.zst`. Session Browser reads one by decompressing it as it goes, once
+per version of the file, into [the search cache](#the-search-cache), and keeps
+no decompressed copy for that. A copy is made, in
+`~/.cache/session-browser/zst` (or under `$XDG_CACHE_HOME`), only where a raw
+scan needs a file on disk: with the search cache off, or for the few sessions
+it cannot hold. A copy takes about five times the compressed size, one that
+nothing has used for a day is cleared out, and the directory is safe to delete.
 
 ### The search cache
 

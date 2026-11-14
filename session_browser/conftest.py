@@ -7,8 +7,8 @@ that passes or fails depending on whose machine it runs on. Subprocesses inherit
 the variable too, so CLI and capture tests are covered by the same line.
 
 ``$XDG_CACHE_HOME`` gets the same treatment: ``compressed.py`` writes
-decompressed rollouts there, and a fixture must neither fill the developer's
-cache nor find a copy a previous run left behind.
+decompressed rollouts there, and the entry cache its parses, and a fixture must
+neither fill the developer's cache nor find a copy a previous run left behind.
 """
 
 from __future__ import annotations

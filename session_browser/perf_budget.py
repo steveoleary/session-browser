@@ -262,6 +262,7 @@ def instrumented(
     real_ticking_rows = transcript._ticking_rows
     real_rg = transcript._rg_candidate_paths
     real_decompress = compressed._decompress
+    real_stream = compressed._stream
     corpus_str = str(corpus)
     # The entry cache sits inside the corpus home, and what is read back from
     # it is this package's own earlier work rather than the provider's files.
@@ -398,6 +399,18 @@ def instrumented(
         ledger.add("zst_decompressions")
         return real_decompress(path, target)
 
+    def counting_stream(path, *args, **kwargs):
+        # A compressed rollout read with no copy made: decompressed as it is
+        # read, through zstd's own file object again. zst_decompressions
+        # counts copies written, so this is counted as the corpus read it
+        # is, in the bytes it yields -- a parse that streams must not look
+        # cheaper than one that reads a copy of the same text.
+        fh = real_stream(path, *args, **kwargs)
+        if not in_corpus(path):
+            return fh
+        ledger.add("corpus_file_opens")
+        return _CountingReader(fh, ledger)
+
     def recording_probe_in_processes(pairs, query, cancelled):
         ledger.add("process_pool_sessions", len(pairs))
         return transcript._PROC_FALLBACK
@@ -421,6 +434,7 @@ def instrumented(
     transcript._probe_in_processes = recording_probe_in_processes
     transcript._ticking_rows = counting_ticking_rows
     compressed._decompress = counting_decompress
+    compressed._stream = counting_stream
     if disable_rg:
         transcript._rg_candidate_paths = no_rg
         transcript._rg_entry_text_candidates = no_rg
@@ -445,6 +459,7 @@ def instrumented(
         transcript._ticking_rows = real_ticking_rows
         transcript._rg_candidate_paths = real_rg
         compressed._decompress = real_decompress
+        compressed._stream = real_stream
 
 
 # ---------------------------------------------------------------------------
@@ -1550,11 +1565,13 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
         Workload(
             "cli.search.codex_zst",
             "Codex compresses old rollouts to .jsonl.zst. The first of these "
-            "two searches decompresses each one once, to parse it into the "
-            "entry cache; the second -- a fresh process as far as either "
-            "cache can tell -- must decompress nothing and parse nothing. "
-            "zst_decompressions and transcripts_parsed are both the rollout "
-            "count, not twice it.",
+            "two searches reads each one once, decompressing it as it is "
+            "parsed into the entry cache, and keeps no decompressed copy: "
+            "zst_decompressions, which counts copies written, is zero, and "
+            "corpus_file_opens and transcripts_parsed are the rollout count. "
+            "The second -- a fresh process as far as either cache can tell "
+            "-- must read and parse nothing. A copy per rollout here is five "
+            "times its size on disk, kept for a parse that never comes back.",
             search_zst_twice,
             needs_rg=True,
         ),

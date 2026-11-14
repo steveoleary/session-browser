@@ -9,6 +9,7 @@ from __future__ import annotations
 # plateau around 4 workers (JSON parsing is GIL-bound), 8 leaves headroom.
 _SEARCH_THREADS = 8
 
+import io
 import json
 import logging
 import multiprocessing
@@ -119,8 +120,8 @@ def lineage_ids(provider: str, session_id: str, content_path: str) -> set[str]:
     if not content_path or not os.path.isfile(content_path):
         return ids
     try:
-        readable = compressed.readable(Path(content_path))
-        with open(readable, encoding="utf-8", errors="replace") as fh:
+        raw = compressed.open_binary(Path(content_path))
+        with io.TextIOWrapper(raw, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 if '"session_id"' not in line:
                     continue
@@ -2188,6 +2189,13 @@ def search_sessions(
                 keep_entries=keep_entries,
                 progress=progress,
             )
+        if file_ix:
+            # Decompressed copies of Codex rollouts nothing has wanted for a
+            # day, rationed like the entry cache's sweep to one stat a search.
+            # With the cache on that is nearly all of them -- a parse streams
+            # a rollout and keeps no copy -- and with it off, what a provider
+            # has pruned.
+            compressed.sweep_if_due()
         if file_ix and entry_cache.enabled():
             texts = _ensure_entry_texts(sessions, file_ix, cancelled, progress)
             text_needles = _entry_text_needles(query)
@@ -3107,7 +3115,16 @@ def _parse_entries(session: Session, warnings: list[str]) -> Iterator[Transcript
         if session.segments:
             entries = _codex_rewound_entries(session, path, warnings, event_fn)
         else:
-            entries = _dedupe_codex_turns(_parse_jsonl(path, warnings, event_fn))
+            # Likewise how the file is opened: Codex is the provider that
+            # compresses its rollouts, and the rest open as they always have.
+            opener = (
+                compressed.open_binary
+                if session.content_path.endswith(compressed.SUFFIX)
+                else None
+            )
+            entries = _dedupe_codex_turns(
+                _parse_jsonl(path, warnings, event_fn, opener)
+            )
         if session.subagent_kind == "guardian":
             entries = _codex_guardian_entries(entries)
         yield from entries
@@ -3401,24 +3418,35 @@ _READ_BUFFER = 1 << 20
 
 
 def _existing_file(session: Session) -> Path:
-    """Validate and return the content path for *session*."""
+    """Validate and return the content path for *session*.
+
+    A compressed rollout is returned as it is, for :func:`_parse_jsonl` to
+    open through ``compressed.open_binary``, which makes no copy of it. One
+    that will not decompress then raises OSError from the read, which every
+    caller reports as unreadable, as it reports a missing file.
+    """
     if not session.content_path:
         raise TranscriptUnreadable("no content path")
     path = Path(session.content_path)
     if not path.is_file():
         raise TranscriptUnreadable(f"content path not found: {path}")
-    try:
-        return compressed.readable(path)
-    except OSError as exc:
-        raise TranscriptUnreadable(str(exc)) from exc
+    return path
 
 
 def _parse_jsonl(
     path: Path,
     warnings: list[str],
     event_fn,
+    opener: Callable | None = None,
 ) -> Iterator[TranscriptEntry]:
-    """Stream *path* line-by-line, yielding entries from *event_fn*."""
+    """Stream *path* line-by-line, yielding entries from *event_fn*.
+
+    *opener*, when given, is called as ``open`` is; ``compressed.open_binary``
+    reads a compressed rollout that way. The caller picks it once per
+    session, and a plain transcript is opened by ``open`` itself, looked up
+    when it is called -- not bound as a default, which would freeze whatever
+    ``open`` was at import.
+    """
     # Keep the stream as bytes and decode each line ourselves. TextIOWrapper
     # otherwise decodes and scans every byte in Python's text-I/O path before
     # the JSON decoder sees it; that is especially costly for the
@@ -3431,7 +3459,11 @@ def _parse_jsonl(
     raw_decode = _JSON_DECODER.raw_decode
     loads = json.loads
     _len = len
-    with open(path, "rb", buffering=_READ_BUFFER) as fh:
+    with (
+        open(path, "rb", buffering=_READ_BUFFER)
+        if opener is None
+        else opener(path, "rb", buffering=_READ_BUFFER)
+    ) as fh:
         for lineno, raw in enumerate(fh, start=1):
             raw = raw.strip()
             if not raw:
@@ -3954,7 +3986,7 @@ def codex_thread_of_segment(segment_id: str, sessions: Iterable[Session]):
 def _codex_history_base(path: Path) -> dict | None:
     """The ``history_base`` on a rollout's first line, if it has one."""
     try:
-        with open(compressed.readable(path), "rb") as fh:
+        with compressed.open_binary(path) as fh:
             first = json.loads(fh.readline())
     except (OSError, ValueError):
         return None
@@ -4091,8 +4123,11 @@ def _codex_rewound_entries(
         # Only the thread's first file can open with a spawner's copied
         # history, and the stateful parser that skips it is meant for one file.
         fn = event_fn if n == 0 else _codex_entries
+        # The newest file comes as it is, compressed or not; the earlier ones
+        # as copies, which the rewind plan needs on disk to seek in.
+        opener = compressed.open_binary
         if end is None:
-            yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, fn))
+            yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, fn, opener))
             continue
         undone: list[dict] = []
 
@@ -4106,7 +4141,7 @@ def _codex_rewound_entries(
                 return ()
             return fn(obj)
 
-        yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, kept))
+        yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, kept, opener))
         for entry in _dedupe_codex_turns(
             e for obj in undone for e in _codex_entries(obj)
         ):
@@ -4123,7 +4158,7 @@ def codex_prefix_entries(
     None, with a warning, when the source's rollout is shorter than the
     boundary or the boundary does not fall at the end of a record."""
     try:
-        with open(compressed.readable(Path(source.content_path)), "rb") as fh:
+        with compressed.open_binary(Path(source.content_path)) as fh:
             prefix = fh.read(byte_end)
     except OSError as exc:
         warnings.append(f"fork history unavailable: {exc}")

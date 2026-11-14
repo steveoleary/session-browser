@@ -3,11 +3,13 @@
   "_blessed": {
     "date": "2026-11-14",
     "python": "3.14",
-    "moved": {},
-    "added": [
-      "cli.search.common.limit",
-      "cli.search.common.limit_many"
-    ]
+    "moved": {
+      "cli.search.codex_zst.zst_decompressions": "40 -> 0 (-100.0%)",
+      "loop_opcodes.loop.claude_tool_entries": "32642 -> 32646 (+0.0%)",
+      "loop_opcodes.loop.codex_entries": "56758 -> 56762 (+0.0%)",
+      "loop_opcodes.loop.parse_jsonl": "36662 -> 36666 (+0.0%)"
+    },
+    "added": []
   },
   "guards": {
     "cli.search.absent": "A term in no session must cost no parse and no load. Every session's entries are already cached, and the scan of that text -- not the parser, and not a read of the raw transcripts -- answers a miss.",
@@ -28,7 +30,7 @@
     "cli.search.opencode.v2": "The same scan over OpenCode 2.x's schema: one thin raw pass over session_message before the ordered read, so only survivors are parsed. The v1 attempt each reader makes first must stay free -- rejected while preparing, it never counts as a statement.",
     "cli.search.pi": "Pi transcripts are ordinary JSONL, so they are cached and scanned like the claude files. A parse here means Pi fell out of the entry cache; a load per session means it fell out of the scan.",
     "cli.search.pi.stateless": "With the entry cache switched off, the raw files answer. Pi transcripts must be ruled out by the same candidate scan the claude files go through. A parse per session here means Pi fell out of the prefilter path.",
-    "cli.search.codex_zst": "Codex compresses old rollouts to .jsonl.zst. The first of these two searches decompresses each one once, to parse it into the entry cache; the second -- a fresh process as far as either cache can tell -- must decompress nothing and parse nothing. zst_decompressions and transcripts_parsed are both the rollout count, not twice it.",
+    "cli.search.codex_zst": "Codex compresses old rollouts to .jsonl.zst. The first of these two searches reads each one once, decompressing it as it is parsed into the entry cache, and keeps no decompressed copy: zst_decompressions, which counts copies written, is zero, and corpus_file_opens and transcripts_parsed are the rollout count. The second -- a fresh process as far as either cache can tell -- must read and parse nothing. A copy per rollout here is five times its size on disk, kept for a parse that never comes back.",
     "cli.search.codex_zst.stateless": "With the entry cache switched off, the raw files answer. Decompressing compressed rollouts per query cost ~1s over 684 real ones. Each must be decompressed once, into the on-disk cache, and the second of these two searches must read only the copies: zst_decompressions is the rollout count, not twice it.",
     "cli.list": "Listing is metadata plus each returned session's entry count, and the count comes from one header line of the entry cache. It must never parse a transcript or load one, and its corpus reads must stay bounded by the discovery window rather than by session length: they equal cli.stats's.",
     "cli.list.cold": "A listing over sessions nothing has cached reads each returned session once to count it, and keeps what it read: one parse and one store per row returned, none for the rows the limit dropped.",
@@ -493,7 +495,7 @@
       "process_pool_sessions": 0,
       "progress_callbacks": 0,
       "row_tick_wrappers": 0,
-      "zst_decompressions": 40,
+      "zst_decompressions": 0,
       "entry_cache_loads": 2,
       "entry_cache_stores": 40,
       "entry_cache_index_opens": 2,
@@ -1103,12 +1105,12 @@
   },
   "loop_python": "3.14",
   "loop_opcodes": {
-    "loop.claude_tool_entries": 32642,
+    "loop.claude_tool_entries": 32646,
     "loop.codex_db_rows": 9738,
-    "loop.codex_entries": 56758,
+    "loop.codex_entries": 56762,
     "loop.count_overlapping": 7242,
     "loop.find_entry_matches": 8704,
-    "loop.parse_jsonl": 36662,
+    "loop.parse_jsonl": 36666,
     "loop.raw_text_may_match": 5824,
     "loop.ticking_rows": 11033
   }

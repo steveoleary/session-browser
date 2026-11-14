@@ -15,9 +15,9 @@ candidate was parsed. Queries the raw prefilter cannot take at all (anything
 with a digit or a dot, so every file name and commit hash) parsed the whole
 corpus instead: 14.7 s.
 
-So each session's parsed entries are written once, next to the decompressed
-rollouts ``compressed.py`` already keeps, and everything downstream reads
-those instead:
+So each session's parsed entries are written once, beside the directory where
+``compressed.py`` keeps the decompressed rollouts a raw scan needs, and
+everything downstream reads those instead:
 
 * **search** scans the entry text with ripgrep. It is the canonical text, so
   there are no JSON escapes to see through and no parts the parser would have

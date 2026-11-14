@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1424,6 +1425,161 @@ class TestCompressedCodexRollouts:
         assert result.unreadable
         assert any("decompress" in w for w in result.warnings)
         assert list(compressed.cache_dir().glob(".partial-*")) == []
+
+    # -- a parse reads the rollout itself; only scans keep copies ----------
+
+    @pytest.fixture
+    def cache_home(self, tmp_path, monkeypatch):
+        """A cache of this test's own, so the copies counted are its own."""
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        return tmp_path / "cache" / "session-browser"
+
+    @staticmethod
+    def _copies() -> list[Path]:
+        return sorted(compressed.cache_dir().glob("*.jsonl"))
+
+    def test_a_parse_reads_the_rollout_itself_and_keeps_no_copy(
+        self, tmp_path, cache_home
+    ):
+        """With the entry cache on, a compressed rollout's parse is the last
+        read it gets while it stays the same, so a copy made for that read is
+        five times the file kept for nothing: 1,400 of them, 1.8 GB, on the
+        machine this was measured on."""
+        z = self._compress(self._rollout(tmp_path))
+        session = Session(id="cx-z", provider="codex", content_path=str(z))
+        with patch.object(compressed, "_decompress") as copy:
+            [first] = search_sessions([session], self.WORD)
+            [again] = search_sessions([session], self.WORD)
+        assert first.match_count == again.match_count == 1
+        copy.assert_not_called()
+        assert self._copies() == []
+
+    def test_with_the_cache_off_the_scan_copies_once_and_the_parse_reads_it(
+        self, tmp_path, cache_home, monkeypatch
+    ):
+        monkeypatch.setenv("SESSION_BROWSER_CACHE", "0")
+        z = self._compress(self._rollout(tmp_path))
+        session = Session(id="cx-z", provider="codex", content_path=str(z))
+        with (
+            patch.object(
+                compressed, "_decompress", wraps=compressed._decompress
+            ) as copy,
+            patch.object(compressed, "_stream", wraps=compressed._stream) as stream,
+        ):
+            [result] = search_sessions([session], self.WORD)
+        assert result.match_count == 1
+        assert copy.call_count == 1
+        stream.assert_not_called()  # the copy the scan made is what was parsed
+        assert len(self._copies()) == 1
+
+    @pytest.mark.parametrize("cache", ["on", "off"])
+    @pytest.mark.parametrize("damage", ["truncated", "empty"])
+    def test_a_rollout_cut_short_is_unreadable_and_kept_nowhere(
+        self, tmp_path, cache_home, monkeypatch, cache, damage
+    ):
+        """zstd reports a file that ends early with EOFError, which is
+        neither its own error nor an OSError, so no handler caught it and one
+        such rollout took every search down. It must read as unreadable, as a
+        corrupt one does, and leave nothing behind: no copy, and no stored
+        parse of the part that did decompress -- which, streamed, is most of
+        it."""
+        if cache == "off":
+            monkeypatch.setenv("SESSION_BROWSER_CACHE", "0")
+        f = self._rollout(tmp_path)
+        with f.open("a") as fh:
+            for _ in range(4000):  # incompressible, so the cut falls late
+                record = {"type": "event_msg", "payload": {"type": "agent_message"}}
+                record["payload"]["message"] = os.urandom(48).hex()
+                fh.write(json.dumps(record) + "\n")
+        z = self._compress(f)
+        data = z.read_bytes()
+        z.write_bytes(data[: len(data) - 1000] if damage == "truncated" else b"")
+        if damage == "truncated":
+            read = 0
+            with (
+                pytest.raises(OSError, match="decompress"),
+                compressed.open_binary(z) as fh,
+            ):
+                for _line in fh:
+                    read += 1
+            assert read > 1000  # it failed part-way, not at the start
+        session = Session(id="cx-z", provider="codex", content_path=str(z))
+
+        [result] = search_sessions([session], self.WORD)
+
+        assert result.unreadable
+        assert any("decompress" in w for w in result.warnings)
+        assert self._copies() == []
+        assert list(compressed.cache_dir().glob(".partial-*")) == []
+        entries = cache_home / "entries"
+        assert not entries.exists() or not any(entries.rglob("*.txt"))
+
+    def test_head_and_lineage_reads_make_no_copy(self, tmp_path, cache_home):
+        from session_browser.transcript import codex_fork_base, lineage_ids
+
+        f = self._rollout(tmp_path)
+        with f.open("a") as fh:
+            fh.write(json.dumps({"type": "event_msg", "session_id": "cx-older"}) + "\n")
+        z = self._compress(f)
+        session = Session(id="cx-z", provider="codex", content_path=str(z))
+
+        assert lineage_ids("codex", "cx-z", str(z)) == {"cx-z", "cx-older"}
+        assert codex_fork_base(session) is None  # read its first line to say so
+        assert self._copies() == []
+
+    def test_a_copy_swept_mid_read_falls_back_to_the_rollout(
+        self, tmp_path, cache_home
+    ):
+        z = self._compress(self._rollout(tmp_path))
+        gone = compressed.cache_dir() / "swept-away.jsonl"
+        looked = (gone, time.time(), os.stat(z))
+        with (
+            patch.object(compressed, "_copy", return_value=looked),
+            compressed.open_binary(z) as fh,
+        ):
+            assert self.WORD.encode() in fh.read()
+
+    def test_the_sweep_keeps_what_scans_use_and_ages_out_the_rest(
+        self, tmp_path, cache_home
+    ):
+        """A copy's mtime is when a scan last wanted it. A scan refreshes it
+        through readable(); a parse through open_binary() does not, so what
+        only a parse read -- every copy, before the entry cache -- expires."""
+        scanned = self._compress(self._rollout(tmp_path, "cx-scanned"))
+        parsed = self._compress(self._rollout(tmp_path, "cx-parsed"))
+        copies = [compressed.readable(scanned), compressed.readable(parsed)]
+        partial = compressed.cache_dir() / ".partial-stale"
+        partial.write_bytes(b"half a file")
+        fresh = compressed.cache_dir() / ".partial-fresh"
+        fresh.write_bytes(b"still being written")
+        now = time.time()
+        long_ago = now - 2 * compressed.SWEEP_EVERY
+        for p in (*copies, partial):
+            os.utime(p, (long_ago, long_ago))
+        compressed._known.clear()
+
+        assert compressed.readable(scanned) == copies[0]  # a scan wants it
+        with compressed.open_binary(parsed) as fh:  # a parse reads, wants nothing
+            assert self.WORD.encode() in fh.read()
+
+        assert compressed.sweep(now) == 1
+        assert copies[0].exists() and not copies[1].exists()
+        assert fresh.exists() and not partial.exists()
+
+    def test_the_sweep_is_rationed_and_makes_nothing_where_nothing_was(
+        self, tmp_path, cache_home
+    ):
+        assert compressed.sweep_if_due() == 0
+        assert not compressed.cache_dir().exists()
+
+        z = self._compress(self._rollout(tmp_path))
+        long_ago = time.time() - 2 * compressed.SWEEP_EVERY
+        os.utime(compressed.readable(z), (long_ago, long_ago))
+        assert compressed.sweep_if_due() == 1
+        os.utime(compressed.readable(z), (long_ago, long_ago))
+        assert compressed.sweep_if_due() == 0  # once a day, not once a search
+        later = time.time() + compressed.SWEEP_EVERY + 1
+        assert compressed.sweep_if_due(later) == 1
 
 
 class TestEpochMsToIso:
