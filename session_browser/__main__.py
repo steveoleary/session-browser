@@ -1,5 +1,5 @@
 """Entry point: python -m session_browser."""
 
-from .app import main
+from .launch import main
 
 main()

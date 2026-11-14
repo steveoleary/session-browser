@@ -45,7 +45,7 @@ Repository = "https://github.com/steveoleary/session-browser"
 Issues = "https://github.com/steveoleary/session-browser/issues"
 
 [project.scripts]
-session-browser = "session_browser.app:main"
+session-browser = "session_browser.launch:main"
 
 [tool.setuptools]
 packages = ["session_browser"]
