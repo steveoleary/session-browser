@@ -175,6 +175,8 @@ means clipped; expand retrieves the full entry. Empty readable sessions use [].
 
 _GET_EPILOG = """Output contract:
 Default format: text (Markdown). JSON must be requested with --format json.
+Text puts each entry's time before its role, in UTC ("10:12:35Z Assistant:"),
+dated on the first entry and whenever the day changes; untimed entries have none.
 Single JSON example: {{"session": {{"id": "claude:abc", ...}},
   "entries": [{{"entry_index": 0, "role": "user", ...}}], ...}}
 Batch JSON example: {{"sessions": [{{"session": {{"id": "claude:abc", ...}},
@@ -2091,6 +2093,7 @@ def cmd_get(args) -> int:
                 ),
                 roles=roles,
                 brief=brief,
+                timestamps=True,
             )
             for _, t, total, window, indices in views
         ]

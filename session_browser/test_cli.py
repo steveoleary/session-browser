@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import UTC
 from pathlib import Path
 from unittest.mock import patch
@@ -12,6 +13,9 @@ import pytest
 
 from session_browser.cli import run_cli
 from session_browser.discovery import Session
+
+# The time get --format text puts before each role: dated when the day changes.
+_STAMP = r"(?:\d{4}-\d\d-\d\d )?\d\d:\d\d:\d\dZ "
 
 
 def write_claude(path: Path, texts: list[str]) -> None:
@@ -2591,8 +2595,9 @@ class TestGetBrief:
         # Stated even though the body cannot show it: "the first 2 user turns"
         # and "every user turn there was" render identically.
         assert "- Entries: 5 of 24 (brief: first 2 user, last 3 assistant)" in out
-        assert "[0] User: ask 0" in out
-        assert "[22] Assistant: answer 7" in out
+        # Each block carries its index and then its time (see get --help).
+        assert re.search(rf"\[0\] {_STAMP}User: ask 0", out)
+        assert re.search(rf"\[22\] (?:{_STAMP})?Assistant: answer 7", out)  # untimed
         assert "echo 3" not in out
 
     def test_brief_refuses_to_share_a_call_with_role(self, talky_cli):
@@ -2952,7 +2957,7 @@ class TestGetRoleFilter:
         code, out, _ = mixed_cli("get", "claude:mmm", "--role", "user")
         assert code == 0
         assert "- Entries: 1 of 5 (roles: user)" in out
-        assert "[0] User: please fix the login bug" in out
+        assert "[0] 2026-06-01 10:00:00Z User: please fix the login bug" in out
         assert "looking at it now" not in out and "1 failed" not in out
 
     def test_error_pseudo_role_finds_failed_tool_calls(self, mixed_cli):

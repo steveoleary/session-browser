@@ -2549,6 +2549,25 @@ class TestPiParser:
 
 
 class TestRendering:
+    def test_timestamps_are_utc_and_dated_when_the_day_changes(self):
+        t = Transcript(
+            Session(id="t", provider="claude"),
+            [
+                TranscriptEntry("user", "late ask", "2026-06-01T23:59:58+01:00"),
+                TranscriptEntry("assistant", "same day", "2026-06-01T22:59:59Z"),
+                TranscriptEntry("tool", "untimed"),
+                TranscriptEntry("assistant", "next day", "2026-06-02T00:00:01Z"),
+            ],
+        )
+        assert render_text(t, timestamps=True).split("\n\n") == [
+            "2026-06-01 22:59:58Z User: late ask",
+            "22:59:59Z Assistant: same day",
+            "Tool: untimed",
+            "2026-06-02 00:00:01Z Assistant: next day",
+        ]
+        # Off unless asked for: the TUI places highlights by label length.
+        assert render_text(t).startswith("User: late ask")
+
     def _transcript(self) -> Transcript:
         s = Session(
             id="abc",

@@ -176,22 +176,60 @@ def entry_matches_roles(entry: TranscriptEntry, roles: set[str]) -> bool:
 
 
 def render_text(
-    transcript: Transcript, *, entry_indices: list[int] | None = None
+    transcript: Transcript,
+    *,
+    entry_indices: list[int] | None = None,
+    timestamps: bool = False,
 ) -> str:
     """Readable, Markdown-compatible transcript body.
 
     *entry_indices* are the absolute positions of a role-filtered subset;
     each block is then prefixed with its position so it can be fed back to
     get --entries or matched against an entry_index from search or from
-    get's JSON."""
+    get's JSON.
+
+    *timestamps* puts each entry's time before its role, in UTC as the JSON
+    has it: ``10:12:35Z``, with the date as well on the first entry and
+    whenever the day changes. Whether a reply came before or after something
+    in another session is a question about times, and without them the text
+    form could not answer it. Off for the TUI, which places highlights by
+    the label's length."""
+    stamps = (
+        _entry_stamps(transcript.entries)
+        if timestamps
+        else [""] * len(transcript.entries)
+    )
     if entry_indices is None:
-        blocks = [f"{entry_label(e)}: {e.text}" for e in transcript.entries]
+        blocks = [
+            f"{stamp}{entry_label(e)}: {e.text}"
+            for stamp, e in zip(stamps, transcript.entries, strict=True)
+        ]
     else:
         blocks = [
-            f"[{i}] {entry_label(e)}: {e.text}"
-            for i, e in zip(entry_indices, transcript.entries, strict=True)
+            f"[{i}] {stamp}{entry_label(e)}: {e.text}"
+            for i, stamp, e in zip(
+                entry_indices, stamps, transcript.entries, strict=True
+            )
         ]
     return "\n\n".join(blocks) if blocks else "(empty session)"
+
+
+def _entry_stamps(entries: list[TranscriptEntry]) -> list[str]:
+    """'HH:MM:SSZ ' per entry, dated when the day changes; '' when untimed."""
+    stamps: list[str] = []
+    day = None
+    for e in entries:
+        ts = _parse_ts(e.timestamp)
+        if ts is None:
+            stamps.append("")
+            continue
+        ts = ts.astimezone(UTC)
+        clock = ts.strftime("%H:%M:%SZ ")
+        if ts.date() != day:
+            day = ts.date()
+            clock = f"{day.isoformat()} {clock}"
+        stamps.append(clock)
+    return stamps
 
 
 def render_markdown(
@@ -202,6 +240,7 @@ def render_markdown(
     entry_indices: list[int] | None = None,
     roles: list[str] | None = None,
     brief: tuple[int, int] | None = None,
+    timestamps: bool = False,
 ) -> str:
     """Markdown document: metadata header + transcript body.
 
@@ -252,7 +291,9 @@ def render_markdown(
     elif roles is not None and not transcript.entries:
         body = f"(no entries with roles: {', '.join(roles)})"
     else:
-        body = render_text(transcript, entry_indices=entry_indices)
+        body = render_text(
+            transcript, entry_indices=entry_indices, timestamps=timestamps
+        )
     lines += ["", "---", "", body, ""]
     return "\n".join(lines)
 
