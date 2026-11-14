@@ -31,6 +31,7 @@ from .transcript import (
     canonical_id,
     codex_fork_base,
     codex_prefix_entries,
+    codex_thread_of_segment,
     entry_matches_roles,
     is_command_noise,
     iter_entries,
@@ -187,6 +188,10 @@ all entry keys; entry_index is absolute and matches search snippets. A batch's
 only what came after the fork: its earlier history is the first "entries"
 entries of session "id" (null when that history is not on this machine).
 It is reported, not spliced in, so entry indices stay the ones search reports.
+A rewound Codex thread (Esc-Esc rewind) reads as one session across all its
+files. The turns a rewind undid stay where they happened, each with
+"rewound": true in its metadata and "(rewound)" after its role in text output:
+it happened, but the conversation went on from before it.
 "briefed_by" appears when the opening request names a file in another Claude
 session's scratchpad (/private/tmp/claude-<uid>/<project>/<id>/scratchpad/), as
 work handed to another agent through Herdr usually does: "id" is the session
@@ -1837,6 +1842,19 @@ def _fork_receipt(
     source = next(
         (s for s in discovered if s.provider == "codex" and s.id == source_id), None
     )
+    if (
+        source is None
+        and (owner := codex_thread_of_segment(source_id, discovered)) is not None
+    ):
+        # The fork's history ends in a file a rewind made. Which of that
+        # thread's entries it inherits is not counted: no fork of a rewound
+        # thread has been seen to check the shape against.
+        receipt["id"] = f"codex:{owner.id}"
+        warnings.append(
+            f"forked from codex:{owner.id} after it was rewound; how much of "
+            "its history the fork inherits is not counted"
+        )
+        return receipt
     if source is None:
         warnings.append(
             f"forked from codex:{source_id}, which is not on this machine; "

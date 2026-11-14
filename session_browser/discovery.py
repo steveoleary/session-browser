@@ -77,6 +77,16 @@ class Session:
     # no record of its running processes (Codex, OpenCode, Pi) or for a
     # Claude subagent, whose process is its root's.
     live: bool | None = field(default=None, init=False)
+    # A rewound Codex thread's EARLIER rollout files, oldest first; the newest
+    # stays content_path, because that is the file Codex goes on appending to
+    # and the one its index names. Codex's Esc-Esc rewind starts a new file
+    # for the same thread, rollout-<ts>-<thread>_<segment>.jsonl, holding only
+    # the records written after the rewind; its history_base says where in
+    # the previous file the history it continues from ends. Every reader of a
+    # transcript -- parser, prefilter, deletion -- has to see the whole chain,
+    # or text said before the rewind is unreachable. init=False for the same
+    # reason as the three above: almost no session has one.
+    segments: tuple[str, ...] = field(default=(), init=False)
 
     @property
     def sort_key(self) -> str:
@@ -585,8 +595,126 @@ def _scan_codex_db(db_path: Path) -> list[Session]:
             s.content_path = r["rollout_path"] + compressed.SUFFIX
         sessions.append(s)
     if missing:
-        sessions.extend(_codex_index_gap(sessions, [on_disk[p] for p in missing]))
+        gap = _codex_attach_segments(sessions, [on_disk[p] for p in missing], rows)
+        if gap:
+            sessions.extend(_codex_index_gap(sessions, gap))
     return sessions
+
+
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+# rollout-<local time>-<thread id>[_<segment id>].jsonl[.zst]
+_CODEX_ROLLOUT_NAME = re.compile(
+    rf"rollout-\d{{4}}-\d\d-\d\dT\d\d-\d\d-\d\d-({_UUID})(?:_({_UUID}))?\.jsonl",
+    re.IGNORECASE,
+)
+
+
+def codex_rollout_ids(name: str) -> tuple[str, str] | None:
+    """(thread id, segment id) from a rollout's file name; the segment id is
+    '' for a thread's first file. None for a name of another shape.
+
+    The name is the one place a rewind segment says what it is without being
+    opened: its session_meta carries the thread's own id, no forked_from_id,
+    and a history_base that otherwise reads exactly like a fork's."""
+    match = _CODEX_ROLLOUT_NAME.match(name)
+    if match is None:
+        return None
+    return match.group(1), match.group(2) or ""
+
+
+def codex_segment_key(path: str | Path) -> str:
+    """Sort key putting one thread's rollout files in the order they began.
+
+    The segment id, or the thread id for the first file: both are UUIDv7, so
+    their text sorts by creation time in UTC. The name's leading timestamp is
+    local time and goes backwards for an hour each autumn."""
+    name = os.path.basename(path)
+    ids = codex_rollout_ids(name)
+    return (ids[1] or ids[0]).lower() if ids is not None else name
+
+
+def _codex_attach_segments(
+    indexed: list[Session], unindexed: list[Path], rows
+) -> list[Path]:
+    """Hand a rewound thread's other files to its session; return the rest.
+
+    Codex's index names only one rollout per thread, so every other file of
+    a rewound thread looks unindexed, and the gap reader used to open each
+    one -- a 39 MB first file decompressed, on every discovery -- only to drop
+    it for having an id already known. A file is attached by its name alone,
+    to the session of the thread it names, when that thread has a segment
+    among its files. The newest becomes content_path whichever file the index
+    names: a rewind lands on disk before the index catches up with it.
+
+    A file of an archived thread is dropped, as the thread's own row is.
+    """
+    by_id: dict[str, Session] | None = None
+    archived: set[str] | None = None
+    files: dict[str, list[Path]] = {}
+    rest: list[Path] = []
+    for path in unindexed:
+        ids = codex_rollout_ids(path.name)
+        if ids is None:
+            rest.append(path)
+            continue
+        if by_id is None:
+            by_id = {s.id: s for s in indexed}
+        if ids[0] in by_id:
+            files.setdefault(ids[0], []).append(path)
+            continue
+        if archived is None:
+            archived = {r["id"] for r in rows if r["archived"]}
+        if ids[0] not in archived:
+            rest.append(path)
+    for thread_id, extra in files.items():
+        owner = by_id[thread_id]
+        everything = [Path(owner.content_path), *extra]
+        named = [codex_rollout_ids(p.name) for p in everything]
+        if not any(ids is not None and ids[1] for ids in named):
+            # Not a rewind: a second plain file for a known thread. Left to
+            # the gap reader, which drops it for its known id, as before.
+            rest.extend(extra)
+            continue
+        everything.sort(key=codex_segment_key)
+        newest = everything.pop()
+        if str(newest) != owner.content_path:
+            owner.content_path = str(newest)
+            try:
+                written = _epoch_ms_to_iso(
+                    newest.stat().st_mtime_ns // 1_000_000, zulu=True
+                )
+            except OSError:
+                written = ""
+            # Same spelling as the index's, so the two compare as times.
+            owner.updated_at = max(owner.updated_at, written)
+        _codex_set_segments(owner, everything)
+    return rest
+
+
+def _codex_set_segments(session: Session, earlier: list[Path]) -> None:
+    """Record *earlier* as *session*'s first files, and date it from the first.
+
+    The index's created_at_ms is the newest segment's, so a rewound thread
+    would otherwise claim to have started at its last rewind. Its id is a
+    UUIDv7, whose top 48 bits are the creation time in milliseconds -- within
+    20 ms of the first file's session_meta on every rewound thread measured --
+    so the start is known without opening the first file.
+    """
+    session.segments = tuple(str(p) for p in sorted(earlier, key=codex_segment_key))
+    started = _uuid7_iso(session.id)
+    if started:
+        session.created_at = started
+
+
+def _uuid7_iso(value: str) -> str:
+    """The creation time a version-7 UUID carries, as Codex spells times."""
+    if len(value) != 36 or value[14] != "7":
+        return ""
+    try:
+        ms = int(value[:8] + value[9:13], 16)
+    except ValueError:
+        return ""
+    return _epoch_ms_to_iso(ms, zulu=True)
 
 
 # Above this share of the tree unindexed, reading the gap from disk stops
@@ -734,7 +862,11 @@ def _codex_sessions_from_files(files: Iterable[Path]) -> list[Session]:
 
     The whole of the file scan, and also how the index path covers the few
     rollouts Codex never indexed. A file that cannot be read is logged and
-    skipped rather than allowed to cost the others."""
+    skipped rather than allowed to cost the others.
+
+    A rewound thread's files make one session, read from its newest file as
+    the index would describe it (see ``_codex_rewound_threads``)."""
+    files, chains = _codex_rewound_threads(files)
     sessions: list[Session] = []
     for f in files:
         try:
@@ -744,7 +876,55 @@ def _codex_sessions_from_files(files: Iterable[Path]) -> list[Session]:
             continue
         if session is not None:
             sessions.append(session)
+    for chain in chains:
+        try:
+            session = _codex_session_from_chain(chain)
+        except Exception as exc:
+            log.warning("Skipping codex session %s: %s", chain[-1].name, exc)
+            continue
+        if session is not None:
+            sessions.append(session)
     return sessions
+
+
+def _codex_rewound_threads(
+    files: Iterable[Path],
+) -> tuple[list[Path], list[list[Path]]]:
+    """(plain files, rewound threads) -- each thread its files, oldest first.
+
+    A thread counts as rewound when one of its files is a segment
+    (``rollout-<ts>-<thread>_<segment>``); every file named for that thread
+    then belongs to it, in the order ``codex_segment_key`` gives."""
+    named = [(f, codex_rollout_ids(f.name)) for f in files]
+    rewound = {ids[0] for _f, ids in named if ids is not None and ids[1]}
+    if not rewound:
+        return [f for f, _ids in named], []
+    plain: list[Path] = []
+    threads: dict[str, list[Path]] = {}
+    for f, ids in named:
+        if ids is not None and ids[0] in rewound:
+            threads.setdefault(ids[0], []).append(f)
+        else:
+            plain.append(f)
+    chains = [sorted(group, key=codex_segment_key) for group in threads.values()]
+    return plain, chains
+
+
+def _codex_session_from_chain(chain: list[Path]) -> Session | None:
+    """One session for a rewound thread's files, as the index describes it:
+    the newest file's metadata, the thread's first prompt as the summary, and
+    the thread's own start as created_at."""
+    session = _codex_session_from_file(chain[-1])
+    if session is None or len(chain) == 1:
+        return session
+    first = chain[0]
+    ids = codex_rollout_ids(first.name)
+    if ids is not None and not ids[1]:
+        # The thread's own first file survives, so its first prompt is the
+        # thread's -- the newest file's is whatever was sent after a rewind.
+        session.summary = _codex_first_user_message(compressed.readable(first))
+    _codex_set_segments(session, chain[:-1])
+    return session
 
 
 def _codex_session_from_file(f: Path) -> Session | None:

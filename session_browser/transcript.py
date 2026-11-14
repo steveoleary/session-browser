@@ -43,6 +43,8 @@ from session_browser.discovery import (
     _claude_summary,
     _codex_injected,
     _opencode_db_path,
+    codex_rollout_ids,
+    codex_segment_key,
     opencode_execute,
 )
 
@@ -154,6 +156,10 @@ def entry_label(entry: TranscriptEntry) -> str:
             label = "Tool output"
         if entry.metadata.get("is_error"):
             label += " (error)"
+    if entry.metadata and entry.metadata.get("rewound"):
+        # Undone by a Codex rewind: what happened, but not what the model
+        # went on from. See the note above _codex_link_ordinal.
+        label += " (rewound)"
     return label
 
 
@@ -1261,6 +1267,50 @@ def _prefilter_file(session: Session) -> Path | None:
     return None
 
 
+def _segment_prefilter_files(sessions: Iterable[Session]) -> Iterator[Path]:
+    """The raw files a prefilter may scan for rewound threads' earlier files.
+
+    Kept apart from ``_prefilter_file``, which runs for every file-backed
+    session several times per search; this loop does real work only for the
+    handful of sessions a rewind left in more than one file."""
+    for s in sessions:
+        if not s.segments:
+            continue
+        for p in s.segments:
+            if p.endswith(compressed.SUFFIX):
+                try:
+                    yield compressed.readable(Path(p))
+                except OSError:
+                    continue  # the parse reports it
+            else:
+                yield Path(p)
+
+
+def _chain_may_match(
+    session: Session, needles: list[str] | None, rg_candidates: set[Path] | None
+) -> bool:
+    """``must_parse`` for a rewound thread: a candidate when ANY of its files
+    may match, since a phrase said before the rewind is only in an earlier
+    one. A file that cannot be scanned leaves it to the parse to report."""
+    if needles is None:
+        return True
+    newest = _prefilter_file(session)
+    if newest is None:
+        return True
+    for path in (newest, *_segment_prefilter_files((session,))):
+        try:
+            if not path.is_file():
+                return True
+            if rg_candidates is not None:
+                if path in rg_candidates:
+                    return True
+            elif _file_may_match(path, needles, session.provider):
+                return True
+        except OSError:
+            return True
+    return False
+
+
 def _rg_candidate_paths(
     sessions: list[Session], needles: list[str]
 ) -> set[Path] | None:
@@ -1279,10 +1329,11 @@ def _rg_candidate_paths(
     rg = shutil.which("rg")
     if rg is None:
         return None
-    paths = sorted(
-        {p for s in sessions if (p := _prefilter_file(s)) is not None and p.is_file()},
-        key=os.fspath,
-    )
+    wanted = {
+        p for s in sessions if (p := _prefilter_file(s)) is not None and p.is_file()
+    }
+    wanted.update(p for p in _segment_prefilter_files(sessions) if p.is_file())
+    paths = sorted(wanted, key=os.fspath)
     if not paths:
         return set()
     # Keep argv comfortably below platform limits on installations with many
@@ -1376,16 +1427,15 @@ def _rg_candidate_paths(
         )
     )
 
-    codex_paths = sorted(
-        {
-            p
-            for s in sessions
-            if s.provider == "codex"
-            and (p := _prefilter_file(s)) is not None
-            and p.is_file()
-        },
-        key=os.fspath,
-    )
+    codex_wanted = {
+        p
+        for s in sessions
+        if s.provider == "codex"
+        and (p := _prefilter_file(s)) is not None
+        and p.is_file()
+    }
+    codex_wanted.update(p for p in _segment_prefilter_files(sessions) if p.is_file())
+    codex_paths = sorted(codex_wanted, key=os.fspath)
 
     # The codex join marker stays a separate invocation on purpose: folding it
     # into scan_args would apply it to claude files too, and a claude file that
@@ -1460,10 +1510,10 @@ def _parse_worker(args: tuple[Session, str | list[str]]):
 
     The worker gets the whole Session, not just the fields that locate its
     file. How a file is read depends on more than where it is: a thread_spawn
-    child skips its spawner's copied history, and a guardian's prompt is
-    relabelled. Rebuilt from id, provider and path, a worker read both as
-    plain rollouts, so a search that crossed the process threshold answered
-    differently from one that did not.
+    child skips its spawner's copied history, a guardian's prompt is relabelled,
+    a rewound thread spans several files. Rebuilt from id, provider and path,
+    a worker read all three as plain rollouts, so a search that crossed the
+    process threshold answered differently from one that did not.
     """
     session, query = args
     r = search_session(session, query)
@@ -1662,6 +1712,8 @@ def search_sessions(
         drift apart on a subtlety like a file that vanished between the
         candidate scan and the probe.
         """
+        if s.segments:
+            return _chain_may_match(s, needles, rg_candidates)
         path = _prefilter_file(s)
         if needles is not None and path is not None:
             try:
@@ -2312,6 +2364,7 @@ def search_session_word_hits(
             if sessions[i].provider == "opencode"
             or held[i][t]
             or _prefilter_file(sessions[i]) in found
+            or (sessions[i].segments and _chain_may_match(sessions[i], needles, found))
         ]
     hits: dict[str, WordsHit] = {}
     results = search_sessions(
@@ -2409,7 +2462,10 @@ def iter_entries(session: Session, warnings: list[str]) -> Iterator[TranscriptEn
             if session.subagent_kind == "thread_spawn"
             else _codex_entries
         )
-        entries = _dedupe_codex_turns(_parse_jsonl(path, warnings, event_fn))
+        if session.segments:
+            entries = _codex_rewound_entries(session, path, warnings, event_fn)
+        else:
+            entries = _dedupe_codex_turns(_parse_jsonl(path, warnings, event_fn))
         if session.subagent_kind == "guardian":
             entries = _codex_guardian_entries(entries)
         yield from entries
@@ -3156,22 +3212,211 @@ def _dedupe_codex_turns(
 
 
 def codex_fork_base(session: Session) -> tuple[str, int] | None:
-    """(source thread id, byte boundary) when *session* is a Codex fork."""
+    """(source thread id, byte boundary) when *session* is a Codex fork.
+
+    Read from the thread's own first file, the one named for the thread
+    alone. A rewind segment's history_base names the same thread's previous
+    file in exactly a fork's shape, so the newest file of a rewound thread
+    would otherwise be reported as a fork of itself; a segment can only
+    continue its own thread, so it is never asked. A thread whose first file
+    is gone cannot say what it was forked from."""
     if session.provider != "codex" or session.subagent_kind:
         return None
+    first_file = None
+    for p in (*session.segments, session.content_path):
+        ids = codex_rollout_ids(os.path.basename(p))
+        if ids is None or not ids[1]:
+            first_file = p
+            break
+    if first_file is None:
+        return None
+    base = _codex_history_base(Path(first_file))
+    if base is None:
+        return None
+    source, end = base.get("thread_id"), base.get("end_byte_offset")
+    if not isinstance(source, str) or not isinstance(end, int) or end < 0:
+        return None
+    if source == session.id:
+        return None
+    return source, end
+
+
+def codex_thread_of_segment(segment_id: str, sessions: Iterable[Session]):
+    """The rewound Codex session one of whose files is segment *segment_id*.
+
+    A fork names its source by the file its history ends in, and once a
+    source has been rewound that can be a segment rather than the thread."""
+    for s in sessions:
+        if s.provider == "codex" and s.segments:
+            for p in (*s.segments, s.content_path):
+                ids = codex_rollout_ids(os.path.basename(p))
+                if ids is not None and ids[1] == segment_id:
+                    return s
+    return None
+
+
+def _codex_history_base(path: Path) -> dict | None:
+    """The ``history_base`` on a rollout's first line, if it has one."""
     try:
-        with open(compressed.readable(Path(session.content_path)), "rb") as fh:
+        with open(compressed.readable(path), "rb") as fh:
             first = json.loads(fh.readline())
     except (OSError, ValueError):
         return None
     meta = first.get("payload") if isinstance(first, dict) else None
     base = meta.get("history_base") if isinstance(meta, dict) else None
-    if not isinstance(base, dict):
-        return None
-    source, end = base.get("thread_id"), base.get("end_byte_offset")
-    if not isinstance(source, str) or not isinstance(end, int) or end < 0:
-        return None
-    return source, end
+    return base if isinstance(base, dict) else None
+
+
+# ---------------------------------------------------------------------------
+# Codex rewinds
+# ---------------------------------------------------------------------------
+#
+# An Esc-Esc rewind in Codex's TUI (interrupt, pick an earlier prompt, edit,
+# resend) does not truncate the rollout. It starts a new file for the same
+# thread, rollout-<ts>-<thread>_<segment>.jsonl, holding only what is written
+# after the rewind, and its first line's history_base names the previous file
+# (by segment id, or the thread id for the thread's first file) and the
+# ordinal and byte offset where the history it continues from ends. The
+# previous file keeps everything past that point: the turn or turns the rewind
+# undid.
+#
+# The split is made on the record's ordinal, inside the record callback, so
+# the per-line loop in _parse_jsonl stays the one every other transcript goes
+# through. The byte offset is the authority, and it is turned into an ordinal
+# by reading the one record that starts there; measured on every link on one
+# machine (five, codex-cli 0.149-0.169), that record's ordinal is the link's
+# end_ordinal_exclusive and ordinals rise by one per record. Once a record is
+# past the boundary everything after it is too, ordinal or not: a record that
+# carried none would otherwise put an undone turn back into the live history.
+#
+# The undone turns are KEPT, where they happened, rather than dropped as
+# Codex's own view of the thread drops them. They are not drafts: one thread
+# here kept 18 records of its first file and undid 189, commands and edits
+# that really ran. Each is marked ``rewound`` in its metadata, which every
+# renderer shows beside the role (see entry_label), so an abandoned prompt can
+# never be read as the instruction the model went on to follow. Nothing is
+# added to the text: a phrase the raw file does not contain must not match,
+# or the prefilter would rule out a file a canonical parse then matches.
+
+
+def _codex_link_ordinal(path: Path, base: dict, warnings: list[str]) -> int | None:
+    """The first undone ordinal in *path*, from a history_base naming it.
+
+    Read from the record at end_byte_offset; end_ordinal_exclusive answers
+    when that record cannot be. None, with a warning, when neither can, and
+    then nothing in the file is marked undone."""
+    offset = base.get("end_byte_offset")
+    stated = base.get("end_ordinal_exclusive")
+    found = None
+    if type(offset) is int and offset > 0:
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(offset - 1)
+                if fh.read(1) == b"\n":
+                    record = json.loads(fh.readline() or b"null")
+                    if isinstance(record, dict):
+                        found = record.get("ordinal")
+        except (OSError, ValueError):
+            pass
+    if type(found) is int:
+        if type(stated) is int and stated != found:
+            warnings.append(
+                f"rewind boundary disagrees with itself in {path.name}: "
+                f"ordinal {found} at the byte offset, {stated} stated; "
+                "split at the byte offset"
+            )
+        return found
+    if type(stated) is int:
+        return stated
+    warnings.append(f"rewind boundary unreadable in {path.name}; nothing marked undone")
+    return None
+
+
+def _codex_rewind_plan(
+    session: Session, newest: Path, warnings: list[str]
+) -> list[tuple[Path, int | None]]:
+    """(readable file, first undone ordinal), in the order the files began.
+
+    The newest file is read whole (None). The chain is walked back from it
+    through each history_base; a file of the thread that no link reaches
+    -- a rewind past the start of the file it was made in -- was undone
+    entire, so it is read with every record undone (0) rather than dropped.
+    A link to a file that is not here ends the walk with a warning."""
+    by_id: dict[str, str] = {}
+    for p in session.segments:
+        ids = codex_rollout_ids(os.path.basename(p))
+        if ids is not None:
+            by_id[ids[1] or ids[0]] = p
+    splits: dict[str, int | None] = {session.content_path: None}
+    readable: dict[str, Path] = {session.content_path: newest}
+    current = session.content_path
+    while True:
+        ids = codex_rollout_ids(os.path.basename(current))
+        if ids is None or not ids[1]:
+            break  # a thread's first file: its history_base, if any, is a fork
+        base = _codex_history_base(readable[current])
+        previous = base.get("thread_id") if base is not None else None
+        prior = by_id.get(previous) if isinstance(previous, str) else None
+        if prior is None or prior in splits:
+            warnings.append(f"history before a rewind is unavailable: {previous}")
+            break
+        try:
+            readable[prior] = compressed.readable(Path(prior))
+        except OSError as exc:
+            warnings.append(f"history before a rewind is unavailable: {exc}")
+            break
+        splits[prior] = _codex_link_ordinal(readable[prior], base, warnings)
+        current = prior
+    plan: list[tuple[Path, int | None]] = []
+    for p in sorted((*session.segments, session.content_path), key=codex_segment_key):
+        if p in splits:
+            plan.append((readable[p], splits[p]))
+            continue
+        warnings.append(
+            f"{os.path.basename(p)} is on no rewind link; read as undone entire"
+        )
+        try:
+            plan.append((compressed.readable(Path(p)), 0))
+        except OSError as exc:
+            warnings.append(f"rewound history unavailable: {exc}")
+    return plan
+
+
+def _codex_rewound_entries(
+    session: Session,
+    newest: Path,
+    warnings: list[str],
+    event_fn: Callable[[dict], Iterable[TranscriptEntry]],
+) -> Iterator[TranscriptEntry]:
+    """A rewound thread's entries across all its files, in the order they
+    happened: each file's kept history, then what a rewind undid there,
+    marked, then the next file."""
+    for n, (path, end) in enumerate(_codex_rewind_plan(session, newest, warnings)):
+        # Only the thread's first file can open with a spawner's copied
+        # history, and the stateful parser that skips it is meant for one file.
+        fn = event_fn if n == 0 else _codex_entries
+        if end is None:
+            yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, fn))
+            continue
+        undone: list[dict] = []
+
+        def kept(obj: dict, fn=fn, end=end, undone=undone):
+            if undone:
+                undone.append(obj)
+                return ()
+            ordinal = obj.get("ordinal")
+            if type(ordinal) is int and ordinal >= end:
+                undone.append(obj)
+                return ()
+            return fn(obj)
+
+        yield from _dedupe_codex_turns(_parse_jsonl(path, warnings, kept))
+        for entry in _dedupe_codex_turns(
+            e for obj in undone for e in _codex_entries(obj)
+        ):
+            meta = dict(entry.metadata) if entry.metadata else {}
+            meta["rewound"] = True
+            yield TranscriptEntry(entry.role, entry.text, entry.timestamp, meta)
 
 
 def codex_prefix_entries(

@@ -60,6 +60,7 @@ from .transcript import (
     canonical_id,
     codex_fork_base,
     codex_prefix_entries,
+    codex_thread_of_segment,
     entry_label,
     entry_matches_roles,
     find_text_spans,
@@ -139,6 +140,13 @@ def _codex_fork_transcript(
         source_id, byte_end = base
         source = sessions_by_id.get(source_id)
         if source is None:
+            owner = codex_thread_of_segment(source_id, sessions_by_id.values())
+            if owner is not None:
+                warnings.append(
+                    f"fork history not joined: forked from {owner.id} after "
+                    "it was rewound"
+                )
+                return []
             warnings.append(f"fork history unavailable: {source_id}")
             return []
         earlier = inherited(source)

@@ -989,6 +989,76 @@ def _with_extra_codex_rollout(run: Callable[[], None]) -> None:
         extra.unlink()
 
 
+QUERY_REWOUND = "quollbeforetherewind"  # only in a rewound thread's first file
+_REWOUND_THREAD = "019b8f00-0000-7000-8000-000000000001"
+_REWOUND_SEGMENT = "019b8f05-0000-7000-8000-000000000002"
+
+
+def _with_rewound_codex_thread(run: Callable[[], None]) -> None:
+    """Run *run* with one rewound Codex thread added: two files, one index row.
+
+    Codex's index names only the newest file of a rewound thread, so the first
+    file looks unindexed. Discovery must attach it by name without opening
+    it, and search must still reach the phrase only it contains. The row is
+    written through ``sqlite3.Connection`` rather than ``connect``, which is
+    the counted entry point, so the setup is not counted as the workload's.
+    Removed afterwards even on failure."""
+    home = _corpus_home_guard()
+    day = home / ".codex" / "sessions" / "2026" / "01" / "05"
+    base = day / f"rollout-2026-01-05T09-30-00-{_REWOUND_THREAD}.jsonl"
+    segment = day / (
+        f"rollout-2026-01-05T09-40-00-{_REWOUND_THREAD}_{_REWOUND_SEGMENT}.jsonl"
+    )
+
+    def record(ordinal: int, payload: dict, kind: str = "event_msg") -> bytes:
+        obj = {
+            "timestamp": "2026-01-05T09:30:00.000Z",
+            "ordinal": ordinal,
+            "type": kind,
+            "payload": payload,
+        }
+        return json.dumps(obj).encode() + b"\n"
+
+    meta = {"id": _REWOUND_THREAD, "cwd": "/Users/perf/project0"}
+    kept = record(0, meta, "session_meta") + record(
+        1, {"type": "user_message", "message": f"a {QUERY_REWOUND} before it"}
+    )
+    base.write_bytes(
+        kept + record(2, {"type": "user_message", "message": "an undone turn"})
+    )
+    link = {
+        "thread_id": _REWOUND_THREAD,
+        "end_ordinal_exclusive": 2,
+        "end_byte_offset": len(kept),
+    }
+    segment.write_bytes(
+        record(2, {**meta, "history_base": link}, "session_meta")
+        + record(3, {"type": "user_message", "message": "after the rewind"})
+    )
+    conn = sqlite3.Connection(str(home / ".codex" / "state_5.sqlite"))
+    try:
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, cwd, first_user_message, "
+            "created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                _REWOUND_THREAD,
+                str(segment),
+                "/Users/perf/project0",
+                "a rewound thread",
+                1767605400000,
+                1767606000000,
+            ),
+        )
+        conn.commit()
+        run()
+    finally:
+        conn.execute("DELETE FROM threads WHERE id = ?", (_REWOUND_THREAD,))
+        conn.commit()
+        conn.close()
+        base.unlink(missing_ok=True)
+        segment.unlink(missing_ok=True)
+
+
 def _with_compressed_codex_rollouts(run: Callable[[], None]) -> None:
     """Run *run* with every corpus rollout compressed, as Codex compresses them.
 
@@ -1170,6 +1240,25 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "call on a real machine. If this rises to cli.list.no_codex_db's "
             "opens, the whole-tree fallback is back.",
             lambda: _with_extra_codex_rollout(lambda: _cli("list", "--limit", "50")),
+        ),
+        Workload(
+            "cli.list.codex_rewound",
+            "A rewound Codex thread's earlier files are attached by name and "
+            "never opened in discovery: every counter equals cli.list's. The "
+            "gap reader used to open each one, decompressing a 39 MB first "
+            "file on a real machine, only to drop it for a known id.",
+            lambda: _with_rewound_codex_thread(lambda: _cli("list", "--limit", "50")),
+        ),
+        Workload(
+            "cli.search.codex_rewound",
+            "A phrase said only before a rewind lives only in a file the "
+            "index does not name. The prefilter must scan that file too and "
+            "send exactly the one thread to a parse; zero parses means text "
+            "said before a rewind is unsearchable again.",
+            lambda: _with_rewound_codex_thread(
+                lambda: _cli("search", QUERY_REWOUND, "--provider", "codex")
+            ),
+            needs_rg=True,
         ),
         Workload(
             "cli.stats",

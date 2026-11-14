@@ -217,8 +217,10 @@ def _plan_codex(session: Session, subagents: int) -> DeletePlan:
         uuid.UUID(session.id)
     except ValueError:
         raise DeleteRefused(f"Not a Codex thread id: {session.id}") from None
+    # A rewound thread is several rollouts, and codex delete removes them all
+    # (checked on codex-cli 0.169.0), so the plan names each one.
     removes = (
-        Removal("rollout", session.content_path),
+        *(Removal("rollout", p) for p in (*session.segments, session.content_path)),
         Removal("index", "Codex's own thread and history rows"),
     )
     command = (codex, "delete", "--force", session.id)
@@ -254,13 +256,15 @@ def _run_provider_delete(plan: DeletePlan) -> str:
 
 
 def _check_codex_gone(session: Session, tool: str) -> None:
-    rollout = session.content_path
-    if rollout and Path(rollout).exists():
-        raise DeleteFailed(f"{tool} reported success but {rollout} remains")
-    if rollout.endswith(compressed.SUFFIX):
-        # A compressed rollout leaves its decompressed copy behind in this
-        # package's own cache, which nothing else would ever remove.
-        compressed.discard(Path(rollout))
+    rollouts = (*session.segments, session.content_path)
+    for rollout in rollouts:
+        if rollout and Path(rollout).exists():
+            raise DeleteFailed(f"{tool} reported success but {rollout} remains")
+    for rollout in rollouts:
+        if rollout.endswith(compressed.SUFFIX):
+            # A compressed rollout leaves its decompressed copy behind in this
+            # package's own cache, which nothing else would ever remove.
+            compressed.discard(Path(rollout))
 
 
 # ---------------------------------------------------------------------------

@@ -187,6 +187,22 @@ class TestCodexDelete:
         assert not rollout.exists()
         assert not copy.exists()
 
+    def test_a_rewound_thread_is_every_one_of_its_files(self, fake_codex, tmp_path):
+        # codex delete removes all of a rewound thread's rollouts; one left
+        # behind would come back as a session on the next discovery.
+        session, _log = fake_codex
+        earlier = tmp_path / "rollout-earlier.jsonl"
+        earlier.write_text("{}\n")
+        session.segments = (str(earlier),)
+        plan = deletion.plan_delete(session, [])
+        assert [r.value for r in plan.removes if r.label == "rollout"] == [
+            str(earlier),
+            session.content_path,
+        ]
+        # The fake removes only the newest file, so the earlier one remains.
+        with pytest.raises(DeleteFailed, match=r"rollout-earlier\.jsonl remains"):
+            deletion.delete_session(plan)
+
     def test_no_codex_on_path_is_refused(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PATH", str(tmp_path))
         session = Session(id=CODEX_ID, provider="codex")
