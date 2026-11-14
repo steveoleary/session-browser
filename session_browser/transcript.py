@@ -373,13 +373,19 @@ def transcript_to_dict(
     positions = range(len(t.entries)) if entry_indices is None else entry_indices
     entries = []
     for pos, e in zip(positions, t.entries, strict=True):
+        meta = e.metadata
+        if meta is not None and ("id" in meta or "call_id" in meta):
+            # The provider's call ids pair a call with its output for
+            # `calls`, which reads the entries themselves. In this view they
+            # are a token per tool entry that no reader asked for.
+            meta = {k: v for k, v in meta.items() if k != "id" and k != "call_id"}
         entries.append(
             {
                 "entry_index": pos,
                 "role": e.role,
                 "text": e.text,
                 "timestamp": e.timestamp or None,
-                "metadata": e.metadata,
+                "metadata": meta,
             }
         )
     return {
@@ -1565,6 +1571,7 @@ def _parse_worker(args: tuple[Session, str | list[str]]):
 
 
 _PROC_FALLBACK = object()  # pool unusable; caller should use the thread path
+_PROC_FALLBACK_WARNED = False
 _PROC_CTX_LOCK = threading.Lock()
 _PROC_CTX: object | None = None
 _PROC_CTX_TRIED = False
@@ -1718,10 +1725,17 @@ def _probe_in_processes(
                     total_entries=total,
                 )
             feed()
-    except Exception:
+    except Exception as exc:
         # A broken pool, an unpicklable payload, or an environment that cannot
         # spawn at all: discard partial work and let the caller re-run these
-        # sessions in threads, where the answer is identical.
+        # sessions in threads, where the answer is identical. Said once,
+        # because the answer is identical and only the time is not: this
+        # fallback was silent while every search in the TUI took it, 4x
+        # slower, until a wave was timed inside the app.
+        global _PROC_FALLBACK_WARNED
+        if not _PROC_FALLBACK_WARNED:
+            _PROC_FALLBACK_WARNED = True
+            log.warning("worker processes unavailable, parsing on threads: %s", exc)
         return _PROC_FALLBACK
     finally:
         if ex is not None:

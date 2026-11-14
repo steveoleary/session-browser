@@ -4410,3 +4410,13 @@ class TestSortFirstSaid:
             "claude:later",
             "claude:early",
         ]
+
+
+def test_get_json_leaves_out_the_ids_calls_pairs_by(calls_cli):
+    # The ids pair a call with its output for `calls`, which reads entries in
+    # memory; in get's JSON they would be a token per tool entry.
+    code, out, _ = calls_cli("get", "claude:tools", "--format", "json")
+    assert code == 0
+    metas = [e["metadata"] for e in json.loads(out)["entries"] if e["metadata"]]
+    assert metas
+    assert not any("id" in m or "call_id" in m for m in metas)

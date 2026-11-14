@@ -1257,6 +1257,14 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             needs_rg=True,
         ),
         Workload(
+            "cli.calls.common",
+            "A pattern in every session: calls keeps every candidate's "
+            "entries to pair outputs, so this pins how many transcripts a "
+            "broad pattern parses and that it still reads each one once.",
+            lambda: _cli("calls", QUERY_COMMON),
+            needs_rg=True,
+        ),
+        Workload(
             "cli.list.codex_rewound",
             "A rewound Codex thread's earlier files are attached by name and "
             "never opened in discovery: every counter equals cli.list's. The "
@@ -1455,6 +1463,58 @@ def _probe_jsonl(root: Path) -> Path:
     return path
 
 
+def _probe_claude_tools_jsonl(root: Path) -> Path:
+    """A Claude transcript of tool calls and their results.
+
+    The ``parse_jsonl`` probe holds user text only, so nothing measured the
+    tool_use and tool_result branches, which are most of an agent session's
+    records. One assistant record per call and one user record per result,
+    as Claude Code writes them, each block with the ids it carries."""
+    path = root / "probe-claude-tools.jsonl"
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ts = "2026-01-01T00:00:00Z"
+        lines: list[str] = []
+        for i in range(60):
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "timestamp": ts,
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": f"toolu_{i:04d}",
+                                    "name": "Bash",
+                                    "input": {"command": f"ls dir{i}"},
+                                }
+                            ]
+                        },
+                    }
+                )
+            )
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "timestamp": ts,
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": f"toolu_{i:04d}",
+                                    "content": f"file {i}",
+                                }
+                            ]
+                        },
+                    }
+                )
+            )
+        path.write_text("\n".join(lines) + "\n")
+    return path
+
+
 def _probe_codex_jsonl(root: Path) -> Path:
     """A small Codex rollout, in the record mix a real one carries.
 
@@ -1540,12 +1600,20 @@ def _probe_codex_jsonl(root: Path) -> Path:
 def loop_probes(root: Path) -> list[LoopProbe]:
     jsonl = _probe_jsonl(root)
     codex_jsonl = _probe_codex_jsonl(root)
+    claude_tools_jsonl = _probe_claude_tools_jsonl(root)
 
     def parse_jsonl() -> None:
         warnings: list[str] = []
         # The per-line decode loop: the single hottest path in the codebase,
         # run once per line of every transcript ever read.
         for _ in transcript._parse_jsonl(jsonl, warnings, transcript._claude_entries):
+            pass
+
+    def claude_tool_entries() -> None:
+        warnings: list[str] = []
+        for _ in transcript._parse_jsonl(
+            claude_tools_jsonl, warnings, transcript._claude_entries
+        ):
             pass
 
     def codex_entries() -> None:
@@ -1618,6 +1686,15 @@ def loop_probes(root: Path) -> list[LoopProbe]:
             "context manager per line (contextlib.suppress over try/except, "
             "measured at 4.85x) or an extra attribute lookup actually costs.",
             parse_jsonl,
+        ),
+        LoopProbe(
+            "loop.claude_tool_entries",
+            "Claude's tool_use and tool_result branches, most of an agent "
+            "session's records and outside loop.parse_jsonl's user-text "
+            "input. Each block's metadata carries the call id that pairs it "
+            "(measured at ~40 ns a block); more per block is paid on every "
+            "tool record of every Claude transcript read.",
+            claude_tool_entries,
         ),
         LoopProbe(
             "loop.ticking_rows",

@@ -5,8 +5,8 @@
     "python": "3.14",
     "moved": {},
     "added": [
-      "cli.calls.absent",
-      "cli.calls.rare"
+      "cli.calls.common",
+      "loop_opcodes.loop.claude_tool_entries"
     ]
   },
   "guards": {
@@ -26,6 +26,7 @@
     "cli.list.codex_db_stale": "A Codex index lacking one rollout must cost that rollout's read and no more: corpus_file_opens is cli.list's plus one file's worth. Codex leaves some rollouts unindexed for good, and when a gap fell back to scanning the whole tree it put ~1.5 s on every call on a real machine. If this rises to cli.list.no_codex_db's opens, the whole-tree fallback is back.",
     "cli.calls.absent": "calls finds its sessions through search's prefilter: a pattern in no session parses nothing, whatever the corpus holds.",
     "cli.calls.rare": "calls must parse only the prefilter's candidates, and once each: the call's output is paired from the entries the search already holds, never by reading a transcript again.",
+    "cli.calls.common": "A pattern in every session: calls keeps every candidate's entries to pair outputs, so this pins how many transcripts a broad pattern parses and that it still reads each one once.",
     "cli.list.codex_rewound": "A rewound Codex thread's earlier files are attached by name and never opened in discovery: every counter equals cli.list's. The gap reader used to open each one, decompressing a 39 MB first file on a real machine, only to drop it for a known id.",
     "cli.search.codex_rewound": "A phrase said only before a rewind lives only in a file the index does not name. The prefilter must scan that file too and send exactly the one thread to a parse; zero parses means text said before a rewind is unsearchable again.",
     "cli.stats": "Statistics come from discovery metadata alone; no transcript may be parsed to produce them.",
@@ -46,6 +47,20 @@
       "sqlite_connections": 3,
       "sqlite_statements": 3,
       "opencode_sessions_parsed": 0,
+      "process_pool_sessions": 0,
+      "progress_callbacks": 0,
+      "row_tick_wrappers": 0,
+      "zst_decompressions": 0
+    },
+    "cli.calls.common": {
+      "corpus_bytes_read": 2650919,
+      "corpus_file_opens": 772,
+      "transcripts_parsed": 278,
+      "prefilter_file_scans": 0,
+      "rg_subprocess_calls": 2,
+      "sqlite_connections": 3,
+      "sqlite_statements": 4,
+      "opencode_sessions_parsed": 40,
       "process_pool_sessions": 0,
       "progress_callbacks": 0,
       "row_tick_wrappers": 0,
@@ -390,6 +405,7 @@
   },
   "loop_guards": {
     "loop.parse_jsonl": "The per-line decode loop. Anything added per line is multiplied by every line of every transcript read -- this is where a context manager per line (contextlib.suppress over try/except, measured at 4.85x) or an extra attribute lookup actually costs.",
+    "loop.claude_tool_entries": "Claude's tool_use and tool_result branches, most of an agent session's records and outside loop.parse_jsonl's user-text input. Each block's metadata carries the call id that pairs it (measured at ~40 ns a block); more per block is paid on every tool record of every Claude transcript read.",
     "loop.ticking_rows": "The opencode row loop, which reads the entire part table. row_tick_wrappers pins that the wrapper exists; this pins what one row through it costs.",
     "loop.find_entry_matches": "The offsets loop, including its every-1024 cancellation gate. The gate must stay cheap: it runs on every hit, and a cancelled() call moved out of its mask would run on every one.",
     "loop.count_overlapping": "The match-counting scan. Its body is a str.find and an integer add; anything else added here runs once per match in the corpus.",
@@ -399,6 +415,7 @@
   },
   "loop_python": "3.14",
   "loop_opcodes": {
+    "loop.claude_tool_entries": 32642,
     "loop.codex_db_rows": 9738,
     "loop.codex_entries": 56758,
     "loop.count_overlapping": 7242,
