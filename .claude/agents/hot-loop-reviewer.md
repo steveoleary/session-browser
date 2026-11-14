@@ -32,11 +32,11 @@ they would catch: `corpus_bytes_read`, `corpus_file_opens`,
 
 ## The canonical shape
 
-`_ticking_rows` (`session_browser/transcript.py:1576`) wraps a SQLite cursor
+`_ticking_rows` (in `session_browser/transcript.py`) wraps a SQLite cursor
 to report scan depth. Its docstring states the reason plainly: wrapping the
 cursor *rather than testing inside the caller's loop* keeps the check off the
-path entirely when no progress is wanted. The call site
-(`transcript.py:1639`) only wraps when `progress is not None`, so a search
+path entirely when no progress is wanted. The call site, in
+`_search_opencode_bulk`, only wraps when `progress is not None`, so a search
 with no callback iterates the cursor exactly as before.
 
 Inlining that check into the `for sid, pdata in cur:` loop below it would run
