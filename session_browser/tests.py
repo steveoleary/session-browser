@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -2293,6 +2294,7 @@ class TestInSessionSearch:
 
 try:
     from textual.widgets import DataTable
+    from textual.worker import WorkerCancelled
 
     from session_browser.app import (
         MultiplexerChoice,
@@ -6850,9 +6852,13 @@ class TestUnorderedGlobalSearch:
         search = app.query_one("#global-search")
         search.value = query
         app._apply_filter(query)
-        # The literal wave, then the unordered wave it launches.
+        # The literal wave, then the unordered wave it launches. Setting the
+        # value has already started a search of its own, which the call above
+        # supersedes; waiting on that cancelled worker raises, about one run
+        # in eight, depending on whether it had started.
         for _ in range(3):
-            await app.workers.wait_for_complete()
+            with contextlib.suppress(WorkerCancelled):
+                await app.workers.wait_for_complete()
             await pilot.pause()
 
     async def test_literal_hits_rank_first_and_unordered_ones_open_with_matches(
