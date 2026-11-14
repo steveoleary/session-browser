@@ -209,6 +209,9 @@ Judgment `--help` does not carry:
 - A Codex **fork** holds only what came after the fork. `get` on one carries
   `forked_from` (text output leads with it): its earlier history is the first
   `entries` entries of that session, not missing.
+- An entry labelled `(rewound)` (`"rewound": true` in its metadata) was undone
+  by a Codex rewind: it ran, but the conversation went on from before it, so
+  read the entries after it for what was actually asked.
 - `--here` cannot see sessions with no recorded cwd. If its `warnings` says it
   excluded some and they matter, reach them with `--cwd`, a content search, or
   `--provider`.
