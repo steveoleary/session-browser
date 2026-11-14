@@ -2119,6 +2119,26 @@ _UNORDERED_MAX_HITS = 256
 # older one falls as far as the grade is deep. The cost of the split is
 # bounded by the YOURS column: a recent reply that says the words together
 # sits under at most that many sessions, and above every scattered one.
+#
+# Replayed 2026-11-14 (2,576 sessions) on what that one target could not
+# test: wanted sessions five to six weeks old, so recency no longer lifts
+# them, and remembered words that were the agent's. Rows are word hits only;
+# the wanted session's row is among them:
+#
+#   query   words by   rows  YOURS  CLOSE  SAID  QUOTED   recency  merged  split
+#   E F G   person      122     19      0    17      86        27       8      8
+#   H I J   person       29      1      0    23       5        11       1      1
+#   K L M   agent         8      0      1     5       2         4       1      1
+#   N O P   agent         4      0      2     2       0         2       1      1
+#   Q R S   agent        60     13      1    42       4        39      11     14
+#   T U V   agent        42      3      5    30       4        10       3      5
+#
+# Grades beat recency on every one, by most where it matters most: an old
+# target with common words went from 27th to 8th. An agent-worded target does
+# sink under the YOURS rows, as predicted and no further than that column --
+# 14th against 11th merged with 13 of them, 5th against 3rd with 3 -- and
+# still far above recency. Merging would buy those few rows back by giving up
+# the person-worded case the split exists for, so the split stays.
 WORDS_YOURS = 0
 WORDS_CLOSE = 1
 WORDS_SAID = 2
