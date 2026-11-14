@@ -166,6 +166,7 @@ where they disagree, `--help` describes the binary you are actually running.
 | A stable snapshot while other agents are working | add `--until -30m` |
 | Every time an agent ran a command, and what came back | `session-browser calls cue --tool Bash --format text` (`--errors` for failures only) |
 | Which subcommands of it were used, how often | `session-browser calls cue --count-by` |
+| When something was first said | `search "phrase" --sort first-said` — `--sort oldest` is by last activity; `first_said_at` is on each result |
 | Today's or yesterday's sessions | `--since today`, or `--since yesterday --until yesterday` (local days) |
 | When each turn happened | `get ID --format text` stamps every entry (UTC); JSON has `timestamp` |
 | Every match, not the first N | omit `--limit` entirely — it is unbounded by default |
