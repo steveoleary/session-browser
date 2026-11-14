@@ -69,6 +69,7 @@ from .transcript import (
     metadata_word_strengths,
     normalize_match_text,
     pi_skill_invocation,
+    prepare_worker_processes,
     render_text,
     search_session_hits,
     search_session_word_hits,
@@ -1662,6 +1663,9 @@ class SessionBrowser(App):
 
     def __init__(self) -> None:
         super().__init__()
+        # Before Textual swaps stderr for its print capture, or no search in
+        # the app can use worker processes (see prepare_worker_processes).
+        prepare_worker_processes()
         self._all_sessions: list[Session] = []
         # Everything discovery found, and the subset the user's ignore file
         # hides. _all_sessions is whichever of the two is in force, so every

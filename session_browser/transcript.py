@@ -10,6 +10,7 @@ from __future__ import annotations
 _SEARCH_THREADS = 8
 
 import json
+import logging
 import multiprocessing
 import os
 import re
@@ -47,6 +48,8 @@ from session_browser.discovery import (
     codex_segment_key,
     opencode_execute,
 )
+
+log = logging.getLogger(__name__)
 
 
 class TranscriptUnreadable(Exception):
@@ -1594,6 +1597,30 @@ def _process_ctx():
                 except (ValueError, OSError, AttributeError):
                     continue
         return _PROC_CTX
+
+
+def prepare_worker_processes() -> None:
+    """Start multiprocessing's resource tracker while stderr is still real.
+
+    A process pool needs the tracker, and the tracker hands the child the
+    parent's ``sys.stderr.fileno()``. Inside a running Textual app stderr is
+    its print capture, whose fileno() is -1, so starting the tracker there
+    raised ValueError ("bad value(s) in fds_to_keep"), the pool fell back to
+    threads, and every TUI search with enough candidates parsed under the GIL:
+    the words wave for "codex pane review" took 17.8 s in the app and 4.6 s
+    standalone over the same 1,883 sessions (2026-11-14). An app calls this
+    before it runs; once started, the tracker serves the whole process.
+    About a millisecond, and a no-op where no pool could be used anyway.
+    """
+    if not _process_pool_usable():
+        return
+    try:
+        from multiprocessing import resource_tracker
+
+        resource_tracker.ensure_running()
+    except Exception as exc:
+        # The pool falls back to threads, as it would have without this.
+        log.debug("could not start the multiprocessing resource tracker: %s", exc)
 
 
 def _process_pool_usable() -> bool:

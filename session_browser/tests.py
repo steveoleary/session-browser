@@ -9,6 +9,8 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -7098,3 +7100,53 @@ class TestUnorderedGlobalSearch:
                 await app.workers.wait_for_complete()
                 await pilot.pause()
             assert [s.id for s in app._filtered] == ["titled"]
+
+
+@pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
+def test_a_search_inside_the_running_app_can_use_worker_processes(tmp_path):
+    """Textual's print capture gives stderr a fileno() of -1, and the
+    multiprocessing resource tracker passes that fd to the child it spawns, so
+    a pool first started inside the app failed and every TUI search parsed on
+    threads: the words wave ran 3.9x slower in the app than standalone. The
+    app now starts the tracker before it runs.
+
+    In a fresh interpreter, because in this one an earlier test has usually
+    started the tracker already, and the test would pass without the fix."""
+    script = tmp_path / "probe_in_app.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            import asyncio, json, sys
+            from pathlib import Path
+            from session_browser import transcript as t
+            from session_browser.app import SessionBrowser
+            from session_browser.discovery import Session
+
+            def parse():
+                path = Path(sys.argv[1])
+                path.write_text(json.dumps(
+                    {"type": "user", "message": {"content": "a wombat"}}) + "\\n")
+                s = Session(id="s", provider="claude", content_path=str(path))
+                out = t._probe_in_processes([(0, s)], "wombat", None)
+                return "fallback" if out is t._PROC_FALLBACK else out[0].match_count
+
+            async def main():
+                app = SessionBrowser()
+                async with app.run_test() as pilot:
+                    worker = app.run_worker(parse, thread=True)
+                    print("RESULT", await worker.wait())
+
+            if __name__ == "__main__":
+                asyncio.run(main())
+            """
+        )
+    )
+    done = subprocess.run(
+        [sys.executable, str(script), str(tmp_path / "t.jsonl")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+        env={**os.environ, "HOME": str(tmp_path)},
+    )
+    assert "RESULT 1" in done.stdout, done.stdout + done.stderr
