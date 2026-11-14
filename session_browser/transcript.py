@@ -2615,10 +2615,17 @@ def _opencode_v2_entries_from_rows(
     ordered ``content`` list of the same kinds of piece v1 stored as parts:
     ``text``, ``tool`` and ``reasoning``. Rows of any other type (``idle``,
     which closes a turn with its outcome, and whatever a later release adds)
-    are bookkeeping and yield nothing, as v1's step-start/step-finish do.
+    are bookkeeping and yield nothing, as v1's step-start/step-finish do --
+    except a background subagent's result (see _opencode_v2_synthetic_entry).
     """
     for mtype, data, *_ in rows:
         if mtype != "user" and mtype != "assistant":
+            # Tested only once a row is neither of the two that carry the
+            # conversation, so they pay nothing for it.
+            if mtype == "synthetic":
+                entry = _opencode_v2_synthetic_entry(data)
+                if entry is not None:
+                    yield entry
             continue
         try:
             msg = json.loads(data)
@@ -2639,6 +2646,44 @@ def _opencode_v2_entries_from_rows(
                 entry = _opencode_v2_piece_entry(piece)
                 if entry is not None:
                     yield entry
+
+
+_OPENCODE_SUBAGENT_RESULT = {"kind": "injected", "subtype": "task_notification"}
+
+
+def _opencode_v2_synthetic_entry(data) -> TranscriptEntry | None:
+    """A background subagent's result, as the parent received it.
+
+    OpenCode 2.3's subagent tool returns at once ("working in the background")
+    and the child's answer arrives later in the PARENT as a ``synthetic`` row:
+    ``metadata`` {source: "subagent", childID, agent, state} and ``text``
+    ``<subagent sessionID=... state=...>result</subagent>``, which the
+    parent's next turn answers. Under 2.0 that result came back inside the
+    tool output. Dropped, the parent read as a spawn and then a reply to
+    nothing. Kept as a system entry, the shape a Claude task notification
+    takes, since nobody typed it.
+
+    Keyed on source == "subagent" rather than on the row type: one such row
+    was all there was to see (2026-11-14), and another source could mean
+    anything.
+    """
+    try:
+        msg = json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(msg, dict):
+        return None
+    meta = msg.get("metadata")
+    text = msg.get("text")
+    if not isinstance(meta, dict) or meta.get("source") != "subagent":
+        return None
+    if not isinstance(text, str) or not text:
+        return None
+    entry_meta = dict(_OPENCODE_SUBAGENT_RESULT)
+    child = meta.get("childID")
+    if isinstance(child, str) and child:
+        entry_meta["child_id"] = child
+    return TranscriptEntry("system", text, "", entry_meta)
 
 
 def _opencode_v2_piece_entry(piece: dict) -> TranscriptEntry | None:

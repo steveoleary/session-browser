@@ -2216,6 +2216,56 @@ class TestOpencodeV2:
         out = list(transcript_mod._opencode_v2_entries_from_rows(rows))
         assert [(e.role, e.text) for e in out] == [("user", "kept")]
 
+    def test_a_background_subagents_result_reaches_its_parent(self):
+        # OpenCode 2.3: the subagent tool returns at once, and the child's
+        # answer arrives later in the parent as a 'synthetic' row.
+        result = (
+            '<subagent sessionID="ses_child" state="completed" '
+            'description="count wombats">three wombats</subagent>'
+        )
+        rows = [
+            ("user", json.dumps({"text": "count the wombats"}), None),
+            (
+                "assistant",
+                json.dumps({"content": [{"type": "text", "text": "spawned"}]}),
+                None,
+            ),
+            (
+                "synthetic",
+                json.dumps(
+                    {
+                        "text": result,
+                        "metadata": {
+                            "source": "subagent",
+                            "childID": "ses_child",
+                            "agent": "general",
+                            "state": "completed",
+                        },
+                    }
+                ),
+                None,
+            ),
+            (
+                "assistant",
+                json.dumps({"content": [{"type": "text", "text": "it found three"}]}),
+                None,
+            ),
+            ("synthetic", json.dumps({"text": "other", "metadata": {}}), None),
+            ("idle", json.dumps({"outcome": "succeeded"}), None),
+        ]
+        out = list(transcript_mod._opencode_v2_entries_from_rows(rows))
+        assert [(e.role, e.text) for e in out] == [
+            ("user", "count the wombats"),
+            ("assistant", "spawned"),
+            ("system", result),
+            ("assistant", "it found three"),
+        ]
+        assert out[2].metadata == {
+            "kind": "injected",
+            "subtype": "task_notification",
+            "child_id": "ses_child",
+        }
+
     @pytest.mark.parametrize(
         ("query", "expected"),
         [
