@@ -370,7 +370,7 @@ def _claude_session(
         summary=summary,
         cwd=resolved_cwd,
         branch=branch,
-        repository=_repo_name(resolved_cwd),
+        repository=_cwd_project(resolved_cwd),
         created_at=created_at,
         updated_at=last_activity or created_at or _file_mtime_iso(f),
         content_path=str(f),
@@ -1109,6 +1109,48 @@ def _repo_name(cwd: str) -> str:
     return trimmed[trimmed.rfind("/") + 1 :]
 
 
+def worktree_project(cwd: str) -> str:
+    """The project a worktree checkout belongs to, by where it lives, or ''.
+
+    Worktrees are kept in a directory named ``worktrees``, and the layouts in
+    use put the project's name at a known place under it:
+
+        ~/Projects/worktrees/<project>/<checkout>    a worktrees.sh layout
+        ~/.herdr/worktrees/<project>/<checkout>      Herdr's
+        <repo>/.claude/worktrees/<checkout>          Claude Code's own
+        ~/.codex/worktrees/<id>/<project>            the Codex app's
+
+    A session run in one is otherwise named after the checkout's directory --
+    a branch name or a generated one like worktree-quiet-cloud-12cd -- and
+    filed apart from its project. Every layout needs its checkout directory
+    present, so a session run in a worktrees directory itself, or in one
+    project's folder of them, is not taken for one. String-only, like
+    ``_repo_name``: a worktree is often long deleted, and discovery never
+    walks ``.git``.
+    """
+    if "/worktrees/" not in cwd:
+        return ""
+    parts = cwd.rstrip("/").split("/")
+    for i in range(len(parts) - 2, 0, -1):
+        if parts[i] != "worktrees":
+            continue
+        parent = parts[i - 1]
+        if parent == ".claude":
+            return parts[i - 2] if i >= 2 else ""
+        if len(parts) - i < 3:
+            continue  # <project> with no checkout under it
+        if parent == ".codex":
+            return parts[i + 2]
+        return parts[i + 1]
+    return ""
+
+
+def _cwd_project(cwd: str) -> str:
+    """A project name from a session directory alone: its worktree's project
+    when it is one, else the directory's own name."""
+    return worktree_project(cwd) or _repo_name(cwd)
+
+
 def _codex_repo_name(cwd: str, origin_url: str) -> str:
     """Best available Codex project name, without filesystem discovery.
 
@@ -1394,7 +1436,7 @@ def scan_pi() -> list[Session]:
                         # Pi records no branch anywhere in its format. None,
                         # not "" — see the note on the field.
                         branch=None,
-                        repository=_repo_name(cwd),
+                        repository=_cwd_project(cwd),
                         created_at=created_at,
                         updated_at=(
                             _last_activity_iso(f, "pi")

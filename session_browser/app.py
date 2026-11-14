@@ -39,7 +39,7 @@ from datetime import UTC
 
 from . import deletion, multiplexer
 from .config import ConfigError, load_ignore, load_tui_settings
-from .discovery import Session, claude_root_session, discover_all
+from .discovery import Session, claude_root_session, discover_all, worktree_project
 from .resume import (
     build_chat_export,
     copy_to_clipboard,
@@ -768,6 +768,19 @@ def _project_name(cwd: str, max_len: int = 18) -> str:
     if not cwd:
         return "—"
     name = os.path.basename(cwd.rstrip(os.sep)) or cwd
+    if len(name) > max_len:
+        name = name[: max_len - 1] + "…"
+    return name
+
+
+def _session_project(s: Session, max_len: int = 18) -> str:
+    """The project column: the inferred project name ``stats`` groups by and
+    ``--repo`` matches, so a session run in a worktree is filed under its
+    project rather than under its checkout directory. The cwd's own name when
+    discovery inferred none."""
+    name = (s.repository or "").strip()
+    if not name:
+        return _project_name(s.cwd, max_len)
     if len(name) > max_len:
         name = name[: max_len - 1] + "…"
     return name
@@ -2090,19 +2103,30 @@ class SessionBrowser(App):
         self._apply_filter(self._pending_query)
 
     def _cwd_scope(self, sessions: list[Session]) -> list[Session]:
-        """Restrict to sessions rooted at (or under) the launch directory.
+        """Restrict to sessions rooted at (or under) the launch directory, and
+        to sessions run in a worktree of the project launched in.
 
-        Mirrors the CLI's --here: exact match or path-prefix, so a session
-        opened one directory up from a subproject doesn't leak in. Sessions
-        with no recorded cwd are excluded, same as --here.
+        The prefix rule mirrors the CLI's --here, so a session opened one
+        directory up from a subproject doesn't leak in. A worktree usually
+        lives outside its project's directory (~/Projects/worktrees/<project>/
+        <checkout>), so the prefix alone left every session run in one out of
+        the scope of the project it was work on; those are matched by the
+        project their layout names (see ``worktree_project``). Sessions with
+        no recorded cwd are excluded, same as --here.
         """
         if not self._here_only:
             return list(sessions)
         base = self._cwd_base
+        project = worktree_project(base) or os.path.basename(base.rstrip(os.sep))
         return [
             s
             for s in sessions
-            if s.cwd and (s.cwd == base or s.cwd.startswith(base + os.sep))
+            if s.cwd
+            and (
+                s.cwd == base
+                or s.cwd.startswith(base + os.sep)
+                or (project and worktree_project(s.cwd) == project)
+            )
         ]
 
     def _update_meta_count(self) -> None:
@@ -2404,7 +2428,7 @@ class SessionBrowser(App):
             provider_label = _tree_prefix(meta, s.id in self._collapsed) + (
                 PROVIDER_COLOURS.get(s.provider, s.provider)
             )
-            project = f"[dim]{_escape_markup(_project_name(s.cwd))}[/]"
+            project = f"[dim]{_escape_markup(_session_project(s))}[/]"
             hit = self._content_hits.get(s.id) if self._filter_query else None
             if hit is not None:
                 summary = _format_content_hit(hit)
@@ -2693,7 +2717,7 @@ class SessionBrowser(App):
         summary = _escape_markup(
             _ellipsize(s.summary or "Untitled session", max(24, width - 16))
         )
-        project = _escape_markup(_project_name(s.cwd, 28))
+        project = _escape_markup(_session_project(s, 28))
         branch = _escape_markup(s.branch or "no branch")
         updated = _relative_time(s.updated_at or s.created_at)
         session_id = _escape_markup(_ellipsize(s.id, 18))

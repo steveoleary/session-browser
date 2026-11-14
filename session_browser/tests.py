@@ -3951,6 +3951,73 @@ class TestProjectName:
         assert len(name) == 18
         assert name.endswith("…")
 
+    def test_the_column_names_a_worktree_session_for_its_project(self):
+        from session_browser.app import _session_project
+
+        wt = Session(
+            id="w",
+            provider="claude",
+            cwd="/Users/u/Projects/worktrees/Shop/fix-login",
+            repository="Shop",
+        )
+        assert _session_project(wt) == "Shop"
+        assert _session_project(Session(id="n", provider="pi", cwd="/a/b")) == "b"
+
+    def test_this_project_scope_takes_the_projects_worktrees(self):
+        app = SessionBrowser()
+        app._here_only = True
+        app._cwd_base = "/Users/u/Projects/Shop"
+
+        def s(sid, cwd):
+            return Session(id=sid, provider="claude", cwd=cwd)
+
+        sessions = [
+            s("own", "/Users/u/Projects/Shop"),
+            s("sub", "/Users/u/Projects/Shop/api"),
+            s("wt", "/Users/u/Projects/worktrees/Shop/fix-login"),
+            s("herdr", "/Users/u/.herdr/worktrees/Shop/worktree-calm-river-1841"),
+            s("other-wt", "/Users/u/Projects/worktrees/Bank/fix-login"),
+            s("sibling", "/Users/u/Projects/ShopTools"),
+            s("none", ""),
+        ]
+        assert [x.id for x in app._cwd_scope(sessions)] == [
+            "own",
+            "sub",
+            "wt",
+            "herdr",
+        ]
+
+
+class TestWorktreeProject:
+    @pytest.mark.parametrize(
+        ("cwd", "expected"),
+        [
+            ("/Users/u/Projects/worktrees/Shop/fix-login", "Shop"),
+            ("/Users/u/Projects/worktrees/Shop/fix-login/src", "Shop"),
+            ("/Users/u/.herdr/worktrees/shop/worktree-quiet-cloud-12cd", "shop"),
+            ("/Users/u/Projects/shop/.claude/worktrees/brave-otter", "shop"),
+            ("/Users/u/.codex/worktrees/a1b2/shop", "shop"),
+            ("/Users/u/.codex/worktrees/a1b2/shop/web", "shop"),
+            # A worktrees directory, or one project's folder of them, is not
+            # a checkout: the layout's checkout directory must be there.
+            ("/Users/u/Projects/worktrees/codex", ""),
+            ("/Users/u/Projects/worktrees", ""),
+            ("/Users/u/.codex/worktrees/a1b2", ""),
+            ("/Users/u/Projects/shop", ""),
+            ("", ""),
+        ],
+    )
+    def test_layouts(self, cwd, expected):
+        from session_browser.discovery import worktree_project
+
+        assert worktree_project(cwd) == expected
+
+    def test_claude_and_pi_fall_back_to_it(self):
+        from session_browser.discovery import _cwd_project
+
+        assert _cwd_project("/Users/u/Projects/worktrees/Shop/fix-login") == "Shop"
+        assert _cwd_project("/Users/u/Projects/shop") == "shop"
+
 
 @pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
 @pytest.mark.asyncio

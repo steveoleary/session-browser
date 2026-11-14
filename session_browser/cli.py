@@ -713,9 +713,13 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         "a git remote URL. OpenCode records a project root. Codex uses the "
         "final segment of its recorded git origin when present, then falls "
         "back to the session directory name. Claude and Pi expose neither "
-        "a project root nor origin, so their worktree sessions -- and Codex "
-        "sessions without origin metadata -- remain named after the "
-        "worktree directory; read cwd off hits when that uncertainty matters",
+        "a project root nor origin, so theirs is the directory's name -- "
+        "except under a worktrees directory in a known layout "
+        "(.../worktrees/<project>/<checkout>, <repo>/.claude/worktrees/"
+        "<checkout>, ~/.codex/worktrees/<id>/<project>), which is named for "
+        "its project. A worktree elsewhere, and a Codex session without "
+        "origin metadata, keeps the checkout directory's name; read cwd off "
+        "hits when that uncertainty matters",
     )
     p.add_argument(
         "--cwd",
