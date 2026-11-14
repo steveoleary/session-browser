@@ -102,7 +102,10 @@ wanted:
 
 Adding a workload is normal; run `bless` and the new numbers get recorded.
 `python -m session_browser.perf_budget show` prints current counts without
-touching the budgets.
+touching the budgets. To see what a change moved -- what `bless` would record --
+run it bare: `python -m session_browser.perf_budget` checks every counter and
+probe against the budgets, prints each that differs with its `Guards:` line,
+and writes nothing.
 
 **`bless` records what it changed, and the record is derived.** It writes a
 `_blessed` block into `docs/perf_budgets.json` naming every counter that moved
@@ -149,7 +152,9 @@ iteration, and `retrieval_compare.py` cannot resolve an effect this small — th
 is why the probes exist, so do not reach for the comparator to justify one.
 Time the two forms directly with `timeit` on a realistic input. A *fall* is
 usually a win, but check first that the probe did not simply stop covering its
-loop.
+loop. For the three probes that drive the parse (`loop.parse_jsonl`,
+`loop.claude_tool_entries`, `loop.codex_entries`), `benchmarks/parse_timeit.py
+--rev <committed revision>` does that over this machine's own transcripts.
 
 Opcode counts are a property of the interpreter. The budgets record the Python
 they were taken on (`loop_python`), and on a different version the probes skip
