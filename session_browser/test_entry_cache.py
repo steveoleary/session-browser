@@ -845,10 +845,26 @@ class TestALimitedSearchLoadsOnlyWhatItShows:
         ]
         hits = {Path(c.args[0].source).stem for c in load.call_args_list}
         # The two shown, and the one session the cache refuses, which is
-        # searched as it always was: a load that misses, then a parse.
+        # searched statelessly: a load that misses, then what this process
+        # parsed of it in the first search.
         assert hits == {"c11", "pi10", "uncached6"}
-        # Nothing is parsed but what the cache does not hold, limit or none.
-        assert {c.args[0].id for c in parse.call_args_list} == {"uncached6", "gone4"}
+        # Nothing is parsed but what could not be read, limit or none.
+        assert {c.args[0].id for c in parse.call_args_list} == {"gone4"}
+
+    def test_a_session_the_cache_refuses_is_parsed_once_per_search(self, run):
+        """Trying to cache it and then reading it statelessly used to
+        parse it twice, on every search."""
+        transcript_mod._unstored.clear()
+        with patch.object(
+            transcript_mod, "_parse_entries", wraps=transcript_mod._parse_entries
+        ) as parse:
+            run("wombat")
+            first = [c.args[0].id for c in parse.call_args_list]
+            parse.reset_mock()
+            run("wombat", "--limit", "2")
+            later = [c.args[0].id for c in parse.call_args_list]
+        assert first.count("uncached6") == 1
+        assert "uncached6" not in later
 
     def test_a_false_candidate_is_dropped_and_the_next_one_shown(self, run):
         """The scan is exact, so this cannot happen -- which is why a shown

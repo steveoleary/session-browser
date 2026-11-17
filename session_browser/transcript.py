@@ -2018,8 +2018,10 @@ def _ensure_entry_texts(
         if ref.text in present and ref.index in present:
             fold = ref.fold
             texts[i] = (ref.text, fold) if fold in present else (ref.text,)
-        else:
+        elif _held_unstored(ref) is None:
             missing.append((i, s, ref))
+        # else: already parsed in this process and refused by the cache; search
+        # reads it from memory, statelessly.
     # Asked on every search, answered by one stat of a marker file: what was
     # cached from a transcript its provider has since removed is cleared out
     # daily whether or not anything new is being parsed.
@@ -3020,11 +3022,43 @@ def iter_entries(session: Session, warnings: list[str]) -> Iterator[TranscriptEn
     return _cached_entries(session, ref, warnings)
 
 
+# Parses the entry cache would not store, held in this process so the
+# same transcript is not parsed again: once by _ensure_entry_texts trying to
+# cache it, then again by the search that reads it statelessly, and again on
+# every later search the TUI runs. Keyed by the cache path, which carries the
+# transcript's fingerprint, so a changed transcript is a new key and never served
+# stale. Refusal is rare by construction (metadata JSON cannot carry), but so is
+# a cache that cannot be written at all, which refuses everything, so only the
+# last few are held.
+_UNSTORED_MAX = 8
+_unstored: OrderedDict[str, tuple[list[TranscriptEntry], list[str]]] = OrderedDict()
+_unstored_lock = threading.Lock()
+
+
+def _hold_unstored(
+    ref: entry_cache.Ref, entries: list[TranscriptEntry], warnings: list[str]
+) -> None:
+    with _unstored_lock:
+        _unstored[ref.text] = (entries, list(warnings))
+        _unstored.move_to_end(ref.text)
+        while len(_unstored) > _UNSTORED_MAX:
+            _unstored.popitem(last=False)
+
+
+def _held_unstored(
+    ref: entry_cache.Ref,
+) -> tuple[list[TranscriptEntry], list[str]] | None:
+    with _unstored_lock:
+        return _unstored.get(ref.text)
+
+
 def _cached_entries(
     session: Session, ref: entry_cache.Ref, warnings: list[str]
 ) -> Iterator[TranscriptEntry]:
     """*session*'s entries from *ref* if stored there, else parsed and stored."""
     stored = entry_cache.load(ref, TranscriptEntry)
+    if stored is None:
+        stored = _held_unstored(ref)
     if stored is not None:
         entries, stored_warnings = stored
         warnings.extend(stored_warnings)
@@ -3058,7 +3092,10 @@ def _keep_parse(
     """
     if warnings and session.segments:
         return False
-    return entry_cache.store(ref, entries, warnings, _fold_text(entries))
+    if entry_cache.store(ref, entries, warnings, _fold_text(entries)):
+        return True
+    _hold_unstored(ref, entries, warnings)
+    return False
 
 
 def _fold_text(entries: list[TranscriptEntry]) -> bytes:

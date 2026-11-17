@@ -241,8 +241,11 @@ less.
   so this is a hazard for fixtures, not for users: change the length.
 
 **Entry metadata has to survive JSON.** A tuple, a non-string key or a NaN in
-`TranscriptEntry.metadata` makes `store()` refuse that session, which then
-parses on every search: slower, never wrong, and silent. The gate's
+`TranscriptEntry.metadata` makes `store()` refuse that session, which is then
+searched statelessly from a parse held in memory for the rest of the process
+(the last eight, keyed by the cache path, so a changed transcript is parsed
+afresh): a CLI search parses it once instead of twice, the TUI once in
+all. Slower than cached, never wrong, and silent. The gate's
 `cli.search.rare.cold` workload pins `entry_cache_stores` to the session count,
 so a parser that starts emitting one shows up there.
 
