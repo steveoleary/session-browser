@@ -930,7 +930,13 @@ def build_corpus(root: Path) -> Path:
         )
         for line in range(20):
             mid = f"{sid}-m{line:03d}"
-            role = "user" if line == 0 else "assistant"
+            # An answered turn, as 1.x writes one: an assistant message
+            # carries how it finished, which is what its ending is read from.
+            data = (
+                {"role": "user"}
+                if line == 0
+                else {"role": "assistant", "finish": "stop"}
+            )
             conn.execute(
                 "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
                 (
@@ -938,7 +944,7 @@ def build_corpus(root: Path) -> Path:
                     sid,
                     1700000000000 + line,
                     1700000000000 + line,
-                    json.dumps({"role": role}),
+                    json.dumps(data),
                 ),
             )
             text = _filler(i, line)

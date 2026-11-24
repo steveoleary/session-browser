@@ -104,9 +104,9 @@ class Session:
     # reads what the agent wrote.
     summary_is_recap: bool = field(default=False, init=False)
     # How the session's last turn ended: one of ENDINGS, read off the end of
-    # its transcript, or None when that cannot be said -- a provider that
-    # records too little (OpenCode 1.x), a transcript with no conversation in
-    # it, or a Codex session whose rollout has not been read yet (see
+    # its transcript, or None when that cannot be said -- a transcript with no
+    # conversation in it, a busy OpenCode session, or a Codex or OpenCode 1.x
+    # session whose rollout or messages have not been read yet (see
     # fill_endings). As of the read, like every count: a live session that
     # is mid-action now may finish.
     ending: str | None = field(default=None, init=False)
@@ -2586,13 +2586,13 @@ def fill_endings(sessions: Iterable[Session]) -> list[Session]:
     beside the scan memo, so a session is read once while it stays the
     same; with the cache switched off, each is read when asked.
     """
-    wanted = [
-        s
-        for s in sessions
-        if s.ending is None and s.provider == "codex" and s.content_path
-    ]
+    sessions = [s for s in sessions if s.ending is None]
+    filled = _fill_opencode_endings(
+        [s for s in sessions if s.provider == "opencode" and not s.subagent_kind]
+    )
+    wanted = [s for s in sessions if s.provider == "codex" and s.content_path]
     if not wanted:
-        return []
+        return filled
     memo = scan_memo.open_memo("codex-endings", keep_unmet=True)
     for s in wanted:
         path = s.content_path
@@ -2614,7 +2614,97 @@ def fill_endings(sessions: Iterable[Session]) -> list[Session]:
         s.ending = ending
     if memo is not None:
         memo.save()
-    return [s for s in wanted if s.ending is not None]
+    return filled + [s for s in wanted if s.ending is not None]
+
+
+# The last message of each of a set of sessions, from OpenCode 1.x's message
+# table. 2.x records the outcome on the session row itself (idle_outcome,
+# read by discovery), so its statement asks for nothing: a 2.x session with
+# no ending is still busy.
+_OPENCODE_LAST_MESSAGES = (
+    (
+        "SELECT session_id, data FROM ("
+        "  SELECT session_id, data, ROW_NUMBER() OVER ("
+        "    PARTITION BY session_id ORDER BY time_created DESC, id DESC) AS n"
+        "  FROM message WHERE session_id IN ({ids})"
+        ") WHERE n = 1"
+    ),
+    # Takes the same parameters, since opencode_execute hands the v1 ones on.
+    "SELECT id, NULL FROM session_v2 WHERE 0 AND id IN ({ids})",
+)
+_SQLITE_IDS_PER_STATEMENT = 500
+
+
+def _fill_opencode_endings(sessions: list[Session]) -> list[Session]:
+    """Endings for OpenCode 1.x sessions, from each one's last message.
+
+    The rule is inlet/herdr-sessions' (MIT), which reads 1.x databases: a
+    last message from the person went unanswered; an assistant's that failed
+    with MessageAbortedError was cancelled, and with any other error was not
+    answered; one whose finish is missing or "tool-calls" stopped mid-action;
+    any other finish completed. No 1.x database is on the machine this was
+    written on, so the shape is theirs, not measured here.
+
+    Asked only for the sessions a command shows or filters on, never by
+    discovery: on a 1.x database that would read every session's messages
+    on every command.
+    """
+    if not sessions:
+        return []
+    db_path = _opencode_db_path()
+    if not db_path.exists():
+        return []
+    by_id = {s.id: s for s in sessions}
+    ids = list(by_id)
+    try:
+        conn = sqlite3.connect(_readonly_uri(db_path), uri=True, timeout=3)
+        try:
+            schema = 0
+            rows = []
+            for start in range(0, len(ids), _SQLITE_IDS_PER_STATEMENT):
+                chunk = ids[start : start + _SQLITE_IDS_PER_STATEMENT]
+                marks = ",".join("?" * len(chunk))
+                sql = (
+                    _OPENCODE_LAST_MESSAGES[0].format(ids=marks),
+                    _OPENCODE_LAST_MESSAGES[1].format(ids=marks),
+                )
+                cur, schema = opencode_execute(conn, sql, tuple(chunk), schema)
+                rows.extend(cur.fetchall())
+                if schema == OPENCODE_V2:
+                    break
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        log.debug("no opencode endings: %s", exc)
+        return []
+    filled = []
+    for sid, data in rows:
+        session = by_id.get(sid)
+        ending = _opencode_message_ending(data)
+        if session is not None and ending is not None:
+            session.ending = ending
+            filled.append(session)
+    return filled
+
+
+def _opencode_message_ending(data) -> str | None:
+    try:
+        message = json.loads(data)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(message, dict):
+        return None
+    role = message.get("role")
+    if role == "user":
+        return UNANSWERED
+    if role != "assistant":
+        return None
+    error = message.get("error")
+    if error is not None:
+        name = error.get("name") if isinstance(error, dict) else None
+        return INTERRUPTED if name == "MessageAbortedError" else UNANSWERED
+    finish = message.get("finish")
+    return MID_ACTION if finish in (None, "tool-calls") else COMPLETED
 
 
 def _codex_rollout_ending(path: Path) -> str | None:

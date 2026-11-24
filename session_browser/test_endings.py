@@ -541,6 +541,80 @@ def test_opencode_2_without_the_outcome_column_keeps_everything_else(tmp_path):
     assert found == [("ses_a", "local/m1", None)]
 
 
+def _opencode_v1(home: Path, messages: dict[str, list[dict]]) -> None:
+    """A 1.x database: a message table, each row's data a JSON object."""
+    db = home / ".local" / "share" / "opencode" / "opencode.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, "
+        "time_created INTEGER, time_updated INTEGER, data TEXT)"
+    )
+    for sid, rows in messages.items():
+        for n, data in enumerate(rows):
+            conn.execute(
+                "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+                (f"{sid}-{n}", sid, 1000 + n, 1000 + n, json.dumps(data)),
+            )
+    conn.commit()
+    conn.close()
+
+
+def test_opencode_1_endings_come_from_each_sessions_last_message(tmp_path):
+    asked = {"role": "user"}
+    _opencode_v1(
+        tmp_path,
+        {
+            "ses_done": [asked, {"role": "assistant", "finish": "stop"}],
+            "ses_tools": [asked, {"role": "assistant", "finish": "tool-calls"}],
+            "ses_cut": [
+                asked,
+                {"role": "assistant", "error": {"name": "MessageAbortedError"}},
+            ],
+            "ses_failed": [
+                asked,
+                {"role": "assistant", "error": {"name": "APIError"}},
+            ],
+            "ses_asked": [{"role": "assistant", "finish": "stop"}, asked],
+            "ses_streaming": [asked, {"role": "assistant"}],
+        },
+    )
+    sessions = [
+        Session(id=sid, provider="opencode")
+        for sid in (
+            "ses_done",
+            "ses_tools",
+            "ses_cut",
+            "ses_failed",
+            "ses_asked",
+            "ses_streaming",
+            "ses_unknown",
+        )
+    ]
+    with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+        filled = fill_endings(sessions)
+    assert {s.id: s.ending for s in sessions} == {
+        "ses_done": "completed",
+        "ses_tools": "mid-action",
+        "ses_cut": "interrupted",
+        "ses_failed": "unanswered",
+        "ses_asked": "unanswered",
+        "ses_streaming": "mid-action",
+        "ses_unknown": None,
+    }
+    assert len(filled) == 6
+
+
+def test_opencode_2_sessions_are_not_asked_again(tmp_path):
+    # A 2.x session with no ending is busy; its database holds no message
+    # table, and nothing is read for it.
+    make_opencode_v2_db(tmp_path, {"ses_a": {}})
+    busy = Session(id="ses_a", provider="opencode")
+    with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+        assert fill_endings([busy]) == []
+    assert busy.ending is None
+
+
 # -- CLI and rendering --------------------------------------------------------
 
 

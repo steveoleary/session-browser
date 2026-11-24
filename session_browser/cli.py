@@ -171,11 +171,11 @@ _SUBAGENT_CONTRACT = (
     '"unanswered"\n(the last message got no reply), "mid-action" (it stopped '
     'during a tool call)\nor "interrupted" (the person cancelled). Read off '
     "the end of the transcript for\nClaude, Codex, Grok and Pi, and from "
-    "OpenCode 2.x's own record; null when that\ncannot say -- OpenCode 1.x, an "
-    "OpenCode session still busy, or a transcript with\nno conversation in it. "
-    "Grok records a cancel only as a turn's stop_reason, so a\nGrok turn cut "
-    "off before it closed reads as where it stopped. As of this read:\na live "
-    'session "mid-action" now may finish.'
+    "OpenCode 2.x's own record (1.x: its last\nmessage); null when that cannot "
+    "say -- an OpenCode session still busy, or a\ntranscript with no "
+    "conversation in it.\nGrok records a cancel only as a turn's outcome, "
+    "so a Grok turn cut off before it\nclosed reads as where it stopped. As of "
+    'this read: a live session "mid-action"\nnow may finish.'
 )
 
 
@@ -1386,8 +1386,8 @@ def apply_filters(
         if not out and unknown and warnings is not None:
             warnings.append(
                 f"--ending matched nothing, and {unknown} session(s) have no "
-                f"readable ending (OpenCode 1.x records none, and a transcript "
-                f"with no conversation has none)"
+                f"readable ending (a busy OpenCode session has none yet, and a "
+                f"transcript with no conversation has none)"
             )
     if not out and ignored and warnings is not None:
         # ripgrep's "No files were searched, which means ripgrep probably
