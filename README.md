@@ -23,7 +23,9 @@ agents.
   find the useful parts through the CLI.
 - **Pick up where you left off.** Read how the last session ended and carry on,
   or continue the original session directly in tmux or Herdr, or copy the
-  agent-specific resume command to the clipboard, all from the TUI.
+  agent-specific resume command to the clipboard, all from the TUI. A session
+  resumes in the permission mode it was started in, as its transcript records
+  it (Claude Code's permission mode, Codex's approval and sandbox policies).
 - **Let agents research your history.** The JSON-friendly CLI and bundled skill
   let an agent find and retrieve earlier work itself, without you pasting old
   conversations into a new chat — and it reaches for it unprompted: in seven

@@ -40,6 +40,8 @@ from session_browser.resume import (
     copy_to_clipboard,
     export_chat_to_file,
     resume_command,
+    resume_flags,
+    resume_target,
 )
 from session_browser.tmux import (
     TmuxError,
@@ -63,9 +65,8 @@ from session_browser.transcript import (
 
 class TestResumeCommand:
     def test_claude(self):
-        assert resume_command("claude", "def-456") == (
-            "claude --dangerously-skip-permissions --resume def-456"
-        )
+        # No transcript, so no mode: the CLI starts as its config says.
+        assert resume_command("claude", "def-456") == "claude --resume def-456"
 
     def test_codex(self):
         assert resume_command("codex", "ghi-789") == "codex resume ghi-789"
@@ -77,7 +78,7 @@ class TestResumeCommand:
     def test_cwd_with_spaces(self):
         result = resume_command("claude", "x", "/tmp/my project")
         assert "cd '/tmp/my project'" in result
-        assert "claude --dangerously-skip-permissions --resume x" in result
+        assert "claude --resume x" in result
 
     def test_unknown_provider(self):
         result = resume_command("unknown", "id-1")
@@ -86,6 +87,203 @@ class TestResumeCommand:
     def test_no_cwd(self):
         result = resume_command("codex", "abc")
         assert not result.startswith("cd")
+
+
+def _claude_mode_transcript(path: Path, *records: dict) -> str:
+    """A Claude transcript opening the way Claude Code 2.1.331 writes one."""
+    lines = [
+        {"type": "mode", "mode": "normal", "sessionId": "s1"},
+        *records,
+        {
+            "type": "user",
+            "message": {"role": "user", "content": "hello"},
+            "sessionId": "s1",
+            "timestamp": "2026-11-20T10:00:00.000Z",
+        },
+    ]
+    path.write_text("".join(json.dumps(r) + "\n" for r in lines))
+    return str(path)
+
+
+def _permission_mode(mode: str) -> dict:
+    return {"type": "permission-mode", "permissionMode": mode, "sessionId": "s1"}
+
+
+def _codex_mode_rollout(path: Path, approval, sandbox) -> str:
+    """A rollout whose first turn_context carries these policies, as 0.172.0
+    writes it: session_meta, then the instruction items, then the context."""
+    lines = [
+        {"type": "session_meta", "payload": {"id": "t1", "cwd": "/w"}},
+        {
+            "type": "response_item",
+            "payload": {"type": "message", "role": "developer", "content": []},
+        },
+        {
+            "type": "turn_context",
+            "payload": {
+                "cwd": "/w",
+                "approval_policy": approval,
+                "approvals_reviewer": "user",
+                "sandbox_policy": sandbox,
+                "model": "gpt-6.1-sol",
+            },
+        },
+        {
+            "type": "turn_context",
+            "payload": {
+                "approval_policy": "on-request",
+                "sandbox_policy": {"type": "read-only"},
+            },
+        },
+    ]
+    path.write_text("".join(json.dumps(r) + "\n" for r in lines))
+    return str(path)
+
+
+class TestResumeMode:
+    """A session resumes in the mode it was started in, read off its file."""
+
+    def test_claude_plan_mode_is_kept(self, tmp_path):
+        path = _claude_mode_transcript(tmp_path / "s1.jsonl", _permission_mode("plan"))
+        assert resume_command("claude", "s1", content_path=path) == (
+            "claude --permission-mode plan --resume s1"
+        )
+
+    @pytest.mark.parametrize("mode", ["default", "acceptEdits", "auto", "manual"])
+    def test_claude_modes_pass_through_as_recorded(self, tmp_path, mode):
+        path = _claude_mode_transcript(tmp_path / "s1.jsonl", _permission_mode(mode))
+        assert resume_flags("claude", path) == ("--permission-mode", mode)
+
+    def test_claude_bypass_keeps_the_skip_permissions_flag(self, tmp_path):
+        path = _claude_mode_transcript(
+            tmp_path / "s1.jsonl", _permission_mode("bypassPermissions")
+        )
+        assert resume_command("claude", "s1", content_path=path) == (
+            "claude --dangerously-skip-permissions --resume s1"
+        )
+
+    def test_the_first_recorded_mode_is_the_one_it_started_in(self, tmp_path):
+        path = _claude_mode_transcript(
+            tmp_path / "s1.jsonl",
+            _permission_mode("default"),
+            _permission_mode("bypassPermissions"),
+        )
+        assert resume_flags("claude", path) == ("--permission-mode", "default")
+
+    def test_a_mode_carried_only_on_a_user_record_counts(self, tmp_path):
+        # A session /clear opened records no permission-mode record; a later
+        # user record can still carry the mode.
+        path = _claude_mode_transcript(
+            tmp_path / "s1.jsonl",
+            {
+                "type": "user",
+                "permissionMode": "acceptEdits",
+                "message": {"role": "user", "content": "go"},
+            },
+        )
+        assert resume_flags("claude", path) == ("--permission-mode", "acceptEdits")
+
+    def test_no_recorded_mode_means_no_mode_flag(self, tmp_path):
+        path = _claude_mode_transcript(tmp_path / "s1.jsonl")
+        assert resume_command("claude", "s1", content_path=path) == (
+            "claude --resume s1"
+        )
+
+    def test_a_quoted_or_nested_mode_is_not_the_sessions(self, tmp_path):
+        # A tool result that shows another transcript holds the key escaped,
+        # and a structured result can nest it; neither is this session's mode.
+        quoted = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "content": '{"permissionMode":"bypassPermissions"}',
+                    }
+                ],
+            },
+            "toolUseResult": {"permissionMode": "bypassPermissions"},
+        }
+        path = _claude_mode_transcript(
+            tmp_path / "s1.jsonl", quoted, _permission_mode("plan")
+        )
+        assert resume_flags("claude", path) == ("--permission-mode", "plan")
+
+    def test_a_mode_this_cli_does_not_take_is_left_out(self, tmp_path):
+        path = _claude_mode_transcript(
+            tmp_path / "s1.jsonl", _permission_mode("someFutureMode")
+        )
+        assert resume_flags("claude", path) == ()
+
+    def test_an_unreadable_transcript_means_no_mode_flag(self, tmp_path):
+        missing = str(tmp_path / "gone.jsonl")
+        assert resume_command("claude", "s1", content_path=missing) == (
+            "claude --resume s1"
+        )
+
+    def test_codex_full_access_resumes_bypassed(self, tmp_path):
+        path = _codex_mode_rollout(
+            tmp_path / "r.jsonl", "never", {"type": "danger-full-access"}
+        )
+        assert resume_command("codex", "t1", content_path=path) == (
+            "codex resume --dangerously-bypass-approvals-and-sandbox t1"
+        )
+
+    def test_codex_sandboxed_session_keeps_its_policies(self, tmp_path):
+        path = _codex_mode_rollout(
+            tmp_path / "r.jsonl",
+            "on-request",
+            {"type": "workspace-write", "network_access": False},
+        )
+        assert resume_command("codex", "t1", content_path=path) == (
+            "codex resume --sandbox workspace-write --ask-for-approval on-request t1"
+        )
+
+    def test_codex_policy_this_cli_dropped_is_left_out(self, tmp_path):
+        path = _codex_mode_rollout(
+            tmp_path / "r.jsonl", "untrusted", {"type": "read-only"}
+        )
+        assert resume_flags("codex", path) == ("--sandbox", "read-only")
+
+    def test_codex_compressed_rollout_is_read(self, tmp_path):
+        plain = tmp_path / "r.jsonl"
+        _codex_mode_rollout(plain, "never", {"type": "danger-full-access"})
+        packed = tmp_path / ("r.jsonl" + compressed.SUFFIX)
+        packed.write_bytes(compressed.zstd.compress(plain.read_bytes()))
+        plain.unlink()
+        assert resume_flags("codex", str(packed)) == (
+            "--dangerously-bypass-approvals-and-sandbox",
+        )
+
+    @pytest.mark.parametrize("provider", ["opencode", "pi"])
+    def test_providers_with_no_mode_get_no_flags(self, tmp_path, provider):
+        path = _claude_mode_transcript(tmp_path / "s.jsonl", _permission_mode("plan"))
+        assert resume_flags(provider, path) == ()
+
+    def test_subagent_resumes_its_root_in_the_roots_mode(self, tmp_path):
+        project = tmp_path / "proj"
+        (project / "root-1" / "subagents").mkdir(parents=True)
+        root = _claude_mode_transcript(
+            project / "root-1.jsonl", _permission_mode("plan")
+        )
+        child = Session(
+            id="agent-a1",
+            provider="claude",
+            content_path=str(project / "root-1" / "subagents" / "agent-a1.jsonl"),
+            parent_id="root-1",
+            subagent_kind="Explore",
+        )
+        assert resume_target(child) == ("root-1", root)
+        plain = Session(id="s9", provider="codex", content_path="/r.jsonl")
+        assert resume_target(plain) == ("s9", "/r.jsonl")
+
+    def test_tmux_plan_carries_the_mode(self, tmp_path):
+        path = _claude_mode_transcript(tmp_path / "s1.jsonl", _permission_mode("plan"))
+        plan = build_plan(
+            "claude", "s1", "/home/user/proj", session_exists=True, content_path=path
+        )
+        assert plan.resume == "claude --permission-mode plan --resume s1"
 
 
 # ---------------------------------------------------------------------------
@@ -6065,7 +6263,7 @@ class TestBuildPlan:
                 "-t",
                 "proj",
                 "-l",
-                "claude --dangerously-skip-permissions --resume def-456",
+                "claude --resume def-456",
             ],
             ["tmux", "send-keys", "-t", "proj", "Enter"],
             ["tmux", "set-option", "-t", "proj", "-w", "@sb_session_id", "def-456"],
@@ -6127,7 +6325,7 @@ class TestBuildPlan:
         plan = build_plan("claude", "x", "/home/user/proj", session_exists=False)
         send = plan.create_commands()[1]
         assert send[:5] == ["tmux", "send-keys", "-t", "proj", "-l"]
-        assert send[-1] == "claude --dangerously-skip-permissions --resume x"
+        assert send[-1] == "claude --resume x"
         assert "exec" not in send[-1]
 
     def test_connect_switch_matches_worktrees_sh(self):
@@ -6492,7 +6690,7 @@ class TestHerdrPrepareSession:
                 "pane",
                 "run",
                 "w9:p1",
-                "claude --dangerously-skip-permissions --resume def-456",
+                "claude --resume def-456",
             ],
         ]
         assert (plan.tab, plan.pane, plan.reused) == ("w9:t1", "w9:p1", False)

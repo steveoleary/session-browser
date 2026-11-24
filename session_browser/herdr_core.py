@@ -390,7 +390,7 @@ def prepare_session(
     if shutil.which("hc") is None or shutil.which("herdr-app") is None:
         raise HerdrCoreError("hc and herdr-app are not both on PATH")
 
-    resume = resume_command(provider, session_id, None)
+    resume = resume_command(provider, session_id, None, content_path=content_path)
     if resume.startswith("#"):
         raise HerdrCoreError(resume.lstrip("# ").strip() or "no resume command")
 

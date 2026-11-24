@@ -39,12 +39,13 @@ from datetime import UTC
 
 from . import deletion, multiplexer
 from .config import ConfigError, load_ignore, load_tui_settings
-from .discovery import Session, claude_root_session, discover_all, worktree_project
+from .discovery import Session, discover_all, worktree_project
 from .resume import (
     build_chat_export,
     copy_to_clipboard,
     export_chat_to_file,
     resume_command,
+    resume_target,
 )
 from .transcript import (
     WORDS_QUOTED,
@@ -3361,10 +3362,12 @@ class SessionBrowser(App):
         s = self._selected
         # Claude Code resumes a conversation, not an agent inside one, so a
         # subagent's resume command is its root session's.
-        root = claude_root_session(s)
-        cmd = resume_command(s.provider, root or s.id, s.cwd or None)
+        session_id, content_path = resume_target(s)
+        cmd = resume_command(
+            s.provider, session_id, s.cwd or None, content_path=content_path
+        )
         if copy_to_clipboard(cmd):
-            note = " (the session this subagent ran in)" if root else ""
+            note = " (the session this subagent ran in)" if session_id != s.id else ""
             self._status.update(f"Copied: {cmd}{note}")
         else:
             self._status.update(f"Clipboard failed. Command: {cmd}")
@@ -3444,15 +3447,8 @@ class SessionBrowser(App):
         if target is None or not self._selected:
             return
         s = self._selected
-        session_id, content_path = s.id, s.content_path
-        if root := claude_root_session(s):
-            # As for the resume command: open the session it ran in.
-            session_id = root
-            content_path = next(
-                str(p.parent / f"{root}.jsonl")
-                for p in Path(s.content_path).parents
-                if p.name == root
-            )
+        # As for the resume command: a subagent opens the session it ran in.
+        session_id, content_path = resume_target(s)
         try:
             plan = target.module.prepare_session(
                 s.provider, session_id, s.cwd, content_path=content_path

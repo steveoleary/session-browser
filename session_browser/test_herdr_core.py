@@ -221,9 +221,23 @@ class TestPrepareSession:
             "my proj",
         )
 
-    def test_creates_a_space_for_a_new_folder(self):
+    def test_creates_a_space_for_a_new_folder(self, tmp_path):
+        # The tab resumes the session in the mode its transcript records.
+        transcript = tmp_path / "def-456.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {"type": "permission-mode", "permissionMode": "bypassPermissions"}
+            )
+            + "\n"
+        )
         stub = _stub([_terminal(cwd="/elsewhere")], [AppSpace(SPACE, "x")])
-        plan = _prepare("claude", "def-456", "/home/user/proj", calls_and_run=stub)
+        plan = _prepare(
+            "claude",
+            "def-456",
+            "/home/user/proj",
+            content_path=str(transcript),
+            calls_and_run=stub,
+        )
         assert stub[0][-1] == [
             *("herdr-app", "do", "space.new", "--name", "proj"),
             *("--folder", "/home/user/proj"),

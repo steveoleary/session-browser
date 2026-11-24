@@ -36,7 +36,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from .resume import resume_command
+from .resume import RESUME_PATTERNS, resume_command
 from .transcript import lineage_ids
 
 # Availability is probed on the UI thread when the user presses the handoff
@@ -191,9 +191,12 @@ def build_plan(
     session_exists: bool,
     existing_window: str | None = None,
     existing_tag: str = "",
+    content_path: str = "",
 ) -> TmuxPlan:
-    """Assemble a :class:`TmuxPlan` (cwd handled by ``-c``, so no ``cd``)."""
-    resume = resume_command(provider, session_id, None)
+    """Assemble a :class:`TmuxPlan` (cwd handled by ``-c``, so no ``cd``).
+
+    *content_path* is the transcript, which names the mode to resume in."""
+    resume = resume_command(provider, session_id, None, content_path=content_path)
     return TmuxPlan(
         session=session_name_for_path(cwd),
         cwd=cwd,
@@ -268,9 +271,8 @@ def prepare_session(
     if shutil.which("sesh") is None:
         raise TmuxError("sesh not found on PATH")
 
-    resume = resume_command(provider, session_id, None)
-    if resume.startswith("#"):
-        raise TmuxError(resume.lstrip("# ").strip() or "no resume command")
+    if provider not in RESUME_PATTERNS:
+        raise TmuxError(f"unknown provider: {provider}")
 
     session = session_name_for_path(cwd)
     exists = _session_exists(session)
@@ -287,6 +289,7 @@ def prepare_session(
         session_exists=exists,
         existing_window=existing_window,
         existing_tag=existing_tag,
+        content_path=content_path,
     )
     for cmd in plan.create_commands():
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)

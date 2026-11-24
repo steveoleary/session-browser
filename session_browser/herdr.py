@@ -311,7 +311,7 @@ def prepare_session(
     if shutil.which("herdr") is None:
         raise HerdrError("herdr not found on PATH")
 
-    resume = resume_command(provider, session_id, None)
+    resume = resume_command(provider, session_id, None, content_path=content_path)
     if resume.startswith("#"):
         raise HerdrError(resume.lstrip("# ").strip() or "no resume command")
 
