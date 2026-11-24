@@ -25,6 +25,9 @@ was proven against the real tool:
   session that spawned one subagent; afterwards the id survived only in
   OpenCode's own shared log. So it gets the whole job, as Codex does. A
   database still in the 1.x schema is refused: no 1.x delete was proven.
+- **Grok** 1.0.92 ships ``grok sessions delete <id>``, checked against a copy
+  of a real session made under a new id: it removed that session's directory
+  and nothing else. So it gets the whole job too.
 - **Pi** has no delete command, so the files are removed here. A session is
   one ``<stamp>_<id>.jsonl`` under ``~/.pi/agent/sessions/<encoded-cwd>/``;
   nothing in Pi itself references the id anywhere else (verified on Pi 1.4.0
@@ -126,6 +129,8 @@ def plan_delete(session: Session, sessions: Iterable[Session]) -> DeletePlan:
         return _plan_opencode(session, subagents)
     if session.provider == "pi":
         return _plan_pi(session, subagents)
+    if session.provider == "grok":
+        return _plan_grok(session, subagents)
     raise DeleteRefused(f"Deleting {session.provider} sessions is not supported yet")
 
 
@@ -264,6 +269,10 @@ def _run_provider_delete(plan: DeletePlan) -> str:
         _check_codex_gone(plan.session, tool)
     elif provider == "opencode":
         _check_opencode_gone(plan.session, tool)
+    elif provider == "grok":
+        folder = Path(plan.session.content_path).parent
+        if folder.exists():
+            raise DeleteFailed(f"{tool} reported success but {folder} remains")
     return f"Deleted {provider} session {plan.session.id}"
 
 
@@ -347,6 +356,40 @@ def _check_opencode_gone(session: Session, tool: str) -> None:
         ) from exc
     if rows:
         raise DeleteFailed(f"{tool} reported success but the session is still there")
+
+
+# ---------------------------------------------------------------------------
+# Grok
+# ---------------------------------------------------------------------------
+
+
+def _plan_grok(session: Session, subagents: int) -> DeletePlan:
+    """Grok ships ``grok sessions delete <id>``, so it gets the whole job, as
+    Codex and OpenCode do. Checked on grok 1.0.92 against a copy of a real
+    session made under a new id: it removed exactly that session's directory
+    and left its neighbours, the folder's prompt_history.jsonl and Grok's
+    session_search.sqlite as they were."""
+    grok = shutil.which("grok")
+    if grok is None:
+        raise DeleteRefused("Deleting a Grok session needs the grok CLI on PATH")
+    try:
+        uuid.UUID(session.id)
+    except ValueError:
+        raise DeleteRefused(f"Not a Grok session id: {session.id}") from None
+    folder = Path(session.content_path).parent
+    # Checked against the one shape a Grok session has rather than trusted:
+    # ~/.grok/sessions/<folder>/<id>/updates.jsonl.
+    if (
+        folder.name != session.id
+        or folder.parent.parent != Path.home() / ".grok" / "sessions"
+    ):
+        raise DeleteRefused(f"Unexpected session location: {folder}")
+    removes = (
+        Removal("session dir", str(folder), "transcript, summary, turn events"),
+        Removal("index", "Grok's own session-search entry"),
+    )
+    command = (grok, "sessions", "delete", session.id)
+    return DeletePlan(session, (), command, subagents, removes)
 
 
 # ---------------------------------------------------------------------------

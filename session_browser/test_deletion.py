@@ -232,6 +232,82 @@ class TestCodexDelete:
 OPENCODE_ID = "ses_e6912efd2ffe3UsWZKvr7Xx1Km"
 
 
+GROK_ID = "01a1d169-6a61-7cc1-b039-9190e4a53e3f"
+
+
+@pytest.fixture
+def fake_grok(home, monkeypatch):
+    """A ``grok`` on PATH that records its argv and, like grok 1.0.92's
+    ``sessions delete``, removes the session's directory."""
+    bindir = home / "bin"
+    bindir.mkdir()
+    log = home / "grok-argv"
+    folder = home / ".grok" / "sessions" / "%2FUsers%2Ftest%2Fproj" / GROK_ID
+    folder.mkdir(parents=True)
+    (folder / "updates.jsonl").write_text("{}\n")
+    neighbour = folder.with_name("01a1d169-0000-7000-8000-000000000001")
+    neighbour.mkdir()
+    script = bindir / "grok"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{log}"\n'
+        '[ -n "$FAKE_GROK_FAIL" ] && { echo "no such session" >&2; exit 1; }\n'
+        f'[ -z "$FAKE_GROK_KEEP" ] && /bin/rm -rf "{folder}"\n'
+        'echo "Deleted session $3"\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    session = Session(
+        id=GROK_ID, provider="grok", content_path=str(folder / "updates.jsonl")
+    )
+    return session, log, neighbour
+
+
+class TestGrokDelete:
+    def test_hands_the_whole_job_to_grok_sessions_delete(self, fake_grok):
+        session, log, neighbour = fake_grok
+        plan = deletion.plan_delete(session, [session])
+        assert plan.paths == ()
+        assert [r.label for r in plan.removes] == ["session dir", "index"]
+
+        message = deletion.delete_session(plan)
+
+        assert log.read_text().split() == ["sessions", "delete", GROK_ID]
+        assert not Path(session.content_path).parent.exists()
+        assert neighbour.exists()
+        assert GROK_ID in message
+
+    def test_a_failed_grok_delete_says_why(self, fake_grok, monkeypatch):
+        session, _log, _ = fake_grok
+        monkeypatch.setenv("FAKE_GROK_FAIL", "1")
+        with pytest.raises(DeleteFailed, match="exited 1: no such session"):
+            deletion.delete_session(deletion.plan_delete(session, []))
+
+    def test_success_with_the_directory_still_there_is_a_failure(
+        self, fake_grok, monkeypatch
+    ):
+        session, _log, _ = fake_grok
+        monkeypatch.setenv("FAKE_GROK_KEEP", "1")
+        with pytest.raises(DeleteFailed, match="remains"):
+            deletion.delete_session(deletion.plan_delete(session, []))
+
+    def test_a_session_outside_grok_s_tree_is_refused(self, fake_grok, tmp_path):
+        stray = Session(
+            id=GROK_ID,
+            provider="grok",
+            content_path=str(tmp_path / "elsewhere" / GROK_ID / "updates.jsonl"),
+        )
+        with pytest.raises(DeleteRefused, match="Unexpected session location"):
+            deletion.plan_delete(stray, [])
+
+    def test_a_live_grok_session_is_refused(self, fake_grok):
+        session, _log, _ = fake_grok
+        registry = Path(session.content_path).parents[3] / "active_sessions.json"
+        registry.write_text(json.dumps([{"session_id": GROK_ID, "pid": os.getpid()}]))
+        with pytest.raises(DeleteRefused, match="still running"):
+            deletion.plan_delete(session, [])
+
+
 @pytest.fixture
 def fake_opencode(tmp_path, monkeypatch):
     """An ``opencode`` on PATH that records its argv and does what the real
