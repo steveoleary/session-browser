@@ -52,7 +52,7 @@ an agent mid-edit invites it to work from a stale copy.
 
 Three rules are switched off in `pyproject.toml` and each says why: `RUF001`/
 `RUF002` (a TUI renders `×`, `›` and en dashes on purpose), `RUF005` (style),
-`BLE001` (discovery reads four other tools' files; isolating a bad file is the
+`BLE001` (discovery reads five other tools' files; isolating a bad file is the
 design, and every catch logs).
 
 **A `# noqa` in this repo carries a reason, and one of them is perf.**
@@ -181,8 +181,8 @@ any of those five files and the next search parses the whole history again**,
 once. On the author's corpus that is about five seconds. Time a change on its
 second run, not its first.
 
-`scan_memo.py` is the same idea for discovery: what `_claude_session` and
-`_pi_session` read off each transcript's head and tail is remembered in
+`scan_memo.py` is the same idea for discovery: what `_claude_session`,
+`_pi_session` and `_grok_session` read off each transcript's head and tail is remembered in
 `$XDG_CACHE_HOME/session-browser/discovery`, keyed by size and mtime and named
 for the same source hash, so a transcript is opened by discovery only when it
 has changed. Codex and OpenCode come out of their own indexes and are not in it.
