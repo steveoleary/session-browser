@@ -248,6 +248,11 @@ class TestFillLive:
     reason="the process table is read on macOS and Linux only",
 )
 def test_the_real_process_table_can_be_read():
+    # To check the probe against a real process by hand, run a compiled
+    # stand-in under the agent's name: `cc -o /scratch/codex fake.c`, a main()
+    # that opens a file and sleeps. A copy of /bin/sleep or /bin/bash is
+    # killed on macOS (exit 137), and a python symlink named codex re-execs as
+    # "Python", so neither shows up as the agent.
     procs = live.agent_processes()
     assert isinstance(procs, list)
     assert all(p.agent in live._AGENTS for p in procs)

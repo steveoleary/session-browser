@@ -2798,9 +2798,15 @@ def main(argv: list[str] | None = None) -> int:
         loops = measure_loops(Path(tmp))
 
     if args.action == "show":
-        print(json.dumps(measured, indent=2))
+        # One JSON document, so it can be piped to jq or json.load as it is;
+        # it used to be two printed back to back, which neither can read. No
+        # workload is named loop_opcodes or loop_python, so the keys share a
+        # level and `jq '."cli.list"'` reads as it always did.
         print(
-            json.dumps({"loop_opcodes": loops, "loop_python": python_tag()}, indent=2)
+            json.dumps(
+                {**measured, "loop_opcodes": loops, "loop_python": python_tag()},
+                indent=2,
+            )
         )
         return 0
     if args.action == "bless":
