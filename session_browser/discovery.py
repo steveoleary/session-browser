@@ -1790,7 +1790,12 @@ def _grok_session_remembered(
     if memo is None:
         return _grok_session(session_dir)
     summary = str(session_dir / "summary.json")
-    sig = scan_memo.signature(summary, str(session_dir / "updates.jsonl"))
+    sig = scan_memo.signature(
+        summary,
+        str(session_dir / "updates.jsonl"),
+        str(session_dir / "events.jsonl"),
+        str(session_dir.parent / ".cwd"),
+    )
     if sig is None:
         return _grok_session(session_dir)
     known = memo.get(summary, sig)
@@ -1816,7 +1821,7 @@ def _grok_session(session_dir: Path) -> Session | None:
     session_id = _str(info.get("id")) or session_dir.name
     # The directory name is the cwd, percent-encoded, and lossless -- unlike
     # Claude's and Pi's dash encoding -- so it stands in when info has none.
-    cwd = _str(info.get("cwd")) or unquote(session_dir.parent.name)
+    cwd = _str(info.get("cwd")) or _grok_folder(session_dir.parent)
     prompt = _grok_first_prompt(updates)
     # The person's first words name a session everywhere else, and word
     # search grades a summary as theirs. Grok's own title stands in for a
@@ -1824,7 +1829,8 @@ def _grok_session(session_dir: Path) -> Session | None:
     title = _str(meta.get("generated_title")) or _str(meta.get("session_summary"))
     remotes = meta.get("git_remotes")
     origin = remotes[0] if isinstance(remotes, list) and remotes else ""
-    kind, parent = _grok_subagent(meta)
+    relationship, outcome = _grok_turns(session_dir / "events.jsonl")
+    kind, parent = _grok_subagent(meta, relationship)
     created = _str(meta.get("created_at"))
     session = Session(
         id=session_id,
@@ -1850,6 +1856,9 @@ def _grok_session(session_dir: Path) -> Session | None:
         model=_str(meta.get("current_model_id")) or None,
     )
     session.ending = _tail_ending(updates, "grok")
+    if outcome and "cancel" in outcome:
+        # The last turn ended cancelled, which updates.jsonl does not say.
+        session.ending = INTERRUPTED
     return session
 
 
@@ -1857,27 +1866,108 @@ def _str(value) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _grok_subagent(meta: dict) -> tuple[str, str]:
-    """(subagent_kind, parent_id) from a Grok summary.json.
+def _grok_subagent(meta: dict, relationship: str | None) -> tuple[str, str]:
+    """(subagent_kind, parent_id) for a Grok session.
 
-    Grok's binary names the fields a child session carries -- session_kind in
-    a reserved "subagent" namespace, subagent_role, subagent_depth -- but no
-    Grok session on the machine this was written on is a subagent, so the
-    shape is unverified and read defensively. parent_session_id alone is NOT
-    a spawn: Grok sets it for a fork or a restore too, the same trap as a
-    Codex fork, so it is read only for a session that says it is a subagent.
+    A sub-agent's session lives in the same tree as the one that spawned it,
+    and its events.jsonl says so: every turn_started carries a
+    session_relationship, "primary" on all 15 turns here and something else
+    on a sub-agent's -- the rule inlet/herdr-sessions (MIT) reads Grok by.
+    No sub-agent session is on this machine, so that branch is taken on
+    their word. The spawner is parent_session_id when the summary names one;
+    that field alone is never taken for a spawn, since Grok sets it for a
+    fork or a restore too, the trap a Codex fork already taught.
     """
-    kind = _str(meta.get("session_kind"))
-    role = _str(meta.get("subagent_role"))
-    depth = meta.get("subagent_depth")
-    spawned = (
-        kind.startswith("subagent")
-        or bool(role)
-        or (isinstance(depth, int) and depth > 0)
-    )
-    if not spawned:
+    if relationship in (None, "primary"):
         return "", ""
-    return role or kind or "subagent", _str(meta.get("parent_session_id"))
+    role = _str(meta.get("subagent_role"))
+    return role or relationship, _str(meta.get("parent_session_id"))
+
+
+def _grok_folder(group: Path) -> str:
+    """The cwd a Grok project directory stands for: its name, percent-encoded
+    and so lossless, or for a name too long to be one, the folder Grok writes
+    into a ``.cwd`` file inside it (as herdr-sessions reads it; every name
+    here is short)."""
+    try:
+        written = (group / ".cwd").read_text().strip()
+    except OSError:
+        written = ""
+    if written:
+        return written
+    name = unquote(group.name)
+    return name if name.startswith("/") else ""
+
+
+# A Grok events.jsonl opens with a few dozen MCP start-up records before the
+# first turn_started (line 8 to 30 here).
+_GROK_EVENTS_LOOKAHEAD = 200
+
+
+def _grok_turns(path: Path) -> tuple[str | None, str | None]:
+    """(session_relationship of the first turn, outcome of the last turn) from
+    a Grok events.jsonl, either None when it does not say.
+
+    The outcome is None as well when the last turn started and never ended.
+    Measured: every turn_ended here has outcome "completed"; herdr-sessions
+    reads "cancelled" for a cancelled one.
+    """
+    relationship = None
+    try:
+        with open(path, "rb") as fh:
+            for n, line in enumerate(fh):
+                if n >= _GROK_EVENTS_LOOKAHEAD:
+                    break
+                if b'"turn_started"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict) and obj.get("type") == "turn_started":
+                    relationship = _str(obj.get("session_relationship")) or None
+                    break
+    except OSError:
+        return None, None
+    return relationship, _grok_last_outcome(path)
+
+
+def _grok_last_outcome(path: Path, window: int = 65536) -> str | None:
+    """The outcome of the newest turn in events.jsonl, read back from the end:
+    most of the file is phase_changed records, so the end of the last turn is
+    rarely more than a window away."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    while size:
+        read = min(window, size)
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(size - read)
+                data = fh.read(read)
+        except OSError:
+            return None
+        lines = data.split(b"\n")
+        if read < size:
+            lines = lines[1:]
+        for line in reversed(lines):
+            if b'"turn_ended"' not in line and b'"turn_started"' not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if obj.get("type") == "turn_ended":
+                return _str(obj.get("outcome")) or None
+            if obj.get("type") == "turn_started":
+                return None  # the newest turn never ended
+        if read >= size:
+            return None
+        window *= 4
+    return None
 
 
 # How far into updates.jsonl the first prompt is looked for. It is the first

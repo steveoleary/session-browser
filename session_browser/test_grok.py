@@ -150,18 +150,59 @@ class TestDiscovery:
             tmp_path,
             sid=child,
             updates=FULL,
-            session_kind="subagent",
-            subagent_role="explorer",
+            events=_turn(relationship="subagent"),
             parent_session_id=SID,
         )
-        _session_dir(tmp_path, sid=fork, updates=FULL, parent_session_id=SID)
+        _session_dir(
+            tmp_path, sid=fork, updates=FULL, events=_turn(), parent_session_id=SID
+        )
         found = _scan(tmp_path)
         assert (found[child].subagent_kind, found[child].parent_id) == (
-            "explorer",
+            "subagent",
             SID,
         )
         # parent_session_id is also the source of a fork or a restore.
         assert (found[fork].subagent_kind, found[fork].parent_id) == ("", "")
+
+    def test_a_long_folder_name_is_read_from_its_cwd_file(self, tmp_path):
+        d = _session_dir(tmp_path, updates=FULL, info={"id": SID})
+        slug = d.parent.with_name("Users-test-a-very-long-path-1a2b3c")
+        d.parent.rename(slug)
+        (slug / ".cwd").write_text(CWD + "\n")
+        assert _scan(tmp_path)[SID].cwd == CWD
+
+
+def _turn(outcome="completed", *, relationship="primary", yolo=False) -> list[dict]:
+    """One turn of events.jsonl, as grok 1.0.92 writes it, cut down."""
+    events = [
+        {"ts": "2026-11-12T20:18:29.344Z", "type": "mcp_config_resolved"},
+        {
+            "ts": "2026-11-12T20:21:32.320Z",
+            "type": "turn_started",
+            "session_id": SID,
+            "turn_number": 0,
+            "yolo_mode": yolo,
+            "session_relationship": relationship,
+        },
+        {"ts": "2026-11-12T20:21:32.417Z", "type": "phase_changed", "phase": "x"},
+    ]
+    if outcome:
+        events.append(
+            {"ts": "2026-11-12T20:21:36Z", "type": "turn_ended", "outcome": outcome}
+        )
+    return events
+
+
+def test_a_turn_that_ended_cancelled_is_interrupted(tmp_path):
+    # updates.jsonl shows only where it stopped; events.jsonl says why.
+    _session_dir(tmp_path, updates=[HOOK, PROMPT, REPLY], events=_turn("cancelled"))
+    assert _scan(tmp_path)[SID].ending == "interrupted"
+
+
+def test_a_turn_still_open_after_a_cancel_is_read_from_the_transcript(tmp_path):
+    events = [*_turn("cancelled"), *_turn(None)[1:]]
+    _session_dir(tmp_path, updates=[HOOK, PROMPT, CALL], events=events)
+    assert _scan(tmp_path)[SID].ending == "mid-action"
 
 
 class TestLive:
