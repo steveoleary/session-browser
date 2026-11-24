@@ -80,8 +80,9 @@ class Memo:
     with a memo of its own.
     """
 
-    def __init__(self, provider: str) -> None:
+    def __init__(self, provider: str, *, keep_unmet: bool = False) -> None:
         self._provider = provider
+        self._keep_unmet = keep_unmet
         self._path = directory() / f"{provider}.{entry_cache.parser_version()}.json"
         self._before: dict[str, list] = {}
         self._after: dict[str, list] = {}
@@ -111,7 +112,22 @@ class Memo:
         its entry with it. A run that found nothing new and nothing gone
         writes nothing. Failure is silent for the reason a failed entry-cache
         store is: the caller already has its answer.
+
+        A memo opened with *keep_unmet* is read for a few files at a time
+        rather than for every one, so it keeps what this run did not meet as
+        well, for as long as the file is still there.
         """
+        if self._keep_unmet:
+            unmet = {
+                path: known
+                for path, known in self._before.items()
+                if path not in self._after and os.path.exists(path)
+            }
+            if not any(
+                self._before.get(path) != known for path, known in self._after.items()
+            ) and len(unmet) + len(self._after) == len(self._before):
+                return
+            self._after = {**unmet, **self._after}
         if self._after == self._before:
             return
         try:
@@ -137,6 +153,6 @@ class Memo:
             log.debug("could not save the %s discovery memo: %s", self._provider, exc)
 
 
-def open_memo(provider: str) -> Memo | None:
+def open_memo(provider: str, *, keep_unmet: bool = False) -> Memo | None:
     """A memo for *provider*, or None when the cache is switched off."""
-    return Memo(provider) if entry_cache.enabled() else None
+    return Memo(provider, keep_unmet=keep_unmet) if entry_cache.enabled() else None

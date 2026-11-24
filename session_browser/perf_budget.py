@@ -172,6 +172,12 @@ COUNTERS = (
     "process_pool_stores",
     "discovery_scans",
     "scan_memo_hits",
+    # A rollout read to learn how its session ended, and what that read
+    # consumed -- counted here and not as corpus reads, so that the corpus
+    # counters go on meaning what the command's own retrieval read, and the
+    # price of printing an ending stays visible on its own line.
+    "ending_reads",
+    "ending_bytes_read",
 )
 
 
@@ -263,6 +269,9 @@ def instrumented(
     real_rg = transcript._rg_candidate_paths
     real_decompress = compressed._decompress
     real_stream = compressed._stream
+    real_rollout_ending = discovery._codex_rollout_ending
+    # Set while a rollout is read for its ending, on that thread only.
+    reading_ending = threading.local()
     corpus_str = str(corpus)
     # The entry cache sits inside the corpus home, and what is read back from
     # it is this package's own earlier work rather than the provider's files.
@@ -305,8 +314,18 @@ def instrumented(
             return _CountingReader(fh, ledger, "entry_cache_bytes_read")
         if not in_corpus(file):
             return fh
+        if getattr(reading_ending, "on", False):
+            ledger.add("ending_reads")
+            return _CountingReader(fh, ledger, "ending_bytes_read")
         ledger.add("corpus_file_opens")
         return _CountingReader(fh, ledger)
+
+    def counting_rollout_ending(path):
+        reading_ending.on = True
+        try:
+            return real_rollout_ending(path)
+        finally:
+            reading_ending.on = False
 
     def counting_read_bytes(self):
         data = real_read_bytes(self)
@@ -408,6 +427,9 @@ def instrumented(
         fh = real_stream(path, *args, **kwargs)
         if not in_corpus(path):
             return fh
+        if getattr(reading_ending, "on", False):
+            ledger.add("ending_reads")
+            return _CountingReader(fh, ledger, "ending_bytes_read")
         ledger.add("corpus_file_opens")
         return _CountingReader(fh, ledger)
 
@@ -435,6 +457,7 @@ def instrumented(
     transcript._ticking_rows = counting_ticking_rows
     compressed._decompress = counting_decompress
     compressed._stream = counting_stream
+    discovery._codex_rollout_ending = counting_rollout_ending
     if disable_rg:
         transcript._rg_candidate_paths = no_rg
         transcript._rg_entry_text_candidates = no_rg
@@ -460,6 +483,7 @@ def instrumented(
         transcript._rg_candidate_paths = real_rg
         compressed._decompress = real_decompress
         compressed._stream = real_stream
+        discovery._codex_rollout_ending = real_rollout_ending
 
 
 # ---------------------------------------------------------------------------
@@ -1380,6 +1404,9 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
     def list_preview() -> None:
         _cli("list", "--limit", "50", "--preview", "ending")
 
+    def list_unfinished() -> None:
+        _cli("list", "--ending", "unfinished", "--limit", "50")
+
     def get_one() -> None:
         _cli("get", "claude:perf-claude-0000")
 
@@ -1606,6 +1633,24 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             _STATELESS + "A listing counts each returned session's entries "
             "by reading it once -- the returned rows only, never the corpus.",
             off(list_plain),
+        ),
+        Workload(
+            "cli.list.ending",
+            "--ending filters on how each session ended. Claude and Pi carry "
+            "it from discovery's tail read, so only Codex sessions from its "
+            "index are asked, and each rollout's answer is remembered: warm, "
+            "ending_reads is zero and every Codex candidate is a scan_memo "
+            "hit. Reads here mean the memo stopped holding, or the filter ran "
+            "before the others and asked sessions it was going to drop.",
+            warm(list_unfinished),
+        ),
+        Workload(
+            "cli.list.ending.stateless",
+            _STATELESS + "With nothing remembered, --ending reads each Codex "
+            "candidate's rollout once, from its end: ending_reads is the Codex "
+            "session count, and ending_bytes_read a tail of each, not the "
+            "rollouts whole.",
+            off(list_unfinished),
         ),
         Workload(
             "cli.list.preview",
@@ -2605,6 +2650,11 @@ def blessed_delta(
             new = measured[name].get(counter)
             if old is not None and new is not None and old != new:
                 moved[f"{name}.{counter}"] = _delta(old, new)
+            elif old is None and new:
+                # A counter added since the committed budgets has no old value
+                # to move from, but work it counts is still work this bless
+                # accepts. Recorded from nothing, so it cannot arrive unseen.
+                moved[f"{name}.{counter}"] = f"(new counter) -> {new:,}"
 
     # Loops are replaced wholesale rather than merged, so a bless that did not
     # re-measure them (loops is None) has not changed them and must not claim

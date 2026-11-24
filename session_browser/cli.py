@@ -21,7 +21,14 @@ from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 from .config import ConfigError, load_ignore
-from .discovery import ALL_SCANNERS, Session, claude_root_session, discover_all
+from .discovery import (
+    ALL_SCANNERS,
+    ENDINGS,
+    Session,
+    claude_root_session,
+    discover_all,
+    fill_endings,
+)
 from .resume import _filename_part
 from .transcript import (
     FILTER_ROLES,
@@ -65,6 +72,7 @@ _SESSION_KEYS = (
     "continued_in",
     "continued_from",
     "live",
+    "ending",
 )
 _ENTRY_KEYS = ("entry_index", "role", "text", "timestamp", "metadata")
 
@@ -84,6 +92,7 @@ _FILTER_KEYS = (
     "include_current",
     "no_ignore",
     "no_subagents",
+    "ending",
     "model",
     "since",
     "until",
@@ -113,7 +122,17 @@ def _json_key_contract(*groups: tuple[str, tuple[str, ...]]) -> str:
 # python reducer to project exactly the fields these columns already carry,
 # while --format text was requested 11 times. The data was not missing; the
 # contract was, because --help named only the {json,text} enum.
-_LIST_TEXT_COLUMNS = ("id", "updated", "entries", "duration", "cwd", "summary")
+# "ending" is last so that the columns before it kept their positions when
+# it was added.
+_LIST_TEXT_COLUMNS = (
+    "id",
+    "updated",
+    "entries",
+    "duration",
+    "cwd",
+    "summary",
+    "ending",
+)
 _SEARCH_TEXT_COLUMNS = ("id", "match_count", "updated", "summary")
 
 
@@ -140,7 +159,14 @@ _SUBAGENT_CONTRACT = (
     '"summary_is_recap" is true when "summary" is Claude Code\'s own recap of '
     "the session\n(the newest thing in it, nothing said since) rather than "
     "its opening prompt;\ntext output marks it with a leading 'recap: '. "
-    "Written by the agent, never generated\nhere."
+    "Written by the agent, never generated\nhere.\n"
+    '"ending" is how the last turn ended: "completed" (the agent answered), '
+    '"unanswered"\n(the last message got no reply), "mid-action" (it stopped '
+    'during a tool call)\nor "interrupted" (the person cancelled). Read off '
+    "the end of the transcript for\nClaude, Codex and Pi, and from OpenCode "
+    "2.x's own record; null when that cannot\nsay -- OpenCode 1.x, an "
+    "OpenCode session still busy, or a transcript with no\nconversation in it. "
+    'As of this read: a live session "mid-action" now may finish.'
 )
 
 
@@ -824,6 +850,27 @@ class _Once(argparse.Action):
         setattr(namespace, self.dest, values)
 
 
+# --ending's shorthand for everything but a finished turn.
+_UNFINISHED = ("unanswered", "mid-action", "interrupted")
+
+
+def _ending_states(value: str) -> frozenset[str]:
+    """--ending's value: endings by name, "unfinished" for the other three."""
+    states: set[str] = set()
+    for part in value.lower().split(","):
+        name = part.strip()
+        if name == "unfinished":
+            states.update(_UNFINISHED)
+        elif name in ENDINGS:
+            states.add(name)
+        else:
+            raise argparse.ArgumentTypeError(
+                f"invalid ending {name!r} (choose from "
+                f"{', '.join(ENDINGS)}, unfinished)"
+            )
+    return frozenset(states)
+
+
 def _add_filter_args(p: argparse.ArgumentParser) -> None:
     # Validated rather than filtered with. An unknown value used to filter
     # every session out and exit 0, so `--provider claude-code` -- the
@@ -940,6 +987,17 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         "count or search only the sessions a person started. Kept: sessions "
         "from a provider that exposes no link (subagent_kind null), since "
         "they are not known to be subagents. Applied before --limit",
+    )
+    p.add_argument(
+        "--ending",
+        action=_Once,
+        type=_ending_states,
+        metavar="STATE[,STATE...]",
+        help="keep sessions whose last turn ended this way: completed, "
+        "unanswered, mid-action, interrupted, or unfinished for the last "
+        "three together (what was left half-done); comma-separated. A session "
+        "whose ending cannot be read (null) never matches. Applied before "
+        "--limit",
     )
     p.add_argument(
         "--limit",
@@ -1305,6 +1363,18 @@ def apply_filters(
                 f"--exclude-cwd removed {dropped} session(s) matching "
                 f"{', '.join(excluded)}"
             )
+    if endings := getattr(args, "ending", None):
+        # After every other filter, so only the sessions still in the running
+        # are asked for an ending discovery could not read.
+        fill_endings(out)
+        unknown = sum(1 for s in out if s.ending is None)
+        out = [s for s in out if s.ending in endings]
+        if not out and unknown and warnings is not None:
+            warnings.append(
+                f"--ending matched nothing, and {unknown} session(s) have no "
+                f"readable ending (OpenCode 1.x records none, and a transcript "
+                f"with no conversation has none)"
+            )
     if not out and ignored and warnings is not None:
         # ripgrep's "No files were searched, which means ripgrep probably
         # applied a filter you didn't expect", made exact. Only an empty
@@ -1601,6 +1671,8 @@ def cmd_list(args) -> int:
         warnings.append(_truncation_warning(args, sessions[args.limit :]))
     if args.limit is not None:
         sessions = _limited(sessions, args.limit)
+    # Only the rows shown: an ending discovery could not read is read here.
+    fill_endings(sessions)
     # Entry counts open every listed transcript — I/O-bound reads, so
     # overlap them (same rationale as search's per-session scan pool).
     counts: list[int | None] = []
@@ -1676,6 +1748,7 @@ def cmd_list(args) -> int:
                 duration,
                 s.cwd or "-",
                 _summary_cell(s),
+                s.ending or "-",
             ]
             print("\t".join(cols))
         if not sessions:
@@ -2149,6 +2222,7 @@ def cmd_get(args) -> int:
         s = resolve_session(discovered, ident)
         if all(s is not prev for prev in sessions):
             sessions.append(s)
+    fill_endings(sessions)
     views = []
     budgets = {}
     briefs: dict[str, dict] = {}
@@ -2470,6 +2544,7 @@ def cmd_search(args) -> int:
         warnings.append(_truncation_warning(args, matched[args.limit :]))
     if args.limit is not None:
         matched = _limited(matched, args.limit)
+    fill_endings(r.session for r in matched)
     for r in matched:
         # Summary-only matches were often prefilter-skipped, never parsed:
         # their total_entries would read 0 and look like a corrupt record.
@@ -2820,6 +2895,7 @@ def _filters_dict(args) -> dict:
         "include_current": getattr(args, "include_current", False),
         "no_ignore": getattr(args, "no_ignore", False),
         "no_subagents": getattr(args, "no_subagents", False),
+        "ending": sorted(args.ending) if getattr(args, "ending", None) else None,
         "model": getattr(args, "model", None),
         "since": args.since,
         "until": args.until,

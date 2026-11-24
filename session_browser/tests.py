@@ -4254,6 +4254,46 @@ class TestSearchUX:
             assert [s.id for s in app._filtered] == ["k1"]
             assert "ignored" not in str(app._app_meta.render())
 
+    async def test_rows_mark_unfinished_endings_and_recaps(self):
+        """A row whose last turn did not finish says how; a finished one is
+        unmarked. A recap summary carries its own mark, and the detail header
+        names the ending in words."""
+        app = SessionBrowser()
+        fake = []
+        for sid, ending in (
+            ("s1", "interrupted"),
+            ("s2", "mid-action"),
+            ("s3", "unanswered"),
+            ("s4", "completed"),
+            ("s5", None),
+        ):
+            s = Session(
+                id=sid,
+                provider="claude",
+                summary=f"work {sid}",
+                updated_at=f"2026-01-0{sid[1]}",
+            )
+            s.ending = ending
+            fake.append(s)
+        fake[3].summary_is_recap = True
+        async with app.run_test() as pilot:
+            await _install_fake_sessions(app, pilot, fake)
+            table = app.query_one("#session-table")
+            cells = {
+                str(table.get_row_at(r)[-1]).split("work ")[1]: str(
+                    table.get_row_at(r)[-1]
+                )
+                for r in range(table.row_count)
+            }
+            assert cells["s1"].startswith("[red]✗[/] ")
+            assert cells["s2"].startswith("[yellow]…[/] ")
+            assert cells["s3"].startswith("[yellow]?[/] ")
+            assert cells["s4"] == "[dim]↺[/] work s4"
+            assert cells["s5"] == "work s5"
+            app._update_detail_header(fake[0])
+            header = str(app.query_one("#detail-header").render())
+            assert "ended interrupted" in header
+
     async def test_content_hit_row_shows_count_and_snippet(self):
         """The summary cell shows *why* the row matched, not the opening
         prompt of an unrelated-looking session."""

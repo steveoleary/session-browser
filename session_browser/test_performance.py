@@ -203,6 +203,21 @@ class TestBlessedDelta:
         assert blessed["moved"] == {}
         assert blessed["added"] == []
 
+    def test_work_a_new_counter_finds_in_an_old_workload_is_recorded(self):
+        """A counter added since the committed budgets has no old value. What
+        it counts is still work being accepted, so it is reported; a zero is
+        not movement and is left out."""
+        blessed = perf_budget.blessed_delta(
+            {"w": {"transcripts_parsed": 5}, "v": {"transcripts_parsed": 1}},
+            {
+                "w": {"transcripts_parsed": 5, "ending_reads": 3},
+                "v": {"transcripts_parsed": 1, "ending_reads": 0},
+            },
+            {},
+            None,
+        )
+        assert blessed["moved"] == {"w.ending_reads": "(new counter) -> 3"}
+
     def test_a_new_workload_is_added_not_reported_as_movement(self):
         """Adding a scenario is normal, and must not read as a regression."""
         blessed = perf_budget.blessed_delta(

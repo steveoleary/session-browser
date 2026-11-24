@@ -287,6 +287,7 @@ def render_markdown(
         f"- Repository: {s.repository or '—'}",
         f"- Created: {s.created_at or '—'}",
         f"- Updated: {s.updated_at or '—'}",
+        f"- Ended: {s.ending or '—'}",
         entries_line,
     ]
     if transcript.warnings:
@@ -350,6 +351,7 @@ def session_to_dict(s: Session) -> dict:
         "continued_in": s.continued_in,
         "continued_from": s.continued_from,
         "live": s.live,
+        "ending": s.ending,
     }
 
 

@@ -92,6 +92,18 @@ def _copy(path: Path) -> tuple[Path, float | None, os.stat_result]:
     return target, used, st
 
 
+def existing_copy(path: Path) -> Path | None:
+    """The decompressed copy of *path* a scan already made, or None.
+
+    For a reader that wants only the end of a rollout: it can seek in a copy,
+    where a stream has to be read from the start. Never makes one, and does
+    not count as wanting it, so a copy only this reader uses still ages out.
+    Raises OSError when *path* cannot be statted.
+    """
+    target, used, _st = _copy(Path(path))
+    return target if used is not None else None
+
+
 def readable(path: Path) -> Path:
     """*path* itself, or its decompressed copy when it is a ``.zst`` file.
 

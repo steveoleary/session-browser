@@ -39,7 +39,7 @@ from datetime import UTC
 
 from . import deletion, multiplexer
 from .config import ConfigError, load_ignore, load_tui_settings
-from .discovery import Session, discover_all, worktree_project
+from .discovery import Session, discover_all, fill_endings, worktree_project
 from .resume import (
     build_chat_export,
     copy_to_clipboard,
@@ -85,6 +85,13 @@ from .transcript import (
 # Before a row's summary when it is the agent's own recap of the session
 # (Claude Code's away_summary) rather than its opening prompt.
 _RECAP_MARK = "[dim]↺[/] "
+# Before a row's summary when its last turn did not finish. A completed one
+# is unmarked: it is most rows, and the marks are there to find the others.
+_ENDING_MARKS = {
+    "unanswered": "[yellow]?[/] ",
+    "mid-action": "[yellow]…[/] ",
+    "interrupted": "[red]✗[/] ",
+}
 
 PROVIDER_COLOURS = {
     "claude": "[bold magenta]●[/] claude",
@@ -1399,6 +1406,7 @@ class ShortcutHelp(ModalScreen[None]):
 [bold]Layout[/]     [cyan]z[/] focus current pane    [cyan]Esc[/] step back
 
 [bold]Marks[/]      [dim]↺[/] summary is the agent's own recap of the session
+           last turn: [yellow]?[/] unanswered  [yellow]…[/] mid-action  [red]✗[/] interrupted
 
 [bold]Use[/]        [cyan]c[/] copy resume command  [cyan]i[/] copy canonical id
            {terminal}[cyan]e / E[/] copy / export chat
@@ -2047,6 +2055,24 @@ class SessionBrowser(App):
                 self._apply_filter("")
                 if error:
                     self._flash_status(error, ok=False)
+                # Codex's index says nothing of how a session ended, so its
+                # rollouts are read for that once the list is on screen.
+                sessions = list(self._discovered)
+                self.run_worker(
+                    lambda: {s.id for s in fill_endings(sessions)},
+                    name="_fill_endings",
+                    thread=True,
+                    exclusive=True,
+                    group="fill_endings",
+                )
+        elif event.worker.name == "_fill_endings":
+            # Only when a row on screen gained an ending: a rebuild for
+            # nothing would still move the table under the user.
+            filled = event.worker.result or set()
+            if any(s.id in filled for s in self._table_sessions):
+                self._rebuild_table()
+                if self._selected is not None and self._selected.id in filled:
+                    self._update_detail_header(self._selected)
         elif event.worker.name == "_delete_session":
             # Reload first: it writes "Discovering sessions…" to the bar, and
             # the flash must land after that or it is never seen.
@@ -2477,6 +2503,7 @@ class SessionBrowser(App):
                     )
                     if s.summary_is_recap:
                         summary = _RECAP_MARK + summary
+                summary = _ENDING_MARKS.get(s.ending or "", "") + summary
                 if (words is not None or s.id in self._meta_words) and not s.matches(
                     self._filter_query
                 ):
@@ -2758,9 +2785,10 @@ class SessionBrowser(App):
         branch = _escape_markup(s.branch or "no branch")
         updated = _relative_time(s.updated_at or s.created_at)
         session_id = _escape_markup(_ellipsize(s.id, 18))
+        ended = f"  ·  ended {s.ending}" if s.ending else ""
         lines = [
             f"[bold cyan]{s.provider.upper()}[/]  [bold]{summary}[/]",
-            f"[dim]{project}  ·  {branch}  ·  {updated}  ·  {session_id}[/]",
+            f"[dim]{project}  ·  {branch}  ·  {updated}{ended}  ·  {session_id}[/]",
         ]
         if self.size.height >= 28 and width >= 56 and s.cwd:
             lines.append(f"[dim]{_escape_markup(_ellipsize(s.cwd, width - 2))}[/]")

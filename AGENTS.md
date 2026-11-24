@@ -186,6 +186,11 @@ second run, not its first.
 `$XDG_CACHE_HOME/session-browser/discovery`, keyed by size and mtime and named
 for the same source hash, so a transcript is opened by discovery only when it
 has changed. Codex and OpenCode come out of their own indexes and are not in it.
+The one thing Codex's index does not hold is how a session ended, so
+`fill_endings` reads that off a rollout's end only for the sessions a command
+shows or filters on, and remembers it in the same directory under
+`codex-endings`; the perf gate counts those reads apart, as `ending_reads` and
+`ending_bytes_read`.
 A per-file scan that starts reading anything beyond the transcript -- as a
 subagent's sidecar already is -- has to put that file in the signature too.
 

@@ -148,6 +148,9 @@ session-browser list --here --limit 20
 # Choose a session using short excerpts of its latest user and assistant messages
 session-browser list --here --limit 6 --preview ending
 
+# What was left half-done last week: no reply, stopped mid-tool-call, or cancelled
+session-browser list --since -1w --ending unfinished
+
 # Search complete transcripts and return useful context
 session-browser search --here --mode snippets "pytest fixture"
 

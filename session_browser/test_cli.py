@@ -4443,7 +4443,7 @@ class TestRecapSummary:
         self._recap(sessions)
         code, out, _ = cli("list", "--format", "text")
         assert code == 0
-        rows = {line.split("\t")[0]: line.split("\t")[-1] for line in out.splitlines()}
+        rows = {line.split("\t")[0]: line.split("\t")[5] for line in out.splitlines()}
         assert rows["claude:aaa"] == "recap: The wombat survey is done. Next, read it."
         assert rows["claude:ccc"] == "gamma"
 

@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import sqlite3
+from collections import deque
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields
@@ -20,6 +21,22 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Unified session model
 # ---------------------------------------------------------------------------
+
+# How a conversation ended, read off its last records. Four states, and
+# None for "cannot say":
+#
+#   completed     the agent answered: its last turn is a reply
+#   unanswered    the person's last message got no reply
+#   mid-action    it stopped during a tool call: a call with no result, or a
+#                 result the agent never answered
+#   interrupted   the person cancelled the turn
+COMPLETED, UNANSWERED, MID_ACTION, INTERRUPTED = (
+    "completed",
+    "unanswered",
+    "mid-action",
+    "interrupted",
+)
+ENDINGS = (COMPLETED, UNANSWERED, MID_ACTION, INTERRUPTED)
 
 
 @dataclass
@@ -85,6 +102,13 @@ class Session:
     # than the first prompt does. Never produced by this browser; it only
     # reads what the agent wrote.
     summary_is_recap: bool = field(default=False, init=False)
+    # How the session's last turn ended: one of ENDINGS, read off the end of
+    # its transcript, or None when that cannot be said -- a provider that
+    # records too little (OpenCode 1.x), a transcript with no conversation in
+    # it, or a Codex session whose rollout has not been read yet (see
+    # fill_endings). As of the read, like every count: a live session that
+    # is mid-action now may finish.
+    ending: str | None = field(default=None, init=False)
     # A rewound Codex thread's EARLIER rollout files, oldest first; the newest
     # stays content_path, because that is the file Codex goes on appending to
     # and the one its index names. Codex's Esc-Esc rewind starts a new file
@@ -200,6 +224,8 @@ def _scanned_fields(session: Session | None) -> dict | None:
         kept["continued_in"] = session.continued_in
     if session.summary_is_recap:
         kept["summary_is_recap"] = True
+    if session.ending is not None:
+        kept["ending"] = session.ending
     return kept
 
 
@@ -209,11 +235,14 @@ def _session_from_scanned(kept: dict | None) -> Session | None:
     kept = dict(kept)  # the memo's own copy is written back unchanged
     continued_in = kept.pop("continued_in", None)
     recap = kept.pop("summary_is_recap", False)
+    ending = kept.pop("ending", None)
     session = Session(**kept)
     if continued_in is not None:
         session.continued_in = continued_in
     if recap:
         session.summary_is_recap = True
+    if ending is not None:
+        session.ending = ending
     return session
 
 
@@ -459,6 +488,7 @@ def _claude_session(
         session.continued_in = tail["continued_in"]
     if recap:
         session.summary_is_recap = True
+    session.ending = tail.get("ending")
     return session
 
 
@@ -1086,7 +1116,8 @@ def _codex_session_from_file(f: Path) -> Session | None:
         summary, model = _codex_child_label(payload), None
     else:
         summary, model = _codex_head(readable)
-    return Session(
+    tail: dict[str, str] = {}
+    session = Session(
         id=sid,
         provider="codex",
         summary=summary,
@@ -1096,12 +1127,16 @@ def _codex_session_from_file(f: Path) -> Session | None:
             _codex_repo_name(cwd, origin_url) if origin_url else _repo_name(cwd)
         ),
         created_at=ts,
-        updated_at=(_last_activity_iso(readable, "codex") or ts or _file_mtime_iso(f)),
+        updated_at=(
+            _last_activity_iso(readable, "codex", seen=tail) or ts or _file_mtime_iso(f)
+        ),
         content_path=str(f),
         parent_id=parent_id,
         subagent_kind=kind,
         model=model,
     )
+    session.ending = tail.get("ending")
+    return session
 
 
 # The Codex record vocabulary is shared by this module's summary/activity
@@ -1396,55 +1431,70 @@ def scan_opencode() -> list[Session]:
         conn = sqlite3.connect(_readonly_uri(db_path), uri=True, timeout=3)
         conn.row_factory = sqlite3.Row
         try:
-            try:
-                rows = opencode_execute(conn, _OPENCODE_SESSIONS_SQL)[0].fetchall()
-            except sqlite3.OperationalError as exc:
-                # Rejected while preparing, before any row is read.
-                if "no such column" not in str(exc) or "model" not in str(exc):
-                    raise
-                rows = opencode_execute(
-                    conn, _OPENCODE_SESSIONS_SQL_NO_MODEL, schema=OPENCODE_V2
-                )[0].fetchall()
+            sql, schema, missing = _OPENCODE_SESSIONS_SQL, 0, frozenset()
+            while True:
+                try:
+                    cur, schema = opencode_execute(conn, sql, schema=schema)
+                    rows = cur.fetchall()
+                    break
+                except sqlite3.OperationalError as exc:
+                    # Rejected while preparing, before any row is read.
+                    column = _opencode_missing_column(str(exc), missing)
+                    if column is None:
+                        raise
+                    missing |= {column}
+                    sql = (sql[0], _opencode_v2_sessions_sql(missing))
+                    schema = OPENCODE_V2
         finally:
             conn.close()
         for r in rows:
-            sessions.append(
-                Session(
-                    id=r["id"],
-                    provider="opencode",
-                    summary=r["title"] or "",
-                    cwd=r["directory"] or r["worktree"] or "",
-                    # OpenCode's session/project schema has no branch column.
-                    # Do not serialize that structural absence as a known-
-                    # empty string, which is what Claude/Codex legitimately
-                    # record for a session with no active branch.
-                    branch=None,
-                    # The project table has a name column and it is NULL for
-                    # every row in a real install, so the path is what there
-                    # is. Preferred over it anyway when set: it is the name
-                    # the user gave the project.
-                    #
-                    # Worktree first, since it is the project root and so
-                    # still names the repository for a session started in a
-                    # subdirectory of it. It is "/" for opencode's catch-all
-                    # "global" project, which names nothing, and those
-                    # sessions fall through to their own directory.
-                    repository=r["project_name"]
-                    or _repo_name(r["worktree"] or "")
-                    or _repo_name(r["directory"] or ""),
-                    created_at=_epoch_ms_to_iso(r["time_created"]),
-                    updated_at=_epoch_ms_to_iso(r["time_updated"]),
-                    content_path=str(db_path),
-                    parent_id=r["parent_id"] or "",
-                    subagent_kind=(
-                        (r["agent"] or "subagent") if r["parent_id"] else ""
-                    ),
-                    model=r["model"],
-                )
+            session = Session(
+                id=r["id"],
+                provider="opencode",
+                summary=r["title"] or "",
+                cwd=r["directory"] or r["worktree"] or "",
+                # OpenCode's session/project schema has no branch column.
+                # Do not serialize that structural absence as a known-
+                # empty string, which is what Claude/Codex legitimately
+                # record for a session with no active branch.
+                branch=None,
+                # The project table has a name column and it is NULL for
+                # every row in a real install, so the path is what there
+                # is. Preferred over it anyway when set: it is the name
+                # the user gave the project.
+                #
+                # Worktree first, since it is the project root and so
+                # still names the repository for a session started in a
+                # subdirectory of it. It is "/" for opencode's catch-all
+                # "global" project, which names nothing, and those
+                # sessions fall through to their own directory.
+                repository=r["project_name"]
+                or _repo_name(r["worktree"] or "")
+                or _repo_name(r["directory"] or ""),
+                created_at=_epoch_ms_to_iso(r["time_created"]),
+                updated_at=_epoch_ms_to_iso(r["time_updated"]),
+                content_path=str(db_path),
+                parent_id=r["parent_id"] or "",
+                subagent_kind=((r["agent"] or "subagent") if r["parent_id"] else ""),
+                model=r["model"],
             )
+            if r["idle_outcome"] is not None:
+                session.ending = _OPENCODE_ENDINGS.get(r["idle_outcome"])
+            sessions.append(session)
     except (sqlite3.Error, OSError) as exc:
         log.warning("opencode discovery failed: %s", exc)
     return sessions
+
+
+def _opencode_missing_column(message: str, missing: frozenset[str]) -> str | None:
+    """The optional session_v2 column *message* says is missing, if it is one
+    not already read as NULL."""
+    if "no such column" not in message:
+        return None
+    for column in _OPENCODE_V2_OPTIONAL:
+        if column not in missing and column in message:
+            return column
+    return None
 
 
 def _opencode_db_path() -> Path:
@@ -1463,12 +1513,48 @@ OPENCODE_V1, OPENCODE_V2 = 1, 2
 # purpose: reading it as parent_id would file a fork as a subagent.
 _OPENCODE_V2_SESSIONS = (
     "SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, "
-    "       s.parent_id, s.agent, {MODEL} AS model, "
+    "       s.parent_id, s.agent, {model} AS model, {idle_outcome} AS idle_outcome, "
     "       p.worktree, p.name AS project_name "
     "FROM session_v2 s "
     "LEFT JOIN project p ON s.project_id = p.id "
     "ORDER BY s.time_updated DESC"
 )
+# Columns migration-added to session_v2, each with what reads it. A 2.x
+# install from before one still serves every other column, and losing all its
+# sessions over an optional field would be the wrong trade, so a statement the
+# database rejects for one is asked again with that column read as NULL.
+#
+# v2 records the session's model as JSON, {"id": ..., "providerID": ...,
+# "variant": ...}, spelled here providerID/id as opencode's own --model takes
+# it; v1 records it only per message, hence NULL there. Built in SQL so the
+# row loop stays a plain read. json_valid guards it, since json_extract raises
+# on malformed input.
+#
+# idle_outcome is how the session's last turn closed, as OpenCode itself
+# records it on the row: "succeeded" or "interrupted" on all 7 v2 sessions
+# here (2026-11-24), NULL while it is busy. v1 has no such column, and its
+# messages are not read for one, hence NULL there too.
+_OPENCODE_V2_OPTIONAL = {
+    "model": (
+        "CASE WHEN json_valid(s.model) "
+        "      AND json_extract(s.model, '$.id') IS NOT NULL "
+        "  THEN COALESCE(json_extract(s.model, '$.providerID') || '/', '') "
+        "       || json_extract(s.model, '$.id') "
+        "END"
+    ),
+    "idle_outcome": "s.idle_outcome",
+}
+
+
+def _opencode_v2_sessions_sql(missing: frozenset[str] = frozenset()) -> str:
+    return _OPENCODE_V2_SESSIONS.format(
+        **{
+            column: "NULL" if column in missing else expr
+            for column, expr in _OPENCODE_V2_OPTIONAL.items()
+        }
+    )
+
+
 _OPENCODE_SESSIONS_SQL = (
     # parent_id and agent are two more columns on a query that already reads
     # this table, so the sqlite_statements counter is unmoved. agent names the
@@ -1477,33 +1563,15 @@ _OPENCODE_SESSIONS_SQL = (
     # being one -- parent_id is the only thing that says "this was spawned".
     (
         "SELECT s.id, s.title, s.directory, s.time_created, s.time_updated, "
-        "       s.parent_id, s.agent, NULL AS model, "
+        "       s.parent_id, s.agent, NULL AS model, NULL AS idle_outcome, "
         "       p.worktree, p.name AS project_name "
         "FROM session s "
         "LEFT JOIN project p ON s.project_id = p.id "
         "ORDER BY s.time_updated DESC"
     ),
-    # v2 records the session's model as JSON, {"id": ..., "providerID": ...,
-    # "variant": ...}, spelled here providerID/id as opencode's own --model
-    # takes it; v1 records it only per message, hence NULL above. Built in
-    # SQL so the row loop stays a plain read. json_valid guards it, since
-    # json_extract raises on malformed input.
-    _OPENCODE_V2_SESSIONS.replace(
-        "{MODEL}",
-        "CASE WHEN json_valid(s.model) "
-        "      AND json_extract(s.model, '$.id') IS NOT NULL "
-        "  THEN COALESCE(json_extract(s.model, '$.providerID') || '/', '') "
-        "       || json_extract(s.model, '$.id') "
-        "END",
-    ),
+    _opencode_v2_sessions_sql(),
 )
-# model is migration-added to session_v2. A 2.x install from before it still
-# serves every other column, and losing all its sessions over one optional
-# field would be the wrong trade, so this asks again without it.
-_OPENCODE_SESSIONS_SQL_NO_MODEL = (
-    _OPENCODE_SESSIONS_SQL[0],
-    _OPENCODE_V2_SESSIONS.replace("{MODEL}", "NULL"),
-)
+_OPENCODE_ENDINGS = {"succeeded": COMPLETED, "interrupted": INTERRUPTED}
 
 
 def opencode_execute(
@@ -1629,7 +1697,8 @@ def _pi_session(f: Path) -> Session:
     # carries, so a file whose header is missing or unparseable
     # still gets the id Pi itself would resume by.
     session_id = session_id or f.stem.split("_", 1)[-1]
-    return Session(
+    tail: dict[str, str] = {}
+    session = Session(
         id=session_id,
         provider="pi",
         summary=summary,
@@ -1639,10 +1708,14 @@ def _pi_session(f: Path) -> Session:
         branch=None,
         repository=_cwd_project(cwd),
         created_at=created_at,
-        updated_at=(_last_activity_iso(f, "pi") or created_at or _file_mtime_iso(f)),
+        updated_at=(
+            _last_activity_iso(f, "pi", seen=tail) or created_at or _file_mtime_iso(f)
+        ),
         content_path=str(f),
         model=model,
     )
+    session.ending = tail.get("ending")
+    return session
 
 
 def _pi_message_text(msg: dict) -> str:
@@ -1759,8 +1832,13 @@ def _last_activity_iso(
     this walk passes on the way to it: a Claude "continued-in" record lands
     there as ``seen["continued_in"]``, and the newest Claude Code recap (a
     system record, subtype away_summary) as ``seen["recap"]``, so a recap is
-    found exactly when no turn of the conversation followed it. Records the
-    walk never reaches are not looked for, so this costs no read of its own.
+    found exactly when no turn of the conversation followed it. It also gets
+    ``seen["ending"]``, how the conversation ended (see ``ENDINGS``), when the
+    records this walk reads decide it: almost always the last turn itself,
+    sometimes a record or two past it -- a bare slash command, a task
+    notification -- which the walk then goes on to read in the window it
+    already holds. It never widens the window for the ending alone, so all
+    of this costs no read of its own.
     """
     try:
         size = path.stat().st_size
@@ -1768,6 +1846,7 @@ def _last_activity_iso(
         return ""
     if size == 0:
         return ""
+    make_ending = _ENDING_CLASSIFIERS.get(provider) if seen is not None else None
     while True:
         read = min(window, size)
         try:
@@ -1779,6 +1858,9 @@ def _last_activity_iso(
         lines = data.decode("utf-8", errors="replace").split("\n")
         if read < size:
             lines = lines[1:]  # drop the possibly-partial leading fragment
+        # Afresh for each window: a widened read starts again from the end.
+        ending = make_ending() if make_ending is not None else None
+        found = ""
         for line in reversed(lines):
             line = line.strip()
             if not line:
@@ -1789,9 +1871,19 @@ def _last_activity_iso(
                 continue
             if not isinstance(obj, dict):
                 continue
+            if ending is not None and ending.feed(obj):
+                seen["ending"] = ending.ending
+                ending = None
+            if found:
+                if ending is None:
+                    return found
+                continue
             ts = obj.get("timestamp")
             if ts and _is_turn(obj, provider):
-                return ts
+                found = ts
+                if ending is None:
+                    return found
+                continue
             if seen is not None:
                 otype = obj.get("type")
                 if otype == "continued-in":
@@ -1801,9 +1893,348 @@ def _last_activity_iso(
                 elif otype == "system" and obj.get("subtype") == "away_summary":
                     # Walking backwards, so the first one met is the newest.
                     seen.setdefault("recap", obj.get("content"))
-        if read >= size:
-            return ""  # whole file scanned, no timestamped turn found
+        if ending is not None and (found or read >= size) and ending.done():
+            # Nothing older in reach decided it, which leaves the
+            # classifier's own verdict on what it met, if it has one.
+            seen["ending"] = ending.ending
+        if found or read >= size:
+            return found  # "" when the whole file holds no timestamped turn
         window *= 4  # last turn is deeper than the tail — widen and retry
+
+
+class _Ending:
+    """Decides how a transcript ended, fed its records newest first.
+
+    ``feed`` returns True once the ending is decided, and the caller stops.
+    ``done`` says whether what was fed decides it even with nothing older to
+    come -- the start of the file is then the answer.
+    """
+
+    __slots__ = ("ending",)
+
+    def __init__(self) -> None:
+        self.ending: str | None = None
+
+    def feed(self, obj: dict) -> bool:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def done(self) -> bool:
+        return self.ending is not None
+
+
+# What Claude Code writes as a user message that nobody typed. Measured on the
+# 609 transcripts here (2026-11-24): every ending on a user record is one of
+# these, an interruption, a tool result, a slash command, or a real prompt.
+_CLAUDE_HARNESS_HEADS = (
+    "<task-notification>",
+    "<system-reminder>",
+    "<local-command-caveat>",
+    "Stop hook feedback:",
+    "This session is being continued",
+)
+_CLAUDE_REJECTED = "The user doesn't want to proceed with this tool use"
+
+
+class _ClaudeEnding(_Ending):
+    """Claude Code: the last assistant record that says something, or the
+    last user record somebody typed, whichever is newer.
+
+    An assistant reply arrives as one record per content block, so a record
+    holding only thinking is passed over. Harness traffic is passed over too
+    -- meta records, task notifications, a bare slash command and what it
+    printed -- since none of it asks or answers anything; a command with
+    arguments is a request typed through a command, as everywhere else.
+    """
+
+    __slots__ = ()
+
+    def feed(self, obj: dict) -> bool:
+        otype = obj.get("type")
+        if otype == "assistant":
+            msg = obj.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, str):
+                return self._decide(COMPLETED) if content else False
+            if not isinstance(content, list):
+                return False
+            said = False
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                kind = block.get("type")
+                if kind == "tool_use":
+                    return self._decide(MID_ACTION)
+                if kind == "text" and block.get("text"):
+                    said = True
+            return self._decide(COMPLETED) if said else False
+        if otype == "user":
+            if obj.get("isMeta"):
+                return False
+            msg = obj.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, str):
+                return self._user_text(content)
+            if not isinstance(content, list):
+                return False
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                kind = block.get("type")
+                if kind == "tool_result":
+                    rejected = block.get("is_error") and _tool_result_text(
+                        block.get("content")
+                    ).startswith(_CLAUDE_REJECTED)
+                    return self._decide(INTERRUPTED if rejected else MID_ACTION)
+                if kind == "text" and self._user_text(block.get("text") or ""):
+                    return True
+            return False
+        if otype == "attachment":
+            # A prompt typed while the agent was busy, queued for its next
+            # turn; the parser counts a human one as a user turn.
+            att = obj.get("attachment")
+            if isinstance(att, dict) and att.get("type") == "queued_command":
+                origin = att.get("origin")
+                if isinstance(origin, dict) and origin.get("kind") == "human":
+                    return self._decide(UNANSWERED)
+        return False
+
+    def _user_text(self, text: str) -> bool:
+        head = text.lstrip()
+        if not head:
+            return False
+        if head.startswith("[Request interrupted by user"):
+            return self._decide(INTERRUPTED)
+        if head.startswith(_CLAUDE_HARNESS_HEADS) or _claude_command_output(head):
+            return False
+        if head.startswith(_CLAUDE_COMMAND_HEADS) and _claude_summary(head)[1]:
+            return False  # a bare /clear, /model, /effort
+        return self._decide(UNANSWERED)
+
+    def _decide(self, ending: str) -> bool:
+        self.ending = ending
+        return True
+
+
+def _tool_result_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                return part["text"]
+    return ""
+
+
+class _PiEnding(_Ending):
+    """Pi: its last message record, which says how it stopped.
+
+    An assistant message carries a stopReason: "stop" is an answer, "toolUse"
+    a call left without its result, "aborted" a cancelled turn, and "error"
+    a turn that failed -- interrupted when the error is the abort Pi reports
+    as "This operation was aborted", otherwise unanswered, since the person's
+    message got no reply. Measured on the 620 Pi sessions here, 2026-11-24.
+    """
+
+    __slots__ = ()
+
+    def feed(self, obj: dict) -> bool:
+        if obj.get("type") != "message":
+            return False
+        msg = obj.get("message")
+        if not isinstance(msg, dict):
+            return False
+        role = msg.get("role")
+        if role == "user":
+            self.ending = UNANSWERED
+        elif role == "toolResult":
+            self.ending = MID_ACTION
+        elif role == "assistant":
+            stop = msg.get("stopReason")
+            if stop == "aborted":
+                self.ending = INTERRUPTED
+            elif stop == "error":
+                error = msg.get("errorMessage")
+                aborted = isinstance(error, str) and "aborted" in error.lower()
+                self.ending = INTERRUPTED if aborted else UNANSWERED
+            elif stop == "toolUse":
+                self.ending = MID_ACTION
+            else:
+                self.ending = self._by_content(msg.get("content"))
+        return self.ending is not None
+
+    @staticmethod
+    def _by_content(content) -> str | None:
+        if isinstance(content, str):
+            return COMPLETED if content else None
+        if not isinstance(content, list):
+            return None
+        kinds = {p.get("type") for p in content if isinstance(p, dict)}
+        if "toolCall" in kinds:
+            return MID_ACTION
+        return COMPLETED if "text" in kinds else None
+
+
+# Codex response items that are a tool call or its output, in every era seen.
+_CODEX_CALLS = frozenset(
+    {
+        "function_call",
+        "function_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output",
+        "local_shell_call",
+        "web_search_call",
+        "tool_search_call",
+        "tool_search_output",
+    }
+)
+
+
+class _CodexEnding(_Ending):
+    """Codex: how its last turn closed.
+
+    A turn that ends normally writes task_complete, and one the person
+    cancels turn_aborted, so those decide it -- after task_complete the walk
+    goes on to the turn's last message, because a turn can complete without a
+    reply (the person's message, then task_complete: unanswered). Without
+    either, the turn was cut off, and the newest call, reply or message says
+    where. Measured over 1,453 rollouts here, 2026-11-24: 2,784 task_complete
+    and 478 turn_aborted records, every one of the latter with reason
+    "interrupted". A user shell command run after a turn closes is passed
+    over, as are reasoning, token counts and the context Codex injects.
+    """
+
+    __slots__ = ("closed",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    def feed(self, obj: dict) -> bool:
+        otype = obj.get("type")
+        payload = obj.get("payload")
+        if otype not in ("event_msg", "response_item"):
+            payload = obj  # the oldest rollouts put the record at the top
+        if not isinstance(payload, dict):
+            return False
+        ptype = payload.get("type")
+        if otype == "event_msg":
+            if ptype == "turn_aborted":
+                return self._decide(INTERRUPTED)
+            if ptype == "task_complete":
+                self.closed = True
+                return False
+            if ptype == "agent_message":
+                return self._decide(COMPLETED)
+            if ptype == "user_message":
+                return self._decide(UNANSWERED)
+            if ptype == "item_completed":
+                item = payload.get("item")
+                kind = item.get("type") if isinstance(item, dict) else None
+                if kind == "AgentMessage":
+                    return self._decide(COMPLETED)
+                if kind == "UserMessage":
+                    return self._decide(UNANSWERED)
+            return False
+        if ptype == "message":
+            role = payload.get("role")
+            if role == "assistant":
+                return self._decide(COMPLETED)
+            if role == "user":
+                text = _codex_parts_text(payload.get("content"), "input_text")
+                if text and not _codex_injected(text):
+                    return self._decide(UNANSWERED)
+            return False
+        if ptype in _CODEX_CALLS:
+            return self._decide(COMPLETED if self.closed else MID_ACTION)
+        return False
+
+    def done(self) -> bool:
+        if self.ending is None and self.closed:
+            self.ending = COMPLETED
+        return self.ending is not None
+
+    def _decide(self, ending: str) -> bool:
+        self.ending = ending
+        return True
+
+
+_ENDING_CLASSIFIERS: dict[str, Callable[[], _Ending]] = {
+    "claude": _ClaudeEnding,
+    "codex": _CodexEnding,
+    "pi": _PiEnding,
+}
+
+
+# A compressed rollout is read from the start to reach its end, keeping this
+# many of its last lines: the record that decides the ending is the last or
+# one of the last few in every rollout here.
+_CODEX_ENDING_LINES = 400
+
+
+def fill_endings(sessions: Iterable[Session]) -> list[Session]:
+    """Set the ending of each session discovery could not, where it can be read.
+
+    Returns the sessions it gave an ending to.
+
+    Codex's index path reads no rollout at all, which is what makes it fast,
+    so a Codex session found through it has no ending until this asks its
+    rollout. Called for the sessions a command is about to show or filter
+    on, never for the whole history by default: 1,400 of the 1,453 rollouts
+    here are compressed, and reading every one to its end took 1.1 s
+    (2026-11-24). Each answer is remembered by the rollout's size and mtime
+    beside the scan memo, so a session is read once while it stays the
+    same; with the cache switched off, each is read when asked.
+    """
+    wanted = [
+        s
+        for s in sessions
+        if s.ending is None and s.provider == "codex" and s.content_path
+    ]
+    if not wanted:
+        return []
+    memo = scan_memo.open_memo("codex-endings", keep_unmet=True)
+    for s in wanted:
+        path = s.content_path
+        sig = scan_memo.signature(path) if memo is not None else None
+        if sig is not None:
+            known = memo.get(path, sig)
+            if known is not scan_memo.MISS:
+                s.ending = known
+                continue
+        try:
+            ending = _codex_rollout_ending(Path(path))
+        except Exception as exc:
+            # Same rule as discovery's: one unreadable rollout costs its own
+            # answer, never the others'.
+            log.debug("no ending for codex session %s: %s", s.id, exc)
+            continue
+        if sig is not None:
+            memo.put(path, sig, ending)
+        s.ending = ending
+    if memo is not None:
+        memo.save()
+    return [s for s in wanted if s.ending is not None]
+
+
+def _codex_rollout_ending(path: Path) -> str | None:
+    if path.name.endswith(compressed.SUFFIX):
+        # A copy a scan made can be read from its end, like a plain rollout.
+        path = compressed.existing_copy(path) or path
+    if not path.name.endswith(compressed.SUFFIX):
+        tail: dict[str, str] = {}
+        _last_activity_iso(path, "codex", seen=tail)
+        return tail.get("ending")
+    with compressed.open_binary(path) as fh:
+        last = deque(fh, maxlen=_CODEX_ENDING_LINES)
+    ending = _CodexEnding()
+    for raw in reversed(last):
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and ending.feed(obj):
+            return ending.ending
+    return ending.ending if ending.done() else None
 
 
 # ---------------------------------------------------------------------------

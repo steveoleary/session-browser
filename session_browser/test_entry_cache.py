@@ -447,6 +447,21 @@ def _corpus(tmp_path) -> list[Session]:
         )
         + "\n"
     )
+    recap = tmp_path / "recap.jsonl"
+    # Claude Code's own recap: a system record the parser keeps, its settings
+    # pointer stripped. Every other system subtype is still skipped.
+    write_claude_jsonl(
+        recap,
+        [
+            {"type": "user", "message": {"content": "go"}},
+            {"type": "system", "subtype": "turn_duration", "durationMs": 7},
+            {
+                "type": "system",
+                "subtype": "away_summary",
+                "content": "The quokka census is done. (disable recaps in /config)",
+            },
+        ],
+    )
     escaped = tmp_path / "escaped.jsonl"
     # Raw \\uXXXX escapes spelling "wombat", which only decoding reveals.
     escaped.write_text(
@@ -461,6 +476,7 @@ def _corpus(tmp_path) -> list[Session]:
         _claude(tmp_path, "miss", "nothing relevant", "still nothing"),
         _claude(tmp_path, "tool", "run it", '{"command": "ls -la"}'),
         Session(id="escaped", provider="claude", content_path=str(escaped)),
+        Session(id="recap", provider="claude", content_path=str(recap)),
         Session(id="pi", provider="pi", content_path=str(pi)),
         _codex(
             tmp_path,
@@ -499,6 +515,8 @@ QUERIES = [
     ["wombat", "nothing"],  # alternates
     ["3fbb4d0", "straße"],  # one scannable, one not
     "it",  # in nearly everything
+    "quokka census",  # only in a recap
+    "recaps in /config",  # in the raw file, stripped from the entry
 ]
 
 
