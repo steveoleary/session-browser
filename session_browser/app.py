@@ -101,6 +101,7 @@ _ENDING_MARKS = {
 PROVIDER_COLOURS = {
     "claude": "[bold magenta]●[/] claude",
     "codex": "[bold green]●[/] codex",
+    "grok": "[bold blue]●[/] grok",
     "opencode": "[bold cyan]●[/] opencode",
     "pi": "[bold yellow]●[/] pi",
 }

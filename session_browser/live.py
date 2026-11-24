@@ -1,9 +1,10 @@
 """Which sessions an agent process still has open, right now.
 
-Claude Code says so itself: each running process keeps
-``~/.claude/sessions/<pid>.json`` naming its session (discovery reads those,
-see ``_claude_live_session_ids``). The other agents keep no such record, so
-the answer comes from the running processes themselves:
+Claude Code and Grok say so themselves: each running Claude Code keeps
+``~/.claude/sessions/<pid>.json`` naming its session, and Grok lists the
+sessions it has open in ``~/.grok/active_sessions.json`` (discovery reads
+both). The other agents keep no such record, so the answer comes from the
+running processes themselves:
 
 - a session id in a process's arguments -- ``codex resume <id>``,
   ``pi --session <id>``, ``opencode -s <id>`` -- names the session it runs;
@@ -35,14 +36,16 @@ import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .discovery import Session, _claude_live_session_ids
+from .discovery import Session, _claude_live_session_ids, _grok_live_session_ids
 
 log = logging.getLogger(__name__)
 
 # The agents found by their processes, by the program name each runs as.
 # Pi is a node script (``node /opt/homebrew/bin/pi``); the rest are native
-# binaries. Claude Code is not here: its own registry answers for it.
-_AGENTS = frozenset({"codex", "pi", "opencode", "grok"})
+# binaries. Claude Code and Grok are not here: each keeps a registry of the
+# sessions open right now, which discovery reads and which answers for them.
+_AGENTS = frozenset({"codex", "pi", "opencode"})
+_REGISTRIES = {"claude": _claude_live_session_ids, "grok": _grok_live_session_ids}
 _INTERPRETERS = frozenset({"node", "bun"})
 # Agents whose process keeps its own transcript open while it runs.
 _HOLDS_TRANSCRIPT_OPEN = frozenset({"codex"})
@@ -189,19 +192,25 @@ def _open_transcripts(pids: Iterable[int]) -> set[str] | None:
     }
 
 
-def fill_live(sessions: Iterable[Session], *, refresh_claude: bool = False) -> None:
+def fill_live(sessions: Iterable[Session], *, refresh: bool = False) -> None:
     """Say, for each session, whether a running agent process holds it.
 
-    Claude sessions keep what discovery read from Claude Code's registry,
-    unless *refresh_claude* asks for it again -- what a guard about to act
+    Claude and Grok sessions keep what discovery read from their registries,
+    unless *refresh* asks for them again -- what a guard about to act
     on the answer wants. Everything else is asked of the process table, once.
     """
     sessions = list(sessions)
-    if refresh_claude:
-        claude = [s for s in sessions if s.provider == "claude" and not s.subagent_kind]
-        if claude:
-            ids = _claude_live_session_ids()
-            for s in claude:
+    if refresh:
+        for provider, read in _REGISTRIES.items():
+            held = [
+                s for s in sessions if s.provider == provider and not s.subagent_kind
+            ]
+            if not held:
+                continue
+            ids = read()
+            if ids is None:
+                continue  # a registry that cannot be read leaves the answer
+            for s in held:
                 s.live = s.id in ids
     others = [s for s in sessions if s.provider in _AGENTS]
     if not others:
@@ -239,7 +248,7 @@ def _realpath(path: str) -> str:
 def is_live(session: Session) -> bool:
     """Whether a running process holds *session*, asked afresh: for a delete
     or a resume about to act on the answer."""
-    fill_live([session], refresh_claude=True)
+    fill_live([session], refresh=True)
     return session.live is True
 
 

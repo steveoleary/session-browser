@@ -156,12 +156,13 @@ _SUBAGENT_CONTRACT = (
     "recorded.\n"
     '"live" is true when a running agent process holds the session, so its '
     "transcript may\nstill grow and counts and endings are as of this read: "
-    "Claude Code's own registry\nof running sessions, and for the others a "
-    "running process whose arguments name\nthe session or (Codex) that holds "
-    "its rollout open. false when no process of\nthat agent is running. null "
-    "when one is but nothing ties it to this session (a\nPi or OpenCode "
-    "started without naming one), for Claude subagents, and when the\nprocess "
-    "table cannot be read. list's text marks a live session 'live'.\n"
+    "Claude Code's and Grok's own\nregistries of open sessions, and for the "
+    "others a running process whose\narguments name the session or (Codex) "
+    "that holds its rollout open. false when\nno process of that agent is "
+    "running. null when one is but nothing ties it to\nthis session (a Pi or "
+    "OpenCode started without naming one), for Claude subagents,\nand when "
+    "the process table cannot be read. list's text marks a live session "
+    "'live'.\n"
     '"summary_is_recap" is true when "summary" is Claude Code\'s own recap of '
     "the session\n(the newest thing in it, nothing said since) rather than "
     "its opening prompt;\ntext output marks it with a leading 'recap: '. "
@@ -169,10 +170,12 @@ _SUBAGENT_CONTRACT = (
     '"ending" is how the last turn ended: "completed" (the agent answered), '
     '"unanswered"\n(the last message got no reply), "mid-action" (it stopped '
     'during a tool call)\nor "interrupted" (the person cancelled). Read off '
-    "the end of the transcript for\nClaude, Codex and Pi, and from OpenCode "
-    "2.x's own record; null when that cannot\nsay -- OpenCode 1.x, an "
-    "OpenCode session still busy, or a transcript with no\nconversation in it. "
-    'As of this read: a live session "mid-action" now may finish.'
+    "the end of the transcript for\nClaude, Codex, Grok and Pi, and from "
+    "OpenCode 2.x's own record; null when that\ncannot say -- OpenCode 1.x, an "
+    "OpenCode session still busy, or a transcript with\nno conversation in it. "
+    "Grok records a cancel only as a turn's stop_reason, so a\nGrok turn cut "
+    "off before it closed reads as where it stopped. As of this read:\na live "
+    'session "mid-action" now may finish.'
 )
 
 
@@ -895,9 +898,10 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         "--repo",
         action=_Once,
         help="case-insensitive substring of the inferred project name, not "
-        "a git remote URL. OpenCode records a project root. Codex uses the "
-        "final segment of its recorded git origin when present, then falls "
-        "back to the session directory name. Claude and Pi expose neither "
+        "a git remote URL. OpenCode records a project root. Codex and Grok "
+        "use the final segment of their recorded git origin when present, "
+        "then fall back to the session directory name. Claude and Pi expose "
+        "neither "
         "a project root nor origin, so theirs is the directory's name -- "
         "except under a worktrees directory in a known layout "
         "(.../worktrees/<project>/<checkout>, <repo>/.claude/worktrees/"
@@ -983,7 +987,8 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         metavar="SUBSTR",
         help="case-insensitive substring of the session's model, as that "
         "tool's own --model flag spells it (gpt-6.1-sol, "
-        "opencode-go/deepseek-v4.1-flash). Recorded for Codex and Pi; Claude "
+        "opencode-go/deepseek-v4.1-flash, grok-4.7). Recorded for Codex, Grok "
+        "and Pi; Claude "
         "and OpenCode sessions carry model null and never match",
     )
     p.add_argument(
@@ -1142,6 +1147,9 @@ _CURRENT_SESSION_ENV = {
     # OpenCode 2.3 exports the session_v2 id (ses_...) to the commands it
     # runs, which is the id discovery assigns. Checked 2026-11-14.
     "opencode": "OPENCODE_SESSION_ID",
+    # Grok names GROK_SESSION_ID among the variables it gives its hooks;
+    # unconfirmed for the commands its agent runs, and harmless if absent.
+    "grok": "GROK_SESSION_ID",
 }
 
 

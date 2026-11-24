@@ -447,6 +447,33 @@ def _corpus(tmp_path) -> list[Session]:
         )
         + "\n"
     )
+    grok = tmp_path / "grok-updates.jsonl"
+    # A Grok session's updates: the tool output is only in the second update
+    # for its call, and here it is a diff.
+    grok.write_text(
+        "".join(
+            json.dumps({"timestamp": 1794514892, "params": {"update": u}}) + "\n"
+            for u in (
+                {
+                    "sessionUpdate": "user_message_chunk",
+                    "content": {"type": "text", "text": "grok asks about a marsupial"},
+                },
+                {"sessionUpdate": "tool_call_update", "toolCallId": "c1"},
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "c1",
+                    "status": "completed",
+                    "content": [
+                        {
+                            "type": "diff",
+                            "path": "notes/marsupials.md",
+                            "newText": "a numbat in a diff",
+                        }
+                    ],
+                },
+            )
+        )
+    )
     recap = tmp_path / "recap.jsonl"
     # Claude Code's own recap: a system record the parser keeps, its settings
     # pointer stripped. Every other system subtype is still skipped.
@@ -477,6 +504,7 @@ def _corpus(tmp_path) -> list[Session]:
         _claude(tmp_path, "tool", "run it", '{"command": "ls -la"}'),
         Session(id="escaped", provider="claude", content_path=str(escaped)),
         Session(id="recap", provider="claude", content_path=str(recap)),
+        Session(id="grok", provider="grok", content_path=str(grok)),
         Session(id="pi", provider="pi", content_path=str(pi)),
         _codex(
             tmp_path,
@@ -516,6 +544,7 @@ QUERIES = [
     ["3fbb4d0", "straße"],  # one scannable, one not
     "it",  # in nearly everything
     "quokka census",  # only in a recap
+    "numbat in a diff",  # only in a Grok tool output
     "recaps in /config",  # in the raw file, stripped from the entry
 ]
 
@@ -622,6 +651,9 @@ class TestSearchAgreesWithTheStatelessPath:
         assert found("3fbb4d0") == {"marked"}
         assert found("a/b") == {"escaped"}
         assert found("3.14.10") == {"pi"}
+        assert found("quokka census") == {"recap"}
+        assert found("recaps in /config") == set()
+        assert found("numbat in a diff") == {"grok"}
 
     def test_the_words_wave_agrees_too(self, tmp_path, monkeypatch):
         sessions = _corpus(tmp_path)

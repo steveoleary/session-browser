@@ -194,7 +194,10 @@ class TestHelpOutputContracts:
         contract, help_text = _help_contract("list", capsys)
         assert "Default format: json." in help_text
         compact_help = " ".join(help_text.split())
-        assert "Codex uses the final segment of its recorded git origin" in compact_help
+        assert (
+            "Codex and Grok use the final segment of their recorded git origin"
+            in compact_help
+        )
         assert "Claude and Pi expose neither a project root nor origin" in compact_help
         assert contract["envelope"] == _key_union(payloads)
         assert contract["session"] == _key_union(

@@ -48,6 +48,8 @@ from session_browser.discovery import (
     claude_recap_text,
     codex_rollout_ids,
     codex_segment_key,
+    grok_text,
+    grok_update,
     opencode_execute,
 )
 
@@ -1342,7 +1344,7 @@ def _prefilter_file(session: Session) -> Path | None:
     first search that reaches it. A copy that cannot be made leaves no file
     to scan, so the session goes on to a canonical parse, which reports why.
     """
-    if session.provider in ("claude", "codex", "pi"):
+    if session.provider in ("claude", "codex", "grok", "pi"):
         content_path = session.content_path
         if not content_path:
             return None
@@ -3176,6 +3178,9 @@ def _parse_entries(session: Session, warnings: list[str]) -> Iterator[Transcript
     elif session.provider == "pi":
         path = _existing_file(session)
         yield from _parse_jsonl(path, warnings, _pi_entries)
+    elif session.provider == "grok":
+        path = _existing_file(session)
+        yield from _parse_jsonl(path, warnings, _grok_entries)
     elif session.provider == "opencode":
         db_path = _opencode_db_path()
         if not db_path.is_file():
@@ -3732,6 +3737,85 @@ def _claude_entries(obj: dict) -> Iterator[TranscriptEntry]:
 # One shared dict, as _CODEX_GUARDIAN_PROMPT is: nothing mutates entry
 # metadata after a parse, and a recap needs no per-entry fields.
 _CLAUDE_RECAP = {"kind": "recap"}
+
+# ---------------------------------------------------------------------------
+# Grok JSONL parser
+# ---------------------------------------------------------------------------
+#
+# updates.jsonl is every update a Grok session streamed, one record each:
+# {"timestamp": <epoch seconds>, "method": ..., "params": {"update": {...}}},
+# the update's kind in "sessionUpdate":
+#
+#   user_message_chunk    the prompt as the person sent it        user
+#   agent_message_chunk   a reply, whole (never two in a row)     assistant
+#   agent_thought_chunk   a reasoning summary                     skipped
+#   tool_call             the call: title (the tool), rawInput    tool call
+#   tool_call_update      status, then its output in content      tool output
+#   turn_completed, hook_execution, plan, ...  bookkeeping        skipped
+#
+# Each tool call gets two updates, the first with no status and the second
+# "completed" or "failed" carrying the output: only the second is kept.
+# Measured on grok 1.0.92, 16 sessions, 2026-11-24.
+
+
+def _grok_time(obj: dict) -> str:
+    ts = obj.get("timestamp")
+    if type(ts) is not int:
+        return ""
+    return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _grok_entries(obj: dict) -> Iterator[TranscriptEntry]:
+    """Parse a single Grok updates.jsonl record into zero or more entries."""
+    update = grok_update(obj)
+    kind = update.get("sessionUpdate")
+    if kind == "agent_message_chunk":
+        text = grok_text(update.get("content"))
+        if text:
+            yield TranscriptEntry("assistant", text, _grok_time(obj))
+    elif kind == "tool_call":
+        name = update.get("title") or "?"
+        meta: dict = {"kind": "call", "tool": name}
+        if update.get("toolCallId"):
+            meta["id"] = update["toolCallId"]
+        args = _json_compact(update.get("rawInput") or {})
+        yield TranscriptEntry("tool", f"{name}({args})", _grok_time(obj), meta)
+    elif kind == "tool_call_update":
+        status = update.get("status")
+        if status not in ("completed", "failed"):
+            return
+        text = "\n".join(
+            t
+            for t in (_grok_tool_output(part) for part in update.get("content") or ())
+            if t
+        )
+        if not text:
+            return
+        meta = {"kind": "output"}
+        if update.get("toolCallId"):
+            meta["call_id"] = update["toolCallId"]
+        if status == "failed":
+            meta["is_error"] = True
+        yield TranscriptEntry("tool", text, _grok_time(obj), meta)
+    elif kind == "user_message_chunk":
+        text = grok_text(update.get("content"))
+        if text:
+            yield TranscriptEntry("user", text, _grok_time(obj))
+
+
+def _grok_tool_output(part) -> str:
+    """One item of a tool_call_update's content as text: the text it wraps,
+    or for an edit the path and new text of its diff."""
+    if type(part) is not dict:
+        return ""
+    if part.get("type") == "content":
+        return grok_text(part.get("content"))
+    if part.get("type") == "diff":
+        new = part.get("newText")
+        path = part.get("path") or ""
+        return f"{path}\n{new}" if type(new) is str else path
+    return ""
+
 
 _CLAUDE_INJECTED_PREFIXES = (
     ("<task-notification>", "task_notification"),

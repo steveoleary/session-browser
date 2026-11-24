@@ -2,7 +2,7 @@
 
 **Turn your agent transcripts into working memory.**
 
-Claude Code, Codex, OpenCode and Pi all keep session histories. Session
+Claude Code, Codex, OpenCode, Pi and Grok all keep session histories. Session
 Browser brings them together so you — or your agent — can find what an earlier
 session decided, tried or got wrong, pick the work back up where it stopped,
 build a handoff, and spot the patterns and pain points that keep coming back.
@@ -19,7 +19,7 @@ agents.
 
 - **Find where it happened.** The session where a decision was made, a bug was
   first seen, or "we did this before" — and why. Search complete Claude Code,
-  Codex, OpenCode and Pi transcripts together from the TUI, or let your agent
+  Codex, OpenCode, Pi and Grok transcripts together from the TUI, or let your agent
   find the useful parts through the CLI.
 - **Pick up where you left off.** Read how the last session ended and carry on,
   or continue the original session directly in tmux or Herdr, or copy the
@@ -105,7 +105,7 @@ The editable install always runs the code in your checkout.
 
 ### Search across every session
 
-Press `/` and search once across all four providers. The session list narrows
+Press `/` and search once across all five providers. The session list narrows
 to the conversations that contain your phrase, while the transcript shows the
 match in context. When you find the right one, press `t` to continue it in tmux
 or Herdr, or `c` to copy its resume command — search, read, and resume without

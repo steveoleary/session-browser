@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 RESUME_PATTERNS: dict[str, str] = {
     "claude": "claude{flags} --resume {id}",
     "codex": "codex resume{flags} {id}",
+    # --resume takes an id or a title and looks in the working directory's
+    # own sessions, so, as for Pi, the cwd prefix matters.
+    "grok": "grok{flags} --resume {id}",
     "opencode": "opencode -s {id}",
     # --session takes a session file or a (partial) uuid and resolves it
     # within the project's own session directory, which is why the cwd
@@ -74,8 +77,11 @@ def resume_flags(provider: str, content_path: str) -> tuple[str, ...]:
     297 of 343 transcripts record one, the rest being sessions a ``/clear``
     opened, which record none until the mode changes). Codex records its
     approval and sandbox policies on every ``turn_context``, the first by
-    the tenth line of every rollout here. OpenCode's sessions carry no mode
-    (``permission`` is empty on every row), and Pi has no permission modes.
+    the tenth line of every rollout here. Grok records ``yolo_mode`` on each
+    ``turn_started`` in the session's events.jsonl (true on 13 of 15 turns
+    here), which ``--always-approve`` restores. OpenCode's sessions carry no
+    mode (``permission`` is empty on every row), and Pi has no permission
+    modes.
     """
     if not content_path:
         return ()
@@ -84,6 +90,8 @@ def resume_flags(provider: str, content_path: str) -> tuple[str, ...]:
             return _claude_mode_flags(Path(content_path))
         if provider == "codex":
             return _codex_mode_flags(Path(content_path))
+        if provider == "grok":
+            return _grok_mode_flags(Path(content_path))
     except (OSError, ValueError) as exc:
         log.debug("no resume mode from %s: %s", content_path, exc)
     return ()
@@ -116,6 +124,17 @@ def _codex_mode_flags(path: Path) -> tuple[str, ...]:
     if approval in _CODEX_APPROVALS:
         flags += ["--ask-for-approval", approval]
     return tuple(flags)
+
+
+def _grok_mode_flags(updates: Path) -> tuple[str, ...]:
+    # The transcript is updates.jsonl; the turn records sit beside it.
+    yolo = _first_record_field(
+        updates.with_name("events.jsonl"),
+        b'"turn_started"',
+        "yolo_mode",
+        "turn_started",
+    )
+    return ("--always-approve",) if yolo is True else ()
 
 
 def _first_record_field(path: Path, marker: bytes, key: str, record_type: str | None):

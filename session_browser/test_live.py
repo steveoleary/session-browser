@@ -52,7 +52,7 @@ class TestProgram:
             (["node", "/opt/homebrew/bin/pi", "--session", "x"], "pi"),
             (["/usr/local/bin/bun", "/x/pi"], "pi"),
             (["/Users/u/.local/bin/opencode", "-s", "ses_1"], "opencode"),
-            (["/opt/homebrew/bin/grok"], "grok"),
+            (["/opt/homebrew/bin/grok"], ""),  # so is Grok's
             (["node", "/x/chrome-devtools-mcp/main.js"], ""),
             (["vim", "pi"], ""),
             (["claude", "--resume", "x"], ""),  # Claude's registry answers

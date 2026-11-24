@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 from . import compressed, scan_memo
 
@@ -1733,6 +1734,283 @@ def _pi_message_text(msg: dict) -> str:
     return " ".join(t for t in parts if t)
 
 
+def scan_grok() -> list[Session]:
+    """Discover Grok sessions: one directory per session.
+
+    Layout is ``~/.grok/sessions/<url-encoded cwd>/<session id>/``, measured on
+    grok 1.0.92 (17 sessions here, 2026-11-24). Each holds ``summary.json`` --
+    the session's own metadata: id, cwd, created and last-active times, model,
+    branch, git remotes -- and ``updates.jsonl``, every update the session
+    streamed, timestamped, which is the transcript. Not ``chat_history.jsonl``
+    beside it: that is the context the model saw, and a compaction rewrites it
+    -- four sessions here kept 18 to 237 of 159 to 1,496 messages there, the
+    rest only as a Markdown digest -- where updates.jsonl keeps every turn.
+
+    A directory with no updates.jsonl is a session nothing was ever sent in
+    (1 of the 17 here, holding only the system prompt and injected context),
+    and is not listed, as Claude's empty resume stubs are not.
+
+    Discovery reads the summary whole, the transcript's head for the first
+    prompt and its tail for the ending, and the scan memo keeps all of it
+    while both files are unchanged.
+    """
+    sessions: list[Session] = []
+    root = Path.home() / ".grok" / "sessions"
+    if not root.is_dir():
+        return sessions
+    memo = scan_memo.open_memo("grok")
+    for project_dir in root.iterdir():
+        if not project_dir.is_dir():
+            continue  # session_search.sqlite, Grok's own index
+        for session_dir in project_dir.iterdir():
+            if not (session_dir / "summary.json").is_file():
+                continue
+            try:
+                session = _grok_session_remembered(memo, session_dir)
+            except Exception as exc:
+                log.warning("Skipping grok session %s: %s", session_dir.name, exc)
+                continue
+            if session is not None:
+                sessions.append(session)
+    if memo is not None:
+        memo.save()
+    live = _grok_live_session_ids()
+    if live is not None:
+        for s in sessions:
+            if not s.subagent_kind:
+                s.live = s.id in live
+    return sessions
+
+
+def _grok_session_remembered(
+    memo: scan_memo.Memo | None, session_dir: Path
+) -> Session | None:
+    """:func:`_grok_session`, from the scan memo while both files it reads are
+    unchanged."""
+    if memo is None:
+        return _grok_session(session_dir)
+    summary = str(session_dir / "summary.json")
+    sig = scan_memo.signature(summary, str(session_dir / "updates.jsonl"))
+    if sig is None:
+        return _grok_session(session_dir)
+    known = memo.get(summary, sig)
+    if known is not scan_memo.MISS:
+        return _session_from_scanned(known)
+    session = _grok_session(session_dir)
+    memo.put(summary, sig, _scanned_fields(session))
+    return session
+
+
+def _grok_session(session_dir: Path) -> Session | None:
+    """One Grok session directory as a Session, or None for one with no
+    summary or nothing ever sent in it."""
+    updates = session_dir / "updates.jsonl"
+    if not updates.is_file():
+        return None
+    with open(session_dir / "summary.json") as fh:
+        meta = json.load(fh)
+    if not isinstance(meta, dict):
+        return None
+    info = meta.get("info")
+    info = info if isinstance(info, dict) else {}
+    session_id = _str(info.get("id")) or session_dir.name
+    # The directory name is the cwd, percent-encoded, and lossless -- unlike
+    # Claude's and Pi's dash encoding -- so it stands in when info has none.
+    cwd = _str(info.get("cwd")) or unquote(session_dir.parent.name)
+    prompt = _grok_first_prompt(updates)
+    # The person's first words name a session everywhere else, and word
+    # search grades a summary as theirs. Grok's own title stands in for a
+    # session that never got a prompt.
+    title = _str(meta.get("generated_title")) or _str(meta.get("session_summary"))
+    remotes = meta.get("git_remotes")
+    origin = remotes[0] if isinstance(remotes, list) and remotes else ""
+    kind, parent = _grok_subagent(meta)
+    created = _str(meta.get("created_at"))
+    session = Session(
+        id=session_id,
+        provider="grok",
+        summary=_summary_text(prompt or title),
+        cwd=cwd,
+        branch=_str(meta.get("head_branch")),
+        repository=(
+            _codex_repo_name(cwd, origin)
+            if isinstance(origin, str) and origin
+            else _cwd_project(cwd)
+        ),
+        created_at=created,
+        updated_at=(
+            _str(meta.get("last_active_at"))
+            or _str(meta.get("updated_at"))
+            or created
+            or _file_mtime_iso(updates)
+        ),
+        content_path=str(updates),
+        parent_id=parent,
+        subagent_kind=kind,
+        model=_str(meta.get("current_model_id")) or None,
+    )
+    session.ending = _tail_ending(updates, "grok")
+    return session
+
+
+def _str(value) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _grok_subagent(meta: dict) -> tuple[str, str]:
+    """(subagent_kind, parent_id) from a Grok summary.json.
+
+    Grok's binary names the fields a child session carries -- session_kind in
+    a reserved "subagent" namespace, subagent_role, subagent_depth -- but no
+    Grok session on the machine this was written on is a subagent, so the
+    shape is unverified and read defensively. parent_session_id alone is NOT
+    a spawn: Grok sets it for a fork or a restore too, the same trap as a
+    Codex fork, so it is read only for a session that says it is a subagent.
+    """
+    kind = _str(meta.get("session_kind"))
+    role = _str(meta.get("subagent_role"))
+    depth = meta.get("subagent_depth")
+    spawned = (
+        kind.startswith("subagent")
+        or bool(role)
+        or (isinstance(depth, int) and depth > 0)
+    )
+    if not spawned:
+        return "", ""
+    return role or kind or "subagent", _str(meta.get("parent_session_id"))
+
+
+# How far into updates.jsonl the first prompt is looked for. It is the first
+# or second record in every session here, after a session_start hook's.
+_GROK_PROMPT_LOOKAHEAD = 40
+
+
+def _grok_first_prompt(path: Path) -> str:
+    """The first prompt a person sent in a Grok session, or ""."""
+    try:
+        with open(path) as fh:
+            for n, line in enumerate(fh):
+                if n >= _GROK_PROMPT_LOOKAHEAD:
+                    break
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                update = grok_update(obj)
+                if update.get("sessionUpdate") == "user_message_chunk":
+                    text = grok_text(update.get("content"))
+                    if text.strip():
+                        return text
+    except OSError as exc:
+        log.debug("No grok prompt from %s: %s", path, exc)
+    return ""
+
+
+def grok_update(obj) -> dict:
+    """The update a Grok updates.jsonl record carries, or {}:
+    ``{"timestamp", "method", "params": {"sessionId", "update": {...}}}``."""
+    params = obj.get("params") if isinstance(obj, dict) else None
+    update = params.get("update") if isinstance(params, dict) else None
+    return update if isinstance(update, dict) else {}
+
+
+def grok_text(content) -> str:
+    """The text of a Grok content item: ``{"type": "text", "text": ...}``, a
+    list of them, or a bare string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        return content.get("text", "") if content.get("type") == "text" else ""
+    if not isinstance(content, list):
+        return ""
+    return "".join(grok_text(part) for part in content)
+
+
+def _grok_live_session_ids() -> set[str] | None:
+    """Session ids a running Grok holds open, or None when it cannot say.
+
+    Grok keeps ``~/.grok/active_sessions.json``, a list of the sessions open
+    right now -- session_id, pid, pid_start, cwd, opened_at, as its binary
+    names the fields -- and says a session "counts as open until its tab is
+    closed or grok quits". Read like Claude Code's registry: a pid that has
+    gone is a leftover. No file means no Grok has run, so nothing is open.
+    """
+    path = Path.home() / ".grok" / "active_sessions.json"
+    try:
+        with open(path) as fh:
+            rows = json.load(fh)
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError):
+        return None
+    if isinstance(rows, dict):
+        rows = rows.get("sessions")
+    if not isinstance(rows, list):
+        return None
+    live: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sid, pid = row.get("session_id"), row.get("pid")
+        if isinstance(sid, str) and isinstance(pid, int) and _pid_running(pid):
+            live.add(sid)
+    return live
+
+
+def _pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # running, under another user
+    except OSError:
+        return False
+    return True
+
+
+def _tail_ending(path: Path, provider: str, *, window: int = 65536) -> str | None:
+    """How a transcript ended, read back from its end, for a provider whose
+    records carry no timestamps for ``_last_activity_iso`` to walk to.
+
+    Widens the read until the records decide it or the file is read; the
+    deciding record is the last one in nearly every transcript.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    make = _ENDING_CLASSIFIERS[provider]
+    while size:
+        read = min(window, size)
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(size - read)
+                data = fh.read(read)
+        except OSError:
+            return None
+        lines = data.decode("utf-8", errors="replace").split("\n")
+        if read < size:
+            lines = lines[1:]
+        ending = make()
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and ending.feed(obj):
+                return ending.ending
+        if read >= size:
+            return ending.ending if ending.done() else None
+        window *= 4
+    return None
+
+
 def _epoch_ms_to_iso(ts, *, zulu: bool = False) -> str:
     """Convert epoch-millisecond integer to UTC ISO string.
 
@@ -2158,9 +2436,42 @@ class _CodexEnding(_Ending):
         return True
 
 
+class _GrokEnding(_Ending):
+    """Grok: how the last turn of updates.jsonl closed.
+
+    A turn that ends writes turn_completed with a stop_reason -- "end_turn"
+    on all 13 here, so that is the only one taken for completed; a reason
+    naming a cancel is read as interrupted, and any other leaves the walk
+    looking further back. Without turn_completed the turn was cut off, and
+    the newest tool call, reply or prompt says where. Grok writes no other
+    record of a cancel that the sessions here show, so a turn cancelled
+    before turn_completed reads as whichever of those it was cut off at.
+    """
+
+    __slots__ = ()
+
+    def feed(self, obj: dict) -> bool:
+        update = grok_update(obj)
+        kind = update.get("sessionUpdate")
+        if kind == "turn_completed":
+            reason = update.get("stop_reason")
+            if reason == "end_turn":
+                self.ending = COMPLETED
+            elif isinstance(reason, str) and "cancel" in reason:
+                self.ending = INTERRUPTED
+        elif kind in ("tool_call", "tool_call_update"):
+            self.ending = MID_ACTION
+        elif kind == "agent_message_chunk":
+            self.ending = COMPLETED
+        elif kind == "user_message_chunk":
+            self.ending = UNANSWERED
+        return self.ending is not None
+
+
 _ENDING_CLASSIFIERS: dict[str, Callable[[], _Ending]] = {
     "claude": _ClaudeEnding,
     "codex": _CodexEnding,
+    "grok": _GrokEnding,
     "pi": _PiEnding,
 }
 
@@ -2244,6 +2555,7 @@ def _codex_rollout_ending(path: Path) -> str | None:
 ALL_SCANNERS = {
     "claude": scan_claude,
     "codex": scan_codex,
+    "grok": scan_grok,
     "opencode": scan_opencode,
     "pi": scan_pi,
 }
