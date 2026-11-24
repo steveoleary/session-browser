@@ -373,6 +373,19 @@ def space_for_cwd(
     return None
 
 
+def already_open(
+    provider: str, session_id: str, cwd: str, content_path: str = ""
+) -> bool:
+    """Whether a terminal ``prepare_session`` would reuse already runs this
+    conversation; asks hc and changes nothing."""
+    if shutil.which("hc") is None:
+        return False
+    found = find_terminal(
+        list_terminals(), provider, lineage_ids(provider, session_id, content_path)
+    )
+    return found is not None
+
+
 def prepare_session(
     provider: str, session_id: str, cwd: str, content_path: str = ""
 ) -> HerdrCorePlan:

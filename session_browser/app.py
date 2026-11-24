@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -40,6 +41,8 @@ from datetime import UTC
 from . import deletion, multiplexer
 from .config import ConfigError, load_ignore, load_tui_settings
 from .discovery import Session, discover_all, fill_endings, worktree_project
+from .live import describe as describe_live
+from .live import fill_live, is_live
 from .resume import (
     build_chat_export,
     copy_to_clipboard,
@@ -85,6 +88,8 @@ from .transcript import (
 # Before a row's summary when it is the agent's own recap of the session
 # (Claude Code's away_summary) rather than its opening prompt.
 _RECAP_MARK = "[dim]↺[/] "
+# Before a row's summary when a running agent process still holds it.
+_LIVE_MARK = "[green]▶[/] "
 # Before a row's summary when its last turn did not finish. A completed one
 # is unmarked: it is most rows, and the marks are there to find the others.
 _ENDING_MARKS = {
@@ -1407,6 +1412,7 @@ class ShortcutHelp(ModalScreen[None]):
 
 [bold]Marks[/]      [dim]↺[/] summary is the agent's own recap of the session
            last turn: [yellow]?[/] unanswered  [yellow]…[/] mid-action  [red]✗[/] interrupted
+           [green]▶[/] still open in a running agent process
 
 [bold]Use[/]        [cyan]c[/] copy resume command  [cyan]i[/] copy canonical id
            {terminal}[cyan]e / E[/] copy / export chat
@@ -1500,12 +1506,79 @@ class MultiplexerChoice(ModalScreen["multiplexer.Target | None"]):
         self.dismiss(None)
 
 
+def _hosted_by(
+    target: multiplexer.Target,
+    provider: str,
+    session_id: str,
+    cwd: str,
+    content_path: str,
+) -> bool:
+    """Whether *target* already runs the conversation, so a handoff would
+    only switch to it. A multiplexer that cannot say counts as no."""
+    try:
+        return target.module.already_open(provider, session_id, cwd, content_path)
+    except Exception as exc:
+        logging.getLogger(__name__).debug("%s could not say: %s", target.name, exc)
+        return False
+
+
+def _fill_endings_and_live(sessions: list[Session]) -> set[str]:
+    """Ids of the sessions that gained an ending or changed liveness."""
+    changed = {s.id for s in fill_endings(sessions)}
+    before = {s.id: s.live for s in sessions}
+    fill_live(sessions)
+    changed.update(s.id for s in sessions if s.live != before[s.id])
+    return changed
+
+
 def _tilde(path: str) -> str:
     """*path* with the home directory written as ``~``."""
     home = str(Path.home())
     if path == home or path.startswith(home + os.sep):
         return "~" + path[len(home) :]
     return path
+
+
+class ConfirmResumeLive(ModalScreen[bool]):
+    """Warn that the session is still running before resuming it elsewhere.
+
+    ``y`` goes ahead, anything else does not -- the same rule as the delete
+    confirmation, for the same reason: Enter is the key most likely to arrive
+    from the list underneath.
+    """
+
+    CSS = """
+    ConfirmResumeLive {
+        align: center middle;
+        background: $background;
+    }
+    #confirm-resume-live {
+        width: 60;
+        max-width: 94%;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: round $warning;
+    }
+    """
+
+    def __init__(self, why: str) -> None:
+        super().__init__()
+        self._why = why
+
+    def compose(self) -> ComposeResult:
+        yield Static(
+            "[bold]This session is still running[/]\n\n"
+            f"It is {_escape_markup(self._why)}. If it runs in the multiplexer "
+            "you are opening, its window is reused; otherwise a second agent "
+            "resumes the same conversation beside the first.\n\n"
+            "[cyan]y[/] open it anyway   [dim]any other key cancels[/]",
+            id="confirm-resume-live",
+        )
+
+    def on_key(self, event: events.Key) -> None:
+        event.stop()
+        self.dismiss(event.key == "y")
 
 
 class ConfirmDelete(ModalScreen["deletion.DeletePlan | None"]):
@@ -2055,11 +2128,12 @@ class SessionBrowser(App):
                 self._apply_filter("")
                 if error:
                     self._flash_status(error, ok=False)
-                # Codex's index says nothing of how a session ended, so its
-                # rollouts are read for that once the list is on screen.
+                # Codex's index says nothing of how a session ended, and only
+                # the running processes say which sessions are live, so both
+                # are asked once the list is on screen.
                 sessions = list(self._discovered)
                 self.run_worker(
-                    lambda: {s.id for s in fill_endings(sessions)},
+                    lambda: _fill_endings_and_live(sessions),
                     name="_fill_endings",
                     thread=True,
                     exclusive=True,
@@ -2503,7 +2577,6 @@ class SessionBrowser(App):
                     )
                     if s.summary_is_recap:
                         summary = _RECAP_MARK + summary
-                summary = _ENDING_MARKS.get(s.ending or "", "") + summary
                 if (words is not None or s.id in self._meta_words) and not s.matches(
                     self._filter_query
                 ):
@@ -2513,6 +2586,10 @@ class SessionBrowser(App):
                     # the row at all: in a later turn, or in a directory
                     # above the project name.
                     summary = "[dim]≈ [/]" + summary
+            # How the session stands goes first, whatever the cell then shows.
+            summary = _ENDING_MARKS.get(s.ending or "", "") + summary
+            if s.live:
+                summary = _LIVE_MARK + summary
             age = _relative_time(s.updated_at or s.created_at)
             values = {
                 "minimal": (provider_label, project),
@@ -2786,6 +2863,8 @@ class SessionBrowser(App):
         updated = _relative_time(s.updated_at or s.created_at)
         session_id = _escape_markup(_ellipsize(s.id, 18))
         ended = f"  ·  ended {s.ending}" if s.ending else ""
+        if s.live:
+            ended += "  ·  [green]live[/]"
         lines = [
             f"[bold cyan]{s.provider.upper()}[/]  [bold]{summary}[/]",
             f"[dim]{project}  ·  {branch}  ·  {updated}{ended}  ·  {session_id}[/]",
@@ -3404,11 +3483,36 @@ class SessionBrowser(App):
         cmd = resume_command(
             s.provider, session_id, s.cwd or None, content_path=content_path
         )
+        target = self._resume_session(s, session_id)
         if copy_to_clipboard(cmd):
             note = " (the session this subagent ran in)" if session_id != s.id else ""
+            if target is not None and is_live(target):
+                # Copied all the same: the user may mean to resume it once the
+                # other process has gone. A second agent on the same transcript
+                # while it still runs is what the warning is for.
+                self._flash_status(
+                    f"Copied: {cmd}{note} — but it is still running, "
+                    f"{describe_live(target)}",
+                    ok=False,
+                )
+                return
             self._status.update(f"Copied: {cmd}{note}")
         else:
             self._status.update(f"Clipboard failed. Command: {cmd}")
+
+    def _resume_session(self, s: Session, session_id: str) -> Session | None:
+        """The session a resume of *s* opens: *s* itself, or the root session a
+        subagent ran in, when discovery found it."""
+        if session_id == s.id:
+            return s
+        return next(
+            (
+                other
+                for other in self._discovered
+                if other.provider == s.provider and other.id == session_id
+            ),
+            None,
+        )
 
     def action_copy_session_id(self) -> None:
         """Copy the selected session's canonical id (provider:id) to the
@@ -3472,7 +3576,15 @@ class SessionBrowser(App):
             return
         self.push_screen(MultiplexerChoice(targets), self._open_in_multiplexer)
 
-    def _open_in_multiplexer(self, target: multiplexer.Target | None) -> None:
+    def _confirmed_live(self, target: multiplexer.Target, go: bool | None) -> None:
+        if go:
+            self._open_in_multiplexer(target, confirmed=True)
+        else:
+            self._status.update("Not opened: the session is still running")
+
+    def _open_in_multiplexer(
+        self, target: multiplexer.Target | None, *, confirmed: bool = False
+    ) -> None:
         """Hand the selected session over to one multiplexer.
 
         Mirrors worktrees.sh for tmux and the same shape for herdr: the folder
@@ -3487,6 +3599,21 @@ class SessionBrowser(App):
         s = self._selected
         # As for the resume command: a subagent opens the session it ran in.
         session_id, content_path = resume_target(s)
+        if not confirmed:
+            resumed = self._resume_session(s, session_id)
+            if (
+                resumed is not None
+                and is_live(resumed)
+                and not _hosted_by(target, s.provider, session_id, s.cwd, content_path)
+            ):
+                # Another process has this conversation open, and not in a
+                # window this handoff would switch to: resuming it here would
+                # put a second agent on the same transcript. Ask first.
+                self.push_screen(
+                    ConfirmResumeLive(describe_live(resumed)),
+                    lambda go: self._confirmed_live(target, go),
+                )
+                return
         try:
             plan = target.module.prepare_session(
                 s.provider, session_id, s.cwd, content_path=content_path

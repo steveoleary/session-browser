@@ -29,6 +29,7 @@ from .discovery import (
     discover_all,
     fill_endings,
 )
+from .live import fill_live
 from .resume import _filename_part
 from .transcript import (
     FILTER_ROLES,
@@ -122,8 +123,8 @@ def _json_key_contract(*groups: tuple[str, tuple[str, ...]]) -> str:
 # python reducer to project exactly the fields these columns already carry,
 # while --format text was requested 11 times. The data was not missing; the
 # contract was, because --help named only the {json,text} enum.
-# "ending" is last so that the columns before it kept their positions when
-# it was added.
+# "ending" and "live" are last so that the columns before them kept their
+# positions when they were added.
 _LIST_TEXT_COLUMNS = (
     "id",
     "updated",
@@ -132,6 +133,7 @@ _LIST_TEXT_COLUMNS = (
     "cwd",
     "summary",
     "ending",
+    "live",
 )
 _SEARCH_TEXT_COLUMNS = ("id", "match_count", "updated", "summary")
 
@@ -152,10 +154,14 @@ _SUBAGENT_CONTRACT = (
     "a new\nfile: the new session holds a copy of the old one's history, so "
     "read the newer\nand treat the pair as one. Raw ids, null when no link is "
     "recorded.\n"
-    '"live" is true when a running Claude Code process holds the session: its\n'
-    "transcript may still grow, so counts and endings are as of this read. "
-    "null\nwhere the provider records no running processes (Codex, OpenCode, "
-    "Pi) and\nfor Claude subagents.\n"
+    '"live" is true when a running agent process holds the session, so its '
+    "transcript may\nstill grow and counts and endings are as of this read: "
+    "Claude Code's own registry\nof running sessions, and for the others a "
+    "running process whose arguments name\nthe session or (Codex) that holds "
+    "its rollout open. false when no process of\nthat agent is running. null "
+    "when one is but nothing ties it to this session (a\nPi or OpenCode "
+    "started without naming one), for Claude subagents, and when the\nprocess "
+    "table cannot be read. list's text marks a live session 'live'.\n"
     '"summary_is_recap" is true when "summary" is Claude Code\'s own recap of '
     "the session\n(the newest thing in it, nothing said since) rather than "
     "its opening prompt;\ntext output marks it with a leading 'recap: '. "
@@ -1671,8 +1677,10 @@ def cmd_list(args) -> int:
         warnings.append(_truncation_warning(args, sessions[args.limit :]))
     if args.limit is not None:
         sessions = _limited(sessions, args.limit)
-    # Only the rows shown: an ending discovery could not read is read here.
+    # Only the rows shown: an ending discovery could not read is read here,
+    # and the running processes are asked which of them they hold.
     fill_endings(sessions)
+    fill_live(sessions)
     # Entry counts open every listed transcript — I/O-bound reads, so
     # overlap them (same rationale as search's per-session scan pool).
     counts: list[int | None] = []
@@ -1749,6 +1757,7 @@ def cmd_list(args) -> int:
                 s.cwd or "-",
                 _summary_cell(s),
                 s.ending or "-",
+                "live" if s.live else "-",
             ]
             print("\t".join(cols))
         if not sessions:
@@ -2223,6 +2232,7 @@ def cmd_get(args) -> int:
         if all(s is not prev for prev in sessions):
             sessions.append(s)
     fill_endings(sessions)
+    fill_live(sessions)
     views = []
     budgets = {}
     briefs: dict[str, dict] = {}
@@ -2545,6 +2555,7 @@ def cmd_search(args) -> int:
     if args.limit is not None:
         matched = _limited(matched, args.limit)
     fill_endings(r.session for r in matched)
+    fill_live(r.session for r in matched)
     for r in matched:
         # Summary-only matches were often prefilter-skipped, never parsed:
         # their total_entries would read 0 and look like a corrupt record.

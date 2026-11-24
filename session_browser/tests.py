@@ -2877,10 +2877,12 @@ class TestKeyBindings:
             _status=SimpleNamespace(update=updates.append),
             exit=lambda: exits.append(True),
             _run_handoff=SessionBrowser._run_handoff,
+            _discovered=[],
         )
         app._open_in_multiplexer = lambda target: SessionBrowser._open_in_multiplexer(
             app, target
         )
+        app._resume_session = lambda s, sid: SessionBrowser._resume_session(app, s, sid)
         plan = SimpleNamespace(
             reused=False,
             label="proj",

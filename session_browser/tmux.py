@@ -299,6 +299,19 @@ def prepare_session(
     return plan
 
 
+def already_open(
+    provider: str, session_id: str, cwd: str, content_path: str = ""
+) -> bool:
+    """Whether a window ``prepare_session`` would reuse already runs this
+    conversation; asks tmux and changes nothing."""
+    if not cwd or shutil.which("tmux") is None:
+        return False
+    session = session_name_for_path(cwd)
+    return _session_exists(session) and bool(
+        _find_window(session, lineage_ids(provider, session_id, content_path))
+    )
+
+
 def in_tmux() -> bool:
     """True when running inside a tmux client (so we can switch, not attach)."""
     return bool(os.environ.get("TMUX"))

@@ -38,9 +38,11 @@ was proven against the real tool:
   ``pi`` process is running in the session's directory.
 
 A subagent is never deleted on its own -- its parent's transcript still holds
-the spawning call -- and a Claude or Pi session that is still running is
-refused, since its process would go on appending to a transcript that no
-longer exists.
+the spawning call -- and a session that is still running is refused, since
+its process would go on appending to a transcript that no longer exists, or
+hold a thread its own tool was just asked to remove. Running is asked afresh
+of ``live`` at the moment of the delete, for every provider; Pi's check below
+goes further, since a Pi process rarely names the session it holds.
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-from . import compressed, entry_cache
+from . import compressed, entry_cache, live
 from .discovery import (
     OPENCODE_V2,
     Session,
@@ -110,6 +112,10 @@ def plan_delete(session: Session, sessions: Iterable[Session]) -> DeletePlan:
     if session.parent_id or claude_root_session(session):
         raise DeleteRefused(
             "This is a subagent; delete the session that spawned it instead"
+        )
+    if live.is_live(session):
+        raise DeleteRefused(
+            f"This session is still running, {live.describe(session)}; exit it first"
         )
     subagents = _count_descendants(session, sessions)
     if session.provider == "claude":

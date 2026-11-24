@@ -289,6 +289,22 @@ def workspace_for_cwd(panes: list[HerdrPane], cwd: str) -> str | None:
     return None
 
 
+def already_open(
+    provider: str, session_id: str, cwd: str, content_path: str = ""
+) -> bool:
+    """Whether a pane ``prepare_session`` would reuse already runs this
+    conversation; asks herdr and changes nothing."""
+    if shutil.which("herdr") is None:
+        return False
+    found = find_pane(
+        list_panes(),
+        provider,
+        lineage_ids(provider, session_id, content_path),
+        content_path,
+    )
+    return found is not None
+
+
 def prepare_session(
     provider: str, session_id: str, cwd: str, content_path: str = ""
 ) -> HerdrPlan:

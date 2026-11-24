@@ -288,6 +288,7 @@ def render_markdown(
         f"- Created: {s.created_at or '—'}",
         f"- Updated: {s.updated_at or '—'}",
         f"- Ended: {s.ending or '—'}",
+        *(["- Live: a running process still holds it"] if s.live else []),
         entries_line,
     ]
     if transcript.warnings:

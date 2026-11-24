@@ -590,11 +590,12 @@ def test_list_json_carries_the_ending(ended):
     }
 
 
-def test_list_text_puts_the_ending_last(ended):
+def test_list_text_carries_the_ending_after_the_summary(ended):
     run, _ = ended
     code, out, _ = run("list", "--format", "text")
     assert code == 0
-    last = {line.split("\t")[0]: line.split("\t")[-1] for line in out.splitlines()}
+    # Seventh of eight: live follows it.
+    last = {line.split("\t")[0]: line.split("\t")[6] for line in out.splitlines()}
     assert last == {
         "claude:done": "completed",
         "claude:asked": "unanswered",

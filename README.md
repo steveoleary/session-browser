@@ -297,6 +297,12 @@ Press `?` in the app for the complete key map.
 | `?` | Show all shortcuts |
 | `q` | Quit |
 
+A row can carry a mark before its summary: `▶` a running agent process still
+holds the session (resuming or deleting it then asks first, or refuses),
+`?` / `…` / `✗` its last turn was unanswered, stopped mid-tool-call, or
+cancelled, and `↺` the summary is Claude Code's own recap rather than the
+opening prompt.
+
 ## Development
 
 ```bash
