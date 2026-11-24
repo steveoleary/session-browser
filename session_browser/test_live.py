@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -105,6 +106,80 @@ class TestFillLive:
         )
         assert found == [True, True, None]
 
+    def test_an_unnamed_opencode_or_pi_is_placed_by_folder_and_start(self):
+        # Started at 10:00 in /w: what it runs is a session there written
+        # since, never one written before it began or one in another folder.
+        started = datetime(2026, 11, 20, 10, 0, tzinfo=UTC).timestamp()
+        sessions = [
+            Session(
+                id="ses_a",
+                provider="opencode",
+                cwd="/w",
+                updated_at="2026-11-20T10:05:00+00:00",
+            ),
+            Session(
+                id="ses_b",
+                provider="opencode",
+                cwd="/w",
+                updated_at="2026-11-20T09:00:00+00:00",
+            ),
+            Session(
+                id="ses_c",
+                provider="opencode",
+                cwd="/elsewhere",
+                updated_at="2026-11-20T10:05:00+00:00",
+            ),
+            Session(
+                id="0199-p",
+                provider="pi",
+                cwd="/w",
+                updated_at="2026-11-20T10:01:00.000Z",
+            ),
+        ]
+        a, b = _running(("opencode", ("opencode",)), ("pi", ("node", "/bin/pi")))
+        with (
+            a,
+            b,
+            patch.object(
+                live,
+                "_process_places",
+                return_value={
+                    100: (os.path.realpath("/w"), started),
+                    101: (os.path.realpath("/w"), started),
+                },
+            ),
+        ):
+            fill_live(sessions)
+        assert [s.live for s in sessions] == [True, None, None, True]
+
+    def test_a_process_that_names_its_session_is_not_placed_by_folder(self):
+        sessions = [
+            Session(
+                id="ses_a",
+                provider="opencode",
+                cwd="/w",
+                updated_at="2026-11-20T10:05:00+00:00",
+            ),
+            Session(
+                id="ses_b",
+                provider="opencode",
+                cwd="/w",
+                updated_at="2026-11-20T10:05:00+00:00",
+            ),
+        ]
+        a, b = _running(("opencode", ("opencode", "-s", "ses_a")))
+        with a, b, patch.object(live, "_process_places") as places:
+            fill_live(sessions)
+        places.assert_not_called()
+        assert [s.live for s in sessions] == [True, None]
+
+    @pytest.mark.parametrize(
+        ("etime", "seconds"),
+        [("05:07", 307), ("02:05:07", 7507), ("3-02:05:07", 266707), ("x", None)],
+    )
+    def test_ps_elapsed_time(self, etime, seconds):
+        assert live._elapsed_seconds(etime) == seconds
+
     def test_an_open_file_says_nothing_for_an_agent_that_does_not_hold_one(self):
         # OpenCode writes one shared database: holding it open names no
         # session in particular.
@@ -143,12 +218,25 @@ class TestFillLive:
         with patch.object(live, "_claude_live_session_ids", return_value=set()):
             assert live.is_live(s) is False
 
-    def test_lsof_is_run_only_for_processes_that_hold_transcripts(self):
+    def test_open_files_are_asked_only_of_processes_that_hold_transcripts(self):
         s = Session(id="p1", provider="pi", content_path="/p.jsonl")
         with (
             patch.object(
                 live, "agent_processes", return_value=_procs(("pi", ("node", "pi")))
             ),
+            patch.object(live, "_open_transcripts") as open_files,
+            patch.object(live, "_process_places", return_value={}),
+        ):
+            fill_live([s])
+        open_files.assert_not_called()
+
+    def test_nothing_is_run_when_no_agent_is_placed_by_folder(self):
+        s = Session(id="cx-1", provider="codex", content_path=ROLLOUT)
+        with (
+            patch.object(
+                live, "agent_processes", return_value=_procs(("codex", ("codex",)))
+            ),
+            patch.object(live, "_open_transcripts", return_value=set()),
             patch.object(live.subprocess, "run") as run,
         ):
             fill_live([s])

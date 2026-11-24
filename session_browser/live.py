@@ -9,15 +9,18 @@ running processes themselves:
 - a session id in a process's arguments -- ``codex resume <id>``,
   ``pi --session <id>``, ``opencode -s <id>`` -- names the session it runs;
 - a transcript a process holds open is the one it is writing. Codex keeps
-  its rollout open for as long as the session runs; Pi appends by path and
-  OpenCode writes one shared database, so for those two only the arguments
-  can tell.
+  its rollout open for as long as the session runs;
+- Pi appends by path and OpenCode writes one shared database, so a Pi or
+  OpenCode started without naming a session is placed by its folder: a
+  session in the folder it runs in, written to since it started, is one it
+  is running (OpenCode can switch sessions inside, so each counts). The rule
+  is inlet/herdr-sessions' (MIT) for OpenCode.
 
 Three answers, as everywhere on a Session: True when a running process is
 shown to hold the session, False when no process of that agent is running at
 all, and None when one is running but nothing ties it to this session -- a
-Pi started without ``--session`` might be any of the sessions in its
-directory, and saying False would be a guess.
+Pi in another folder, or one whose sessions there are older than it -- and
+saying False would be a guess.
 
 Cheap and quiet by construction. The process table is read through the
 kernel's own calls (``proc_listallpids`` and ``sysctl`` on macOS, ``/proc``
@@ -33,8 +36,10 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 
 from .discovery import Session, _claude_live_session_ids, _grok_live_session_ids
 
@@ -49,6 +54,14 @@ _REGISTRIES = {"claude": _claude_live_session_ids, "grok": _grok_live_session_id
 _INTERPRETERS = frozenset({"node", "bun"})
 # Agents whose process keeps its own transcript open while it runs.
 _HOLDS_TRANSCRIPT_OPEN = frozenset({"codex"})
+# Agents whose process, started without naming a session, is placed by its
+# folder: a session there written to since the process started is what it
+# is running. OpenCode can switch sessions inside, so each such one counts.
+# The rule inlet/herdr-sessions (MIT) reads OpenCode by; Pi has the same shape.
+_PLACED_BY_FOLDER = frozenset({"opencode", "pi"})
+# Slack for a session written a moment before its process's start time is
+# rounded down to the second.
+_START_SLACK = 2.0
 
 
 @dataclass(frozen=True)
@@ -223,22 +236,130 @@ def fill_live(sessions: Iterable[Session], *, refresh: bool = False) -> None:
         by_agent.setdefault(proc.agent, []).append(proc)
     holding = [p.pid for p in procs if p.agent in _HOLDS_TRANSCRIPT_OPEN]
     open_paths = _open_transcripts(holding) if holding else set()
+    unnamed = [
+        p for p in procs if p.agent in _PLACED_BY_FOLDER and not _names_one(p, others)
+    ]
+    places = _process_places([p.pid for p in unnamed]) if unnamed else {}
     for s in others:
         running = by_agent.get(s.provider)
         if not running:
             s.live = False
             continue
         # By id, or by the transcript's path, which Pi's --session also takes.
-        named = any(
-            s.id in proc.argv or (s.content_path and s.content_path in proc.argv)
-            for proc in running
-        )
+        named = any(_names(proc, s) for proc in running)
         held = (
             open_paths is not None
             and s.provider in _HOLDS_TRANSCRIPT_OPEN
             and _realpath(s.content_path) in open_paths
         )
-        s.live = True if named or held else None
+        placed = any(
+            _placed(s, places.get(proc.pid))
+            for proc in unnamed
+            if proc.agent == s.provider
+        )
+        s.live = True if named or held or placed else None
+
+
+def _names(proc: AgentProcess, s: Session) -> bool:
+    return s.id in proc.argv or bool(s.content_path and s.content_path in proc.argv)
+
+
+def _names_one(proc: AgentProcess, sessions: list[Session]) -> bool:
+    return any(_names(proc, s) for s in sessions if s.provider == proc.agent)
+
+
+def _placed(s: Session, place: tuple[str, float] | None) -> bool:
+    """Whether *s* is in the folder a process runs in, written since it began."""
+    if place is None or not s.cwd:
+        return False
+    folder, started = place
+    written = _epoch(s.updated_at)
+    return (
+        written is not None
+        and written >= started - _START_SLACK
+        and _realpath(s.cwd) == folder
+    )
+
+
+def _epoch(stamp: str) -> float | None:
+    try:
+        return datetime.fromisoformat(stamp).timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+def _process_places(pids: list[int]) -> dict[int, tuple[str, float]]:
+    """{pid: (real path of its working directory, start time)} for *pids*,
+    leaving out any that cannot be read. Two subprocesses, run only when an
+    agent placed by its folder is running at all."""
+    started: dict[int, float] = {}
+    try:
+        ps = subprocess.run(
+            ["ps", "-o", "pid=,etime=", "-p", ",".join(str(p) for p in pids)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("ps failed: %s", exc)
+        return {}
+    now = time.time()
+    for line in ps.stdout.splitlines():
+        pid, _, etime = line.strip().partition(" ")
+        elapsed = _elapsed_seconds(etime.strip())
+        if pid.isdigit() and elapsed is not None:
+            started[int(pid)] = now - elapsed
+    folders = _process_folders(list(started))
+    return {
+        pid: (folders[pid], begun) for pid, begun in started.items() if pid in folders
+    }
+
+
+def _elapsed_seconds(etime: str) -> int | None:
+    """ps's elapsed time, ``[[days-]hours:]minutes:seconds``, in seconds."""
+    days, _, clock = etime.rpartition("-")
+    parts = clock.split(":")
+    if not (1 < len(parts) <= 3) or not all(x.isdigit() for x in parts):
+        return None
+    if days and not days.isdigit():
+        return None
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return seconds + int(days or 0) * 86400
+
+
+def _process_folders(pids: list[int]) -> dict[int, str]:
+    """{pid: real path of its working directory}: /proc on Linux, lsof else."""
+    if not pids:
+        return {}
+    if sys.platform.startswith("linux"):
+        found = {}
+        for pid in pids:
+            try:
+                found[pid] = os.path.realpath(os.readlink(f"/proc/{pid}/cwd"))
+            except OSError:
+                continue
+        return found
+    try:
+        result = subprocess.run(
+            ["lsof", "-a", "-d", "cwd", "-Fpn", "-p", ",".join(str(p) for p in pids)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.debug("lsof failed: %s", exc)
+        return {}
+    found, pid = {}, None
+    for line in result.stdout.splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None:
+            found[pid] = os.path.realpath(line[1:])
+    return found
 
 
 def _realpath(path: str) -> str:

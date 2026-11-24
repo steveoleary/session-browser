@@ -157,12 +157,12 @@ _SUBAGENT_CONTRACT = (
     '"live" is true when a running agent process holds the session, so its '
     "transcript may\nstill grow and counts and endings are as of this read: "
     "Claude Code's and Grok's own\nregistries of open sessions, and for the "
-    "others a running process whose\narguments name the session or (Codex) "
-    "that holds its rollout open. false when\nno process of that agent is "
-    "running. null when one is but nothing ties it to\nthis session (a Pi or "
-    "OpenCode started without naming one), for Claude subagents,\nand when "
-    "the process table cannot be read. list's text marks a live session "
-    "'live'.\n"
+    "others a running process whose\narguments name the session, (Codex) "
+    "that holds its rollout open, or (Pi,\nOpenCode) that runs in its folder "
+    "and started before it was last written. false\nwhen no process of that "
+    "agent is running. null when one is but nothing ties it\nto this session, "
+    "for Claude subagents, and when the process table cannot be\nread. "
+    "list's text marks a live session 'live'.\n"
     '"summary_is_recap" is true when "summary" is Claude Code\'s own recap of '
     "the session\n(the newest thing in it, nothing said since) rather than "
     "its opening prompt;\ntext output marks it with a leading 'recap: '. "
