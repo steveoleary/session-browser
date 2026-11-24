@@ -261,6 +261,7 @@ def instrumented(
     real_rg_text = transcript._rg_entry_text_candidates
     real_claude_session = discovery._claude_session
     real_pi_session = discovery._pi_session
+    real_grok_session = discovery._grok_session
     real_memo_get = scan_memo.Memo.get
     real_file_may_match = transcript._file_may_match
     real_search_entries = transcript._search_entries
@@ -380,6 +381,10 @@ def instrumented(
         ledger.add("discovery_scans")
         return real_pi_session(f)
 
+    def counting_grok_session(session_dir):
+        ledger.add("discovery_scans")
+        return real_grok_session(session_dir)
+
     def counting_memo_get(self, path, sig):
         known = real_memo_get(self, path, sig)
         if known is not scan_memo.MISS:
@@ -450,6 +455,7 @@ def instrumented(
     transcript._store_in_processes = recording_store_in_processes
     discovery._claude_session = counting_claude_session
     discovery._pi_session = counting_pi_session
+    discovery._grok_session = counting_grok_session
     scan_memo.Memo.get = counting_memo_get
     transcript._file_may_match = counting_file_may_match
     transcript._search_entries = counting_search_entries
@@ -475,6 +481,7 @@ def instrumented(
         transcript._rg_entry_text_candidates = real_rg_text
         discovery._claude_session = real_claude_session
         discovery._pi_session = real_pi_session
+        discovery._grok_session = real_grok_session
         scan_memo.Memo.get = real_memo_get
         transcript._file_may_match = real_file_may_match
         transcript._search_entries = real_search_entries
@@ -494,6 +501,7 @@ CLAUDE_SESSIONS = 180  # above _PROC_MIN_CANDIDATES, so the process
 CODEX_SESSIONS = 40  # routing decision is reachable and pinnable
 OPENCODE_SESSIONS = 40
 PI_SESSIONS = 40
+GROK_SESSIONS = 12
 RARE_EVERY = 60  # one session in sixty carries the rare term
 
 # Claude subagents are separate transcripts under their root session's own
@@ -876,6 +884,8 @@ def build_corpus(root: Path) -> Path:
             "\n".join(lines) + "\n"
         )
 
+    _grok_corpus(home)
+
     db_path = home / ".local" / "share" / "opencode" / "opencode.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
@@ -965,6 +975,106 @@ def build_corpus(root: Path) -> Path:
     conn.close()
     _opencode_v2_twin(db_path)
     return home
+
+
+def _grok_update(sid: str, stamp: int, kind: str, **fields) -> str:
+    """One line of a Grok updates.jsonl."""
+    return json.dumps(
+        {
+            "timestamp": stamp,
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": {"sessionUpdate": kind, **fields}},
+        }
+    )
+
+
+def _grok_corpus(home: Path) -> None:
+    """Grok sessions as grok 1.0.92 lays them out: a directory per session
+    under its percent-encoded folder, holding summary.json, the streamed
+    updates.jsonl that is the transcript, and events.jsonl with its turns."""
+    root = home / ".grok" / "sessions"
+    for i in range(GROK_SESSIONS):
+        cwd = f"/Users/perf/project{i % 3}"
+        sid = f"01a1d169-6a61-7cc1-b039-{i:012d}"
+        folder = root / cwd.replace("/", "%2F") / sid
+        folder.mkdir(parents=True, exist_ok=True)
+        day = f"2026-01-{(i % 28) + 1:02d}"
+        (folder / "summary.json").write_text(
+            json.dumps(
+                {
+                    "info": {"id": sid, "cwd": cwd},
+                    "created_at": f"{day}T09:00:00.000000Z",
+                    "last_active_at": f"{day}T09:30:00.000000Z",
+                    "current_model_id": "grok-4.7",
+                    "head_branch": "main",
+                    "generated_title": f"session {i}",
+                }
+            )
+        )
+        stamp = 1767603600 + i * 60
+
+        lines = [
+            _grok_update(
+                sid,
+                stamp,
+                "user_message_chunk",
+                content={"type": "text", "text": f"start session {i} {_filler(i, 0)}"},
+            )
+        ]
+        for line in range(1, 20):
+            text = _filler(i, line)
+            if _has_rare(i) and line == 7:
+                text = f"{text} {QUERY_RARE} sighted"
+            call = f"call-{i}-{line}"
+            lines += [
+                _grok_update(
+                    sid,
+                    stamp,
+                    "tool_call",
+                    toolCallId=call,
+                    title="read_file",
+                    rawInput={"n": line},
+                ),
+                _grok_update(
+                    sid,
+                    stamp,
+                    "tool_call_update",
+                    toolCallId=call,
+                    status="completed",
+                    content=[
+                        {"type": "content", "content": {"type": "text", "text": text}}
+                    ],
+                ),
+            ]
+        lines += [
+            _grok_update(
+                sid,
+                stamp,
+                "agent_message_chunk",
+                content={"type": "text", "text": "done"},
+            ),
+            _grok_update(sid, stamp, "turn_completed", stop_reason="end_turn"),
+        ]
+        (folder / "updates.jsonl").write_text("\n".join(lines) + "\n")
+        (folder / "events.jsonl").write_text(
+            "\n".join(
+                json.dumps(e)
+                for e in (
+                    {
+                        "ts": f"{day}T09:00:00.000Z",
+                        "type": "turn_started",
+                        "yolo_mode": True,
+                        "session_relationship": "primary",
+                    },
+                    {
+                        "ts": f"{day}T09:30:00.000Z",
+                        "type": "turn_ended",
+                        "outcome": "completed",
+                    },
+                )
+            )
+            + "\n"
+        )
 
 
 # Beside the corpus's v1 database, the same sessions under OpenCode 2.x's
@@ -1389,6 +1499,9 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
     def search_pi() -> None:
         _cli("search", QUERY_RARE, "--provider", "pi")
 
+    def search_grok() -> None:
+        _cli("search", QUERY_RARE, "--provider", "grok")
+
     def search_zst_twice() -> None:
         _with_compressed_codex_rollouts(
             lambda: (
@@ -1593,6 +1706,25 @@ def workloads(ledger: WorkLedger) -> list[Workload]:
             "candidate scan the claude files go through. A parse per session "
             "here means Pi fell out of the prefilter path.",
             off(search_pi),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.grok",
+            "Grok sessions are discovered from three small files each "
+            "(summary.json, the head and tail of updates.jsonl, events.jsonl), "
+            "kept in the scan memo: warm, discovery_scans is zero. The "
+            "transcript is ordinary JSONL, cached and scanned like the claude "
+            "files; a parse here means Grok fell out of the entry cache.",
+            warm(search_grok),
+            needs_rg=True,
+        ),
+        Workload(
+            "cli.search.grok.stateless",
+            _STATELESS + "Every Grok session is scanned once by discovery "
+            "(discovery_scans is the session count) and its transcript ruled "
+            "out by the same candidate scan the claude files go through; a "
+            "parse per session means Grok fell out of the prefilter path.",
+            off(search_grok),
             needs_rg=True,
         ),
         Workload(

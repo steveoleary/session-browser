@@ -311,6 +311,7 @@ def _file_sessions() -> int:
         + perf_budget.CLAUDE_SUBAGENTS
         + perf_budget.CODEX_SESSIONS
         + perf_budget.PI_SESSIONS
+        + perf_budget.GROK_SESSIONS
     )
 
 
@@ -325,11 +326,12 @@ _CACHE_COUNTERS = (
 
 
 def _scanned_files() -> int:
-    """Transcripts discovery has to open: the providers with no index."""
+    """Sessions discovery has to open: the providers with no index."""
     return (
         perf_budget.CLAUDE_SESSIONS
         + perf_budget.CLAUDE_SUBAGENTS
         + perf_budget.PI_SESSIONS
+        + perf_budget.GROK_SESSIONS
     )
 
 
