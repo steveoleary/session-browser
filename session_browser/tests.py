@@ -401,6 +401,113 @@ class TestClaudeContinuationAndLiveness:
         }
 
 
+def _away_summary(text: str, ts: str = "2026-11-22T20:03:48.618Z") -> dict:
+    """A recap as Claude Code 2.1.330 writes one."""
+    return {
+        "parentUuid": "p-1",
+        "isSidechain": False,
+        "type": "system",
+        "subtype": "away_summary",
+        "content": text,
+        "timestamp": ts,
+        "uuid": "r-1",
+        "isMeta": False,
+        "userType": "external",
+        "entrypoint": "cli",
+        "cwd": "/Users/test/blockside",
+        "sessionId": "s1",
+    }
+
+
+class TestClaudeRecap:
+    """A session whose newest record is Claude Code's own recap is named by
+    the recap; anything said after the recap puts the first prompt back."""
+
+    RECAP = (
+        "You wanted the blockside plan written up, so it is drafted and "
+        "committed. Next, read it and say which option to build."
+    )
+
+    @staticmethod
+    def _scan(tmp_path, *tail, subagent=False):
+        project = tmp_path / ".claude" / "projects" / "-Users-test-blockside"
+        project.mkdir(parents=True, exist_ok=True)
+        path = project / "s1.jsonl"
+        if subagent:
+            (project / "s1.jsonl").write_text("")
+            path = project / "s1" / "subagents" / "agent-a1.jsonl"
+            path.parent.mkdir(parents=True)
+            path.with_name("agent-a1.meta.json").write_text(
+                json.dumps({"agentType": "Explore", "description": "Find it"})
+            )
+        TestClaudeContinuationAndLiveness._transcript(path, "s1", tail=tail)
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            return {s.id: s for s in scan_claude()}
+
+    def test_a_recap_nothing_followed_is_the_summary(self, tmp_path):
+        found = self._scan(
+            tmp_path,
+            _away_summary(self.RECAP + " (disable recaps in /config)"),
+            {"type": "ai-title", "aiTitle": "Blockside plan", "sessionId": "s1"},
+        )
+        session = found["s1"]
+        assert session.summary_is_recap
+        # The settings pointer is chrome, not part of the recap.
+        assert session.summary == self.RECAP[:120]
+        # A recap is not a turn: the session's activity is still its last one.
+        assert session.updated_at == "2026-10-15T19:00:00Z"
+
+    def test_the_newest_recap_wins(self, tmp_path):
+        found = self._scan(
+            tmp_path,
+            _away_summary("An older recap. (turn off recaps in /config)"),
+            _away_summary(self.RECAP),
+        )
+        assert found["s1"].summary == self.RECAP[:120]
+
+    def test_a_prompt_after_the_recap_keeps_the_first_prompt(self, tmp_path):
+        prompt = {
+            "type": "user",
+            "message": {"role": "user", "content": "ok, now build option two"},
+            "timestamp": "2026-10-16T09:00:00Z",
+        }
+        session = self._scan(tmp_path, _away_summary(self.RECAP), prompt)["s1"]
+        assert not session.summary_is_recap
+        assert session.summary == "plan the blockside work"
+
+    def test_work_after_the_recap_keeps_the_first_prompt(self, tmp_path):
+        # The agent went on (a background task, a goal loop) after the recap,
+        # so it no longer says where things stand.
+        reply = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "task done"}]},
+            "timestamp": "2026-10-16T09:00:00Z",
+        }
+        session = self._scan(tmp_path, _away_summary(self.RECAP), reply)["s1"]
+        assert not session.summary_is_recap
+        assert session.summary == "plan the blockside work"
+
+    def test_a_subagent_keeps_its_spawners_label(self, tmp_path):
+        found = self._scan(tmp_path, _away_summary(self.RECAP), subagent=True)
+        child = found["agent-a1"]
+        assert not child.summary_is_recap
+        assert child.summary == "Find it"
+
+    def test_the_recap_survives_the_scan_memo(self, tmp_path):
+        first = self._scan(tmp_path, _away_summary(self.RECAP))["s1"]
+        with patch("session_browser.discovery.Path.home", return_value=tmp_path):
+            again = {s.id: s for s in scan_claude()}["s1"]
+        assert first.summary_is_recap and again.summary_is_recap
+        assert again.summary == first.summary
+
+    def test_a_malformed_recap_is_ignored(self, tmp_path):
+        record = _away_summary(self.RECAP)
+        record["content"] = ["not", "text"]
+        session = self._scan(tmp_path, record)["s1"]
+        assert not session.summary_is_recap
+        assert session.summary == "plan the blockside work"
+
+
 class TestScanClaude:
     def test_scan_claude_sessions(self, tmp_path):
         projects = tmp_path / ".claude" / "projects" / "-Users-test"

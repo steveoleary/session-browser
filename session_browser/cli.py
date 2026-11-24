@@ -53,6 +53,7 @@ _SESSION_KEYS = (
     "model",
     "session_id",
     "summary",
+    "summary_is_recap",
     "cwd",
     "branch",
     "repository",
@@ -135,7 +136,11 @@ _SUBAGENT_CONTRACT = (
     '"live" is true when a running Claude Code process holds the session: its\n'
     "transcript may still grow, so counts and endings are as of this read. "
     "null\nwhere the provider records no running processes (Codex, OpenCode, "
-    "Pi) and\nfor Claude subagents."
+    "Pi) and\nfor Claude subagents.\n"
+    '"summary_is_recap" is true when "summary" is Claude Code\'s own recap of '
+    "the session\n(the newest thing in it, nothing said since) rather than "
+    "its opening prompt;\ntext output marks it with a leading 'recap: '. "
+    "Written by the agent, never generated\nhere."
 )
 
 
@@ -1670,7 +1675,7 @@ def cmd_list(args) -> int:
                 str(n) if n is not None else "-",
                 duration,
                 s.cwd or "-",
-                s.summary or "-",
+                _summary_cell(s),
             ]
             print("\t".join(cols))
         if not sessions:
@@ -2278,6 +2283,13 @@ def cmd_get(args) -> int:
                 file=sys.stderr,
             )
     return 0
+
+
+def _summary_cell(session: Session) -> str:
+    """A session's summary as a text column: marked when it is the recap."""
+    if not session.summary:
+        return "-"
+    return f"recap: {session.summary}" if session.summary_is_recap else session.summary
 
 
 def _summary_matches(session: Session, queries: list[str]) -> list[str]:
@@ -2991,7 +3003,7 @@ def _print_search_text(args, matched, *, anchor_ts=None, summary_map=None) -> No
             line += f"\t{_signed_offset(ts, anchor_ts) if ts else '-'}"
         summary_hits = (summary_map or {}).get(canonical_id(r.session))
         tag = "\t[summary match]" if summary_hits else ""
-        print(f"{line}\t{r.session.summary or '-'}{tag}")
+        print(f"{line}\t{_summary_cell(r.session)}{tag}")
         if args.mode == "snippets":
             shown = _shown_snippets(args, r)
             for m, snip in shown:

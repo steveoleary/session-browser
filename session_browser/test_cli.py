@@ -4420,3 +4420,36 @@ def test_get_json_leaves_out_the_ids_calls_pairs_by(calls_cli):
     metas = [e["metadata"] for e in json.loads(out)["entries"] if e["metadata"]]
     assert metas
     assert not any("id" in m or "call_id" in m for m in metas)
+
+
+class TestRecapSummary:
+    """A summary that is Claude Code's recap is labelled in JSON and text."""
+
+    def _recap(self, sessions):
+        sessions[0].summary = "The wombat survey is done. Next, read it."
+        sessions[0].summary_is_recap = True
+        return sessions
+
+    def test_json_flags_the_recap_and_only_the_recap(self, cli, sessions):
+        self._recap(sessions)
+        code, out, _ = cli("list", "--format", "json")
+        assert code == 0
+        flags = {
+            r["session_id"]: r["summary_is_recap"] for r in json.loads(out)["sessions"]
+        }
+        assert flags == {"aaa": True, "bbb": False, "ccc": False}
+
+    def test_text_marks_the_recap(self, cli, sessions):
+        self._recap(sessions)
+        code, out, _ = cli("list", "--format", "text")
+        assert code == 0
+        rows = {line.split("\t")[0]: line.split("\t")[-1] for line in out.splitlines()}
+        assert rows["claude:aaa"] == "recap: The wombat survey is done. Next, read it."
+        assert rows["claude:ccc"] == "gamma"
+
+    def test_search_text_marks_the_recap(self, cli, sessions):
+        self._recap(sessions)
+        code, out, _ = cli("search", "wombat", "--format", "text")
+        assert code == 0
+        line = next(row for row in out.splitlines() if row.startswith("claude:aaa"))
+        assert "\trecap: The wombat survey is done." in line

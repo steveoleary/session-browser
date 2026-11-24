@@ -45,6 +45,7 @@ from session_browser.discovery import (
     _claude_summary,
     _codex_injected,
     _opencode_db_path,
+    claude_recap_text,
     codex_rollout_ids,
     codex_segment_key,
     opencode_execute,
@@ -280,7 +281,7 @@ def render_markdown(
         f"# Session {canonical_id(s)}",
         "",
         f"- Provider: {s.provider}",
-        f"- Summary: {s.summary or '—'}",
+        f"- {'Recap' if s.summary_is_recap else 'Summary'}: {s.summary or '—'}",
         f"- CWD: {s.cwd or '—'}",
         f"- Branch: {s.branch or '—'}",
         f"- Repository: {s.repository or '—'}",
@@ -332,6 +333,7 @@ def session_to_dict(s: Session) -> dict:
         "model": s.model,
         "session_id": s.id,
         "summary": s.summary,
+        "summary_is_recap": s.summary_is_recap,
         "cwd": s.cwd,
         "branch": s.branch,
         "repository": s.repository,
@@ -2685,7 +2687,7 @@ def _metadata_grades(session: Session, terms: list[str], home: str) -> list[int]
 
     The location is the working directory and the repository. A summary is
     the opening prompt, so it is a person's words -- except in a subagent,
-    whose prompt its parent wrote. Provider and branch admit a session
+    whose prompt its parent wrote, and when it is the agent's own recap. Provider and branch admit a session
     without counting as typed: "codex" and "main" would otherwise put every
     Codex session, or every session on main, in the strongest grade.
 
@@ -2707,7 +2709,10 @@ def _metadata_grades(session: Session, terms: list[str], home: str) -> list[int]
     place = normalize_match_text(f"{cwd} {session.repository or ''}")
     summary = normalize_match_text(session.summary or "")
     other = normalize_match_text(f"{session.provider} {session.branch or ''} {shelf}")
-    person = not (session.parent_id or session.subagent_kind)
+    # A recap is the agent's words about the session, not the person's.
+    person = not (
+        session.parent_id or session.subagent_kind or session.summary_is_recap
+    )
     grades = []
     for term in terms:
         if term in place or (person and term in summary):
@@ -3702,10 +3707,28 @@ def _claude_entries(obj: dict) -> Iterator[TranscriptEntry]:
         if text:
             yield TranscriptEntry("user", text, obj.get("timestamp", ""))
 
+    elif etype == "system":
+        # Claude Code's own recap of the session, written for a person coming
+        # back to it. Kept, so search finds a session by what it says; every
+        # other system subtype (turn_duration, local_command, ...) is
+        # bookkeeping and still yields nothing. Last in the chain: the
+        # unhandled types below pay one more comparison, the two common
+        # ones none.
+        if obj.get("subtype") == "away_summary":
+            text = claude_recap_text(obj.get("content"))
+            if text:
+                yield TranscriptEntry(
+                    "system", text, obj.get("timestamp", ""), _CLAUDE_RECAP
+                )
+
     # No else: "summary" and the bookkeeping types fall out here with nothing
     # yielded, which is what the explicit ``etype == "summary"`` early-out used
     # to do — it never guarded anything, since no branch below claimed it.
 
+
+# One shared dict, as _CODEX_GUARDIAN_PROMPT is: nothing mutates entry
+# metadata after a parse, and a recap needs no per-entry fields.
+_CLAUDE_RECAP = {"kind": "recap"}
 
 _CLAUDE_INJECTED_PREFIXES = (
     ("<task-notification>", "task_notification"),

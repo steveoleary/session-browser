@@ -82,6 +82,10 @@ from .transcript import (
 # Provider colour tags for the list
 # ---------------------------------------------------------------------------
 
+# Before a row's summary when it is the agent's own recap of the session
+# (Claude Code's away_summary) rather than its opening prompt.
+_RECAP_MARK = "[dim]↺[/] "
+
 PROVIDER_COLOURS = {
     "claude": "[bold magenta]●[/] claude",
     "codex": "[bold green]●[/] codex",
@@ -1394,6 +1398,8 @@ class ShortcutHelp(ModalScreen[None]):
 
 [bold]Layout[/]     [cyan]z[/] focus current pane    [cyan]Esc[/] step back
 
+[bold]Marks[/]      [dim]↺[/] summary is the agent's own recap of the session
+
 [bold]Use[/]        [cyan]c[/] copy resume command  [cyan]i[/] copy canonical id
            {terminal}[cyan]e / E[/] copy / export chat
            [cyan]r[/] refresh              [cyan]q[/] quit
@@ -2469,6 +2475,8 @@ class SessionBrowser(App):
                         if s.summary
                         else "(no summary)"
                     )
+                    if s.summary_is_recap:
+                        summary = _RECAP_MARK + summary
                 if (words is not None or s.id in self._meta_words) and not s.matches(
                     self._filter_query
                 ):
@@ -2744,6 +2752,8 @@ class SessionBrowser(App):
         summary = _escape_markup(
             _ellipsize(s.summary or "Untitled session", max(24, width - 16))
         )
+        if s.summary_is_recap:
+            summary = f"[dim]Recap:[/] {summary}"
         project = _escape_markup(_session_project(s, 28))
         branch = _escape_markup(s.branch or "no branch")
         updated = _relative_time(s.updated_at or s.created_at)

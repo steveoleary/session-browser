@@ -789,6 +789,65 @@ class TestClaudeParser:
         assert [e.text for e in t.entries] == ["survivor"]
 
 
+_RECAP_RECORD = {
+    "type": "system",
+    "subtype": "away_summary",
+    "content": "The quokka migration is done and pushed. Next, review it. "
+    "(disable recaps in /config)",
+    "timestamp": "2026-11-22T20:03:48.618Z",
+    "isMeta": False,
+}
+
+
+class TestClaudeRecapEntries:
+    """Claude Code's recap is kept as a system entry, so search finds it."""
+
+    def _write(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        write_claude_jsonl(
+            f,
+            [
+                {"type": "user", "message": {"content": "migrate the data"}},
+                {"type": "assistant", "message": {"content": "done"}},
+                {
+                    "type": "system",
+                    "subtype": "turn_duration",
+                    "durationMs": 1200,
+                    "timestamp": "2026-11-22T20:00:00Z",
+                },
+                _RECAP_RECORD,
+            ],
+        )
+        return f
+
+    def test_a_recap_is_a_system_entry_and_other_system_records_are_not(self, tmp_path):
+        t = load_transcript(claude_session(self._write(tmp_path)))
+        assert [(e.role, e.metadata) for e in t.entries] == [
+            ("user", None),
+            ("assistant", None),
+            ("system", {"kind": "recap"}),
+        ]
+        recap = t.entries[-1]
+        assert recap.text == "The quokka migration is done and pushed. Next, review it."
+        assert recap.timestamp == "2026-11-22T20:03:48.618Z"
+
+    def test_search_finds_words_only_the_recap_holds(self, tmp_path):
+        s = claude_session(self._write(tmp_path))
+        r = search_session(s, "quokka migration")
+        assert r.match_count == 1
+        assert r.matches[0].entry.role == "system"
+
+    def test_session_dict_and_header_label_the_recap(self, tmp_path):
+        s = claude_session(self._write(tmp_path))
+        s.summary = "The quokka migration is done and pushed."
+        s.summary_is_recap = True
+        assert session_to_dict(s)["summary_is_recap"] is True
+        header = render_markdown(load_transcript(s))
+        assert "- Recap: The quokka migration is done and pushed." in header
+        s.summary_is_recap = False
+        assert "- Summary: The quokka" in render_markdown(load_transcript(s))
+
+
 class TestCodexCommandFailures:
     """A failed Codex command is structured data, not just prose in an
     output, so get --format json can count it as it counts Claude's

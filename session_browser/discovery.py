@@ -78,6 +78,13 @@ class Session:
     # no record of its running processes (Codex, OpenCode, Pi) or for a
     # Claude subagent, whose process is its root's.
     live: bool | None = field(default=None, init=False)
+    # True when *summary* is the agent's own recap of the session rather than
+    # its opening prompt: Claude Code writes one (a system record, subtype
+    # away_summary) for a person coming back to the terminal, and when it is
+    # the last thing in the conversation it says where things stand better
+    # than the first prompt does. Never produced by this browser; it only
+    # reads what the agent wrote.
+    summary_is_recap: bool = field(default=False, init=False)
     # A rewound Codex thread's EARLIER rollout files, oldest first; the newest
     # stays content_path, because that is the file Codex goes on appending to
     # and the one its index names. Codex's Esc-Esc rewind starts a new file
@@ -191,6 +198,8 @@ def _scanned_fields(session: Session | None) -> dict | None:
     kept = {name: getattr(session, name) for name in _SCANNED_FIELDS}
     if session.continued_in is not None:
         kept["continued_in"] = session.continued_in
+    if session.summary_is_recap:
+        kept["summary_is_recap"] = True
     return kept
 
 
@@ -199,9 +208,12 @@ def _session_from_scanned(kept: dict | None) -> Session | None:
         return None
     kept = dict(kept)  # the memo's own copy is written back unchanged
     continued_in = kept.pop("continued_in", None)
+    recap = kept.pop("summary_is_recap", False)
     session = Session(**kept)
     if continued_in is not None:
         session.continued_in = continued_in
+    if recap:
+        session.summary_is_recap = True
     return session
 
 
@@ -424,8 +436,12 @@ def _claude_session(
         summary = label[:120] or summary
     # The tail read finds the last turn walking backwards, and a
     # continued-in record is written after it, so the walk passes it first.
+    # So does a recap that nothing has been said since.
     tail: dict[str, str] = {}
     last_activity = _last_activity_iso(f, "claude", seen=tail)
+    recap = "" if subagent_of is not None else claude_recap_text(tail.get("recap"))
+    if recap:
+        summary = _summary_text(recap)
     session = Session(
         id=session_id,
         provider="claude",
@@ -439,9 +455,25 @@ def _claude_session(
         parent_id=parent_id,
         subagent_kind=subagent_kind,
     )
-    if tail:
+    if "continued_in" in tail:
         session.continued_in = tail["continued_in"]
+    if recap:
+        session.summary_is_recap = True
     return session
+
+
+# Claude Code closes each recap with a pointer to where it can be switched
+# off -- "(disable recaps in /config)" in 77 of the 97 transcripts here that
+# hold one, "(turn off recaps in /config)" in 12 -- which says nothing about
+# the session.
+_RECAP_SETTING_NOTE = re.compile(r"\s*\([^()]*/config\)\s*$")
+
+
+def claude_recap_text(content) -> str:
+    """The text of a Claude Code recap, without its settings pointer."""
+    if not isinstance(content, str):
+        return ""
+    return _RECAP_SETTING_NOTE.sub("", content).strip()
 
 
 def scan_codex() -> list[Session]:
@@ -1725,8 +1757,10 @@ def _last_activity_iso(
 
     *seen*, when given, collects facts recorded after the last turn, which
     this walk passes on the way to it: a Claude "continued-in" record lands
-    there as ``seen["continued_in"]``. Records the walk never reaches are not
-    looked for, so this costs no read of its own.
+    there as ``seen["continued_in"]``, and the newest Claude Code recap (a
+    system record, subtype away_summary) as ``seen["recap"]``, so a recap is
+    found exactly when no turn of the conversation followed it. Records the
+    walk never reaches are not looked for, so this costs no read of its own.
     """
     try:
         size = path.stat().st_size
@@ -1758,10 +1792,15 @@ def _last_activity_iso(
             ts = obj.get("timestamp")
             if ts and _is_turn(obj, provider):
                 return ts
-            if seen is not None and obj.get("type") == "continued-in":
-                target = obj.get("continuedInSessionId")
-                if isinstance(target, str) and target:
-                    seen.setdefault("continued_in", target)
+            if seen is not None:
+                otype = obj.get("type")
+                if otype == "continued-in":
+                    target = obj.get("continuedInSessionId")
+                    if isinstance(target, str) and target:
+                        seen.setdefault("continued_in", target)
+                elif otype == "system" and obj.get("subtype") == "away_summary":
+                    # Walking backwards, so the first one met is the newest.
+                    seen.setdefault("recap", obj.get("content"))
         if read >= size:
             return ""  # whole file scanned, no timestamped turn found
         window *= 4  # last turn is deeper than the tail — widen and retry
