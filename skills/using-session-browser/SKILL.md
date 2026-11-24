@@ -5,7 +5,7 @@ description: Recover what earlier agent sessions actually said — the history, 
 
 # Using Session Browser
 
-`session-browser` searches every Claude Code, Codex, OpenCode and Pi session on
+`session-browser` searches every Claude Code, Codex, OpenCode, Pi and Grok session on
 this machine. Narrow before you read: metadata, then a rare phrase, then a
 window — never a whole transcript to stdout.
 
@@ -89,16 +89,17 @@ where they disagree, `--help` describes the binary you are actually running.
    - **Other agents are writing to the corpus while you read it.** Hit counts
      and roles move under you, and a sibling answering your question can put
      its answer into your results. `--until -30m` gives a stable snapshot;
-     without one, a measurement is not reproducible even by you. A Claude row
-     with `live: true` is still being written, so its counts and ending are
-     as of your read.
+     without one, a measurement is not reproducible even by you. A row with
+     `live: true` is still open in a running agent, so its counts and its
+     `ending` are as of your read.
    - **One conversation can be two files.** A Claude session resumed into a
      new one copies its history there: `continued_in`/`continued_from` link
      the pair. Read the newer one and count them once.
 
    Then: never dismiss a session from its `summary` alone
    — the summary is often just the first user message, so a bare `/model` or
-   `/clear` label can hide hours of work. Every `list` row carries
+   `/clear` label can hide hours of work (or, when `summary_is_recap` is true,
+   Claude Code's own recap of where the session stood). Every `list` row carries
    `total_entries` and `duration_seconds`; `total_entries` is the *primary*
    signal, and the trap runs both ways — a huge `duration_seconds` on a
    2-entry session is a stale record whose file was touched days later, not
@@ -168,6 +169,7 @@ where they disagree, `--help` describes the binary you are actually running.
 | Which subcommands of it were used, how often | `session-browser calls cue --count-by` |
 | When something was first said | `search "phrase" --sort first-said` — `--sort oldest` is by last activity; `first_said_at` is on each result |
 | Today's or yesterday's sessions | `--since today`, or `--since yesterday --until yesterday` (local days) |
+| What was left half-done | `session-browser list --since -1w --ending unfinished` — `ending` on every row says completed, unanswered, mid-action or interrupted (null when it cannot say) |
 | When each turn happened | `get ID --format text` stamps every entry (UTC); JSON has `timestamp` |
 | Every match, not the first N | omit `--limit` entirely — it is unbounded by default |
 | Who said it, without reading snippets | `match_roles` on each result |
