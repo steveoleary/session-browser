@@ -1533,24 +1533,60 @@ def _fill_endings_and_live(sessions: list[Session]) -> set[str]:
     return changed
 
 
+def _scope_project(base: str) -> str:
+    """The project name a scope on *base* also takes worktrees of."""
+    return worktree_project(base) or os.path.basename(base.rstrip(os.sep))
+
+
+def _in_scope(cwd: str, base: str, project: str, cwd_project: str) -> bool:
+    """Whether a session run in *cwd* falls in the scope on *base*.
+
+    At or under *base* (the CLI's --here rule), or run in a worktree of the
+    project *base* names. *project* is ``_scope_project(base)`` and
+    *cwd_project* is ``worktree_project(cwd)``, passed in so a caller testing
+    many pairs works each one out once.
+    """
+    return (
+        cwd == base
+        or cwd.startswith(base + os.sep)
+        or bool(project and cwd_project == project)
+    )
+
+
+def _scope_name(path: str, max_len: int = 28) -> str:
+    """What a scope on *path* is called: its worktree's project, or its name."""
+    name = worktree_project(path)
+    if not name:
+        return _project_name(path, max_len)
+    return name if len(name) <= max_len else name[: max_len - 1] + "…"
+
+
 class ProjectChoice(NamedTuple):
-    """One directory the picker offers to scope the session list to."""
+    """One project the picker offers to scope the session list to."""
 
     path: str
-    # Sessions at or under *path* -- exactly what picking it shows, since the
-    # scope is a path prefix (the same rule as `p` and --here).
+    # The project's name: the directory's own, or for a worktree checkout
+    # whose project was never run in directly, the project its layout names.
+    name: str
+    # Sessions picking it shows: at or under *path*, plus the project's
+    # worktrees (the rule `p` and _cwd_scope apply).
     sessions: int
-    # Newest activity among the sessions recorded at exactly *path*. Not the
-    # prefix group's: ~ contains every project, so ranking by the group would
-    # float the broadest directories to the top whatever was last worked in.
+    # Newest activity among the sessions run at exactly *path* or in one of
+    # the project's worktrees. Not the prefix group's: ~ contains every
+    # project, so ranking by the group would float the broadest directories
+    # to the top whatever was last worked in.
     latest: str
 
 
 def project_choices(sessions: Sequence[Session]) -> list[ProjectChoice]:
-    """Every working directory in *sessions*, most recently used first.
+    """Every project in *sessions*, most recently used first.
 
-    Sessions with no recorded cwd belong to no project and are not counted;
-    a path scope excludes them anyway.
+    A worktree checkout is not a row of its own: its sessions are counted
+    and dated under the directory named for its project, as the project
+    column files them. A project known only through its worktrees gets one
+    row, on its newest checkout, since picking any checkout of it scopes to
+    all of them. Sessions with no recorded cwd belong to no project and are
+    not counted; a path scope excludes them anyway.
     """
     exact: dict[str, list] = {}  # cwd -> [count, latest sort_key]
     for s in sessions:
@@ -1563,13 +1599,39 @@ def project_choices(sessions: Sequence[Session]) -> list[ProjectChoice]:
         else:
             entry[0] += 1
             entry[1] = max(entry[1], key)
+    tree = {cwd: worktree_project(cwd) for cwd in exact}
+    # Newest worktree session per project, and the checkout it was run in.
+    checkouts: dict[str, tuple[str, str]] = {}  # project -> (latest, cwd)
+    for cwd, project in tree.items():
+        if project:
+            latest = exact[cwd][1]
+            if project not in checkouts or latest > checkouts[project][0]:
+                checkouts[project] = (latest, cwd)
+    rows: list[tuple[str, str, str]] = []  # (path, name, latest)
+    homes = set()
+    for cwd, project in tree.items():
+        if project:
+            continue
+        name = os.path.basename(cwd.rstrip(os.sep)) or cwd
+        homes.add(name)
+        latest = exact[cwd][1]
+        if name in checkouts:
+            latest = max(latest, checkouts[name][0])
+        rows.append((cwd, name, latest))
+    rows.extend(
+        (cwd, project, latest)
+        for project, (latest, cwd) in checkouts.items()
+        if project not in homes
+    )
     choices = []
-    for path, (_, latest) in exact.items():
-        prefix = path + os.sep
+    for path, name, latest in rows:
+        project = _scope_project(path)
         total = sum(
-            n for d, (n, _) in exact.items() if d == path or d.startswith(prefix)
+            n
+            for cwd, (n, _) in exact.items()
+            if _in_scope(cwd, path, project, tree[cwd])
         )
-        choices.append(ProjectChoice(path, total, latest))
+        choices.append(ProjectChoice(path, name, total, latest))
     choices.sort(key=lambda c: c.latest, reverse=True)
     return choices
 
@@ -1647,8 +1709,7 @@ class ProjectPicker(ModalScreen["str | None"]):
         self.query_one("#project-filter", Input).focus()
 
     def _row(self, choice: ProjectChoice, width: int) -> str:
-        name = os.path.basename(choice.path.rstrip(os.sep)) or choice.path
-        name = _ellipsize(name, width).ljust(width)
+        name = _ellipsize(choice.name, width).ljust(width)
         mark = "[cyan]›[/]" if choice.path == self._current else " "
         return (
             f"{mark} [bold]{_escape_markup(name)}[/]  "
@@ -1660,17 +1721,18 @@ class ProjectPicker(ModalScreen["str | None"]):
         from textual.widgets import OptionList
 
         q = query.strip().lower()
-        shown = [c for c in self._choices if not q or q in c.path.lower()]
+        shown = [
+            c
+            for c in self._choices
+            if not q or q in c.path.lower() or q in c.name.lower()
+        ]
         if q:
             # A directory named for the query outranks one that only sits
             # under it: typing "alpha" means alpha, not alpha's newest
             # worktree. Stable, so recency still orders each tier.
-            shown.sort(
-                key=lambda c: q not in os.path.basename(c.path.rstrip(os.sep)).lower()
-            )
+            shown.sort(key=lambda c: q not in c.name.lower())
         options = self.query_one("#project-options", OptionList)
-        names = [os.path.basename(c.path.rstrip(os.sep)) for c in shown]
-        width = min(self._NAME_WIDTH, max((len(n) for n in names), default=0))
+        width = min(self._NAME_WIDTH, max((len(c.name) for c in shown), default=0))
         prompts = [self._row(c, width) for c in shown]
         self._shown = [c.path for c in shown]
         if not q:
@@ -2445,16 +2507,11 @@ class SessionBrowser(App):
         base = self._scope
         if base is None:
             return list(sessions)
-        project = worktree_project(base) or os.path.basename(base.rstrip(os.sep))
+        project = _scope_project(base)
         return [
             s
             for s in sessions
-            if s.cwd
-            and (
-                s.cwd == base
-                or s.cwd.startswith(base + os.sep)
-                or (project and worktree_project(s.cwd) == project)
-            )
+            if s.cwd and _in_scope(s.cwd, base, project, worktree_project(s.cwd))
         ]
 
     def _update_meta_count(self) -> None:
@@ -2479,7 +2536,7 @@ class SessionBrowser(App):
             return "all projects"
         if self._scope == self._cwd_base:
             return "this project"
-        return f"project {_escape_markup(_project_name(self._scope, 28))}"
+        return f"project {_escape_markup(_scope_name(self._scope))}"
 
     def action_toggle_here(self) -> None:
         """Scope to the launch directory, or clear whatever scope is set --
@@ -2506,8 +2563,7 @@ class SessionBrowser(App):
         elif path == self._cwd_base:
             search.placeholder = "Search sessions… (this project)"
         else:
-            name = _project_name(path, 28)
-            search.placeholder = f"Search sessions… ({name})"
+            search.placeholder = f"Search sessions… ({_scope_name(path)})"
         if self._filter_query:
             self._rebuild_filtered(self._filter_query)
         else:

@@ -3701,10 +3701,51 @@ class TestProjectChoices:
 
         assert [(c.path, c.sessions) for c in choices] == [
             ("/w/beta", 2),
-            ("/w/alpha/.claude/worktrees/fix", 1),
-            # Picking alpha shows its worktree session too, so it counts it.
+            # The worktree is no row of its own: picking alpha shows its
+            # session, so alpha counts it and is dated by it.
             ("/w/alpha", 2),
             ("/w/gamma", 1),
+        ]
+
+    def test_a_worktree_elsewhere_is_filed_under_its_project(self):
+        """~/Projects/worktrees/<project>/<checkout> sits outside the project's
+        directory, so only the worktree rule puts it in alpha's scope."""
+        from session_browser.app import project_choices
+
+        sessions = [
+            Session(id="a", provider="claude", cwd="/w/alpha", updated_at="2026-01-01"),
+            Session(
+                id="t",
+                provider="claude",
+                cwd="/w/worktrees/alpha/fix-login",
+                updated_at="2026-04-01",
+            ),
+            Session(id="b", provider="claude", cwd="/w/beta", updated_at="2026-03-01"),
+        ]
+
+        choices = project_choices(sessions)
+
+        assert [(c.path, c.name, c.sessions) for c in choices] == [
+            ("/w/alpha", "alpha", 2),
+            ("/w/beta", "beta", 1),
+        ]
+
+    def test_a_project_known_only_by_its_worktrees_is_one_row(self):
+        from session_browser.app import project_choices
+
+        sessions = [
+            Session(id=i, provider="claude", cwd=c, updated_at=u)
+            for i, c, u in [
+                ("1", "/w/worktrees/delta/one", "2026-01-01"),
+                ("2", "/w/worktrees/delta/two", "2026-02-01"),
+                ("3", "/h/.herdr/worktrees/delta/calm-river", "2026-01-15"),
+            ]
+        ]
+
+        choices = project_choices(sessions)
+
+        assert [(c.path, c.name, c.sessions) for c in choices] == [
+            ("/w/worktrees/delta/two", "delta", 3),
         ]
 
     def test_a_parent_directory_is_ranked_by_its_own_sessions(self):
@@ -3764,8 +3805,36 @@ class TestProjectPicker:
             await pilot.press("down", "down", "enter")
             await pilot.pause()
 
-            assert app._scope == "/w/alpha/.claude/worktrees/fix"
-            assert [s.id for s in app._filtered] == ["a2"]
+            assert app._scope == "/w/alpha"
+            assert {s.id for s in app._filtered} == {"a1", "a2"}
+
+    async def test_a_worktree_only_project_is_scoped_and_named_by_project(self):
+        from session_browser.app import ProjectPicker
+
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 34)) as pilot:
+            sessions = _project_sessions() + [
+                Session(
+                    id=f"d{i}",
+                    provider="claude",
+                    summary=f"session d{i}",
+                    cwd=f"/w/worktrees/delta/{c}",
+                    updated_at=u,
+                )
+                for i, (c, u) in enumerate(
+                    [("one", "2026-01-01"), ("two", "2026-01-02")]
+                )
+            ]
+            await _install_fake_sessions(app, pilot, sessions)
+            app.query_one("#session-table").focus()
+            await pilot.press("P")
+            await pilot.pause()
+            assert isinstance(app.screen, ProjectPicker)
+            await pilot.press(*"delta", "enter")
+            await pilot.pause()
+
+            assert {s.id for s in app._filtered} == {"d0", "d1"}
+            assert "project delta" in str(app._app_meta.render())
 
     async def test_escape_leaves_the_scope_alone(self):
         app = SessionBrowser()
@@ -3789,7 +3858,7 @@ class TestProjectPicker:
             # the All projects row.
             await pilot.press("P")
             await pilot.pause()
-            await pilot.press("ctrl+p", "ctrl+p", "ctrl+p", "ctrl+p", "enter")
+            await pilot.press("ctrl+p", "ctrl+p", "ctrl+p", "enter")
             await pilot.pause()
             assert app._scope is None
 
