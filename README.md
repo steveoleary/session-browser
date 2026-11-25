@@ -292,7 +292,8 @@ Press `?` in the app for the complete key map.
 | `i` | Copy the canonical session id |
 | `e` / `E` | Copy / export the conversation |
 | `D` | Delete the session permanently, after a confirmation naming what goes (every provider, OpenCode from 2.x; subagents go with their parent) |
-| `p` | Toggle this-project scope |
+| `p` | Toggle this-project scope (also clears a picked project) |
+| `P` | Pick a project to scope to: type to filter, Enter to choose |
 | `.` | Show or hide sessions your ignore file hides |
 | `?` | Show all shortcuts |
 | `q` | Quit |

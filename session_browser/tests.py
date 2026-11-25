@@ -3676,6 +3676,146 @@ class TestResponsiveLayout:
             assert not isinstance(app.screen, ShortcutHelp)
 
 
+def _project_sessions() -> list[Session]:
+    """Sessions across three projects, one nested worktree and one with no cwd."""
+    rows = [
+        ("a1", "/w/alpha", "2026-03-01"),
+        ("a2", "/w/alpha/.claude/worktrees/fix", "2026-03-05"),
+        ("b1", "/w/beta", "2026-03-09"),
+        ("b2", "/w/beta", "2026-03-02"),
+        ("g1", "/w/gamma", "2026-02-01"),
+        ("n1", "", "2026-03-10"),
+    ]
+    return [
+        Session(id=i, provider="claude", summary=f"session {i}", cwd=c, updated_at=u)
+        for i, c, u in rows
+    ]
+
+
+@pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
+class TestProjectChoices:
+    def test_most_recently_used_first_and_counts_include_subdirectories(self):
+        from session_browser.app import project_choices
+
+        choices = project_choices(_project_sessions())
+
+        assert [(c.path, c.sessions) for c in choices] == [
+            ("/w/beta", 2),
+            ("/w/alpha/.claude/worktrees/fix", 1),
+            # Picking alpha shows its worktree session too, so it counts it.
+            ("/w/alpha", 2),
+            ("/w/gamma", 1),
+        ]
+
+    def test_a_parent_directory_is_ranked_by_its_own_sessions(self):
+        """~ contains every project; ranking it by its subtree's newest
+        session would pin it to the top of the list for good."""
+        from session_browser.app import project_choices
+
+        sessions = [
+            Session(id="h", provider="claude", cwd="/w", updated_at="2026-01-01"),
+            Session(id="x", provider="claude", cwd="/w/x", updated_at="2026-05-01"),
+        ]
+
+        choices = project_choices(sessions)
+
+        assert [(c.path, c.sessions) for c in choices] == [("/w/x", 1), ("/w", 2)]
+
+    def test_a_sibling_sharing_a_name_prefix_is_not_counted(self):
+        from session_browser.app import project_choices
+
+        sessions = [
+            Session(id="1", provider="claude", cwd="/w/app", updated_at="2026-01-02"),
+            Session(id="2", provider="claude", cwd="/w/app2", updated_at="2026-01-01"),
+        ]
+
+        assert [c.sessions for c in project_choices(sessions)] == [1, 1]
+
+
+@pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
+@pytest.mark.asyncio
+class TestProjectPicker:
+    async def _open(self, app, pilot):
+        from session_browser.app import ProjectPicker
+
+        await _install_fake_sessions(app, pilot, _project_sessions())
+        app.query_one("#session-table").focus()
+        await pilot.press("P")
+        await pilot.pause()
+        assert isinstance(app.screen, ProjectPicker)
+
+    async def test_typing_filters_and_enter_scopes_the_list(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 34)) as pilot:
+            await self._open(app, pilot)
+            await pilot.press(*"alpha")
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app._scope == "/w/alpha"
+            assert {s.id for s in app._filtered} == {"a1", "a2"}
+            assert "project alpha" in str(app._app_meta.render())
+
+    async def test_arrow_keys_choose_a_row_below_the_first(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 34)) as pilot:
+            await self._open(app, pilot)
+            # Unfiltered, row 0 is "All projects" and row 1 the newest (beta).
+            await pilot.press("down", "down", "enter")
+            await pilot.pause()
+
+            assert app._scope == "/w/alpha/.claude/worktrees/fix"
+            assert [s.id for s in app._filtered] == ["a2"]
+
+    async def test_escape_leaves_the_scope_alone(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 34)) as pilot:
+            await self._open(app, pilot)
+            await pilot.press("down", "escape")
+            await pilot.pause()
+
+            assert app._scope is None
+            assert len(app._filtered) == len(_project_sessions())
+
+    async def test_all_projects_row_and_p_both_clear_a_picked_scope(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 34)) as pilot:
+            await self._open(app, pilot)
+            await pilot.press(*"gamma", "enter")
+            await pilot.pause()
+            assert app._scope == "/w/gamma"
+
+            # Reopened, the picker lands on the scope in force; up reaches
+            # the All projects row.
+            await pilot.press("P")
+            await pilot.pause()
+            await pilot.press("ctrl+p", "ctrl+p", "ctrl+p", "ctrl+p", "enter")
+            await pilot.pause()
+            assert app._scope is None
+
+            await pilot.press("P")
+            await pilot.pause()
+            await pilot.press(*"beta", "enter")
+            await pilot.pause()
+            assert app._scope == "/w/beta"
+            await pilot.press("p")
+            await pilot.pause()
+            assert app._scope is None
+            assert len(app._filtered) == len(_project_sessions())
+
+    async def test_scope_composes_with_search(self):
+        app = SessionBrowser()
+        async with app.run_test(size=(120, 34)) as pilot:
+            await self._open(app, pilot)
+            await pilot.press(*"beta", "enter")
+            await pilot.pause()
+            app._rebuild_filtered("session b1")
+
+            assert [s.id for s in app._filtered] == ["b1"]
+            app._rebuild_filtered("session a1")
+            assert app._filtered == []
+
+
 @pytest.mark.skipif(not _HAS_TEXTUAL, reason="textual not installed")
 @pytest.mark.asyncio
 class TestCopySessionId:
@@ -4513,8 +4653,7 @@ class TestProjectName:
 
     def test_this_project_scope_takes_the_projects_worktrees(self):
         app = SessionBrowser()
-        app._here_only = True
-        app._cwd_base = "/Users/u/Projects/Shop"
+        app._cwd_base = app._scope = "/Users/u/Projects/Shop"
 
         def s(sid, cwd):
             return Session(id=sid, provider="claude", cwd=cwd)

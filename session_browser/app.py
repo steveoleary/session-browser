@@ -401,6 +401,7 @@ _EDIT_BLOCKED_ACTIONS = frozenset(
         "prev_match",
         "refresh_sessions",
         "toggle_here",
+        "pick_project",
         "toggle_focus_mode",
         "toggle_matches_only",
         "cycle_entry_filter",
@@ -1407,7 +1408,7 @@ class ShortcutHelp(ModalScreen[None]):
            [cyan]s[/] find in session       [cyan]m[/] matching blocks only
            [cyan]p[/] this-project scope     [cyan]f[/] filter entries
            [cyan]space[/] expand subagents   [cyan]T[/] flat / tree
-           [cyan].[/] show ignored sessions
+           [cyan].[/] show ignored sessions  [cyan]P[/] pick a project
 
 [bold]Layout[/]     [cyan]z[/] focus current pane    [cyan]Esc[/] step back
 
@@ -1530,6 +1531,195 @@ def _fill_endings_and_live(sessions: list[Session]) -> set[str]:
     fill_live(sessions)
     changed.update(s.id for s in sessions if s.live != before[s.id])
     return changed
+
+
+class ProjectChoice(NamedTuple):
+    """One directory the picker offers to scope the session list to."""
+
+    path: str
+    # Sessions at or under *path* -- exactly what picking it shows, since the
+    # scope is a path prefix (the same rule as `p` and --here).
+    sessions: int
+    # Newest activity among the sessions recorded at exactly *path*. Not the
+    # prefix group's: ~ contains every project, so ranking by the group would
+    # float the broadest directories to the top whatever was last worked in.
+    latest: str
+
+
+def project_choices(sessions: Sequence[Session]) -> list[ProjectChoice]:
+    """Every working directory in *sessions*, most recently used first.
+
+    Sessions with no recorded cwd belong to no project and are not counted;
+    a path scope excludes them anyway.
+    """
+    exact: dict[str, list] = {}  # cwd -> [count, latest sort_key]
+    for s in sessions:
+        if not s.cwd:
+            continue
+        key = s.sort_key
+        entry = exact.get(s.cwd)
+        if entry is None:
+            exact[s.cwd] = [1, key]
+        else:
+            entry[0] += 1
+            entry[1] = max(entry[1], key)
+    choices = []
+    for path, (_, latest) in exact.items():
+        prefix = path + os.sep
+        total = sum(
+            n for d, (n, _) in exact.items() if d == path or d.startswith(prefix)
+        )
+        choices.append(ProjectChoice(path, total, latest))
+    choices.sort(key=lambda c: c.latest, reverse=True)
+    return choices
+
+
+class ProjectPicker(ModalScreen["str | None"]):
+    """Scope the session list to any project, not only the launch directory.
+
+    Dismisses with the chosen path, ``""`` for all projects, or None when
+    cancelled. Focus stays in the filter box throughout: the arrow keys and
+    Enter drive the list from there, so typing and choosing never need a
+    focus switch.
+    """
+
+    CSS = """
+    ProjectPicker {
+        align: center middle;
+        background: $background;
+    }
+    #project-picker {
+        width: 100;
+        max-width: 94%;
+        height: 80%;
+        padding: 1 2;
+        background: $surface;
+        border: round $accent;
+    }
+    #project-filter {
+        margin-bottom: 1;
+    }
+    #project-options {
+        height: 1fr;
+        border: none;
+        background: $surface;
+    }
+    #project-hint {
+        margin-top: 1;
+    }
+    """
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("down,ctrl+n", "cursor(1)", "Down", show=False),
+        Binding("up,ctrl+p", "cursor(-1)", "Up", show=False),
+        Binding("pagedown", "page(1)", "Page down", show=False),
+        Binding("pageup", "page(-1)", "Page up", show=False),
+    ]
+
+    # The name column's width cap; longer names are ellipsized.
+    _NAME_WIDTH = 28
+
+    def __init__(self, choices: Sequence[ProjectChoice], current: str | None) -> None:
+        super().__init__()
+        self._choices = list(choices)
+        self._current = current
+        # Path per row on screen; "" is the all-projects row.
+        self._shown: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import OptionList
+
+        with Vertical(id="project-picker"):
+            yield Label("[bold]Scope sessions to a project[/]")
+            yield Input(placeholder="Filter by name or path…", id="project-filter")
+            options = OptionList(id="project-options")
+            options.can_focus = False
+            yield options
+            yield Label(
+                "[dim]↑/↓ move  ·  Enter choose  ·  Esc cancel  ·  "
+                "a directory includes the ones under it[/]",
+                id="project-hint",
+            )
+
+    def on_mount(self) -> None:
+        self._refill("")
+        self.query_one("#project-filter", Input).focus()
+
+    def _row(self, choice: ProjectChoice, width: int) -> str:
+        name = os.path.basename(choice.path.rstrip(os.sep)) or choice.path
+        name = _ellipsize(name, width).ljust(width)
+        mark = "[cyan]›[/]" if choice.path == self._current else " "
+        return (
+            f"{mark} [bold]{_escape_markup(name)}[/]  "
+            f"{choice.sessions:>5,}  {_relative_time(choice.latest):>10}  "
+            f"[dim]{_escape_markup(_tilde(choice.path))}[/]"
+        )
+
+    def _refill(self, query: str) -> None:
+        from textual.widgets import OptionList
+
+        q = query.strip().lower()
+        shown = [c for c in self._choices if not q or q in c.path.lower()]
+        if q:
+            # A directory named for the query outranks one that only sits
+            # under it: typing "alpha" means alpha, not alpha's newest
+            # worktree. Stable, so recency still orders each tier.
+            shown.sort(
+                key=lambda c: q not in os.path.basename(c.path.rstrip(os.sep)).lower()
+            )
+        options = self.query_one("#project-options", OptionList)
+        names = [os.path.basename(c.path.rstrip(os.sep)) for c in shown]
+        width = min(self._NAME_WIDTH, max((len(n) for n in names), default=0))
+        prompts = [self._row(c, width) for c in shown]
+        self._shown = [c.path for c in shown]
+        if not q:
+            mark = "[cyan]›[/]" if self._current is None else " "
+            prompts.insert(0, f"{mark} [bold]All projects[/]")
+            self._shown.insert(0, "")
+        options.set_options(prompts)
+        if not prompts:
+            return
+        # Land on the scope in force, so Enter on an untouched picker keeps it.
+        current = "" if self._current is None else self._current
+        options.highlighted = (
+            self._shown.index(current) if current in self._shown else 0
+        )
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        event.stop()
+        self._refill(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self._choose(self.query_one("#project-options").highlighted)
+
+    def on_option_list_option_selected(self, event) -> None:
+        """A mouse click on a row chooses it outright."""
+        event.stop()
+        self._choose(event.option_index)
+
+    def _choose(self, index: int | None) -> None:
+        if index is None or not self._shown:
+            return
+        self.dismiss(self._shown[index])
+
+    def action_cursor(self, step: int) -> None:
+        options = self.query_one("#project-options")
+        if step > 0:
+            options.action_cursor_down()
+        else:
+            options.action_cursor_up()
+
+    def action_page(self, step: int) -> None:
+        options = self.query_one("#project-options")
+        if step > 0:
+            options.action_page_down()
+        else:
+            options.action_page_up()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 def _tilde(path: str) -> str:
@@ -1752,6 +1942,7 @@ class SessionBrowser(App):
         Binding("[", "prev_tool", "Previous tool", show=False),
         Binding("r", "refresh_sessions", "Refresh", show=False),
         Binding("p", "toggle_here", "This project", show=False),
+        Binding("P", "pick_project", "Pick project", show=False),
         Binding("full_stop", "toggle_ignored", "Show ignored", show=False),
         # Vim-style navigation (hidden from footer to keep it uncluttered)
         Binding("j", "nav_down", "Down", show=False),
@@ -1864,7 +2055,10 @@ class SessionBrowser(App):
         self._suppress_table_highlights = False
         self._table_rebuild_generation = 0
         self._table_column_mode: str | None = None
-        self._here_only: bool = False
+        # The directory the list is scoped to (path-prefix, like --here), or
+        # None for all projects. `p` toggles the launch directory; `P` picks
+        # any directory the sessions were run in.
+        self._scope: str | None = None
         self._cwd_base: str = os.getcwd()
         self._focus_mode: bool = False
         # Terminal drivers may queue a burst such as `/speaker` before the
@@ -1990,7 +2184,7 @@ class SessionBrowser(App):
             location = "reading"
         else:
             location = "list"
-        scope = "this project" if self._here_only else "all projects"
+        scope = self._scope_label()
         if self.size.width < 100:
             hint = "[cyan]tab[/] switch  ·  [cyan]?[/] keys"
         elif self._focus_mode:
@@ -2237,8 +2431,8 @@ class SessionBrowser(App):
         self._apply_filter(self._pending_query)
 
     def _cwd_scope(self, sessions: list[Session]) -> list[Session]:
-        """Restrict to sessions rooted at (or under) the launch directory, and
-        to sessions run in a worktree of the project launched in.
+        """Restrict to sessions rooted at (or under) the scoped directory, and
+        to sessions run in a worktree of the project it names.
 
         The prefix rule mirrors the CLI's --here, so a session opened one
         directory up from a subproject doesn't leak in. A worktree usually
@@ -2248,9 +2442,9 @@ class SessionBrowser(App):
         project their layout names (see ``worktree_project``). Sessions with
         no recorded cwd are excluded, same as --here.
         """
-        if not self._here_only:
+        base = self._scope
+        if base is None:
             return list(sessions)
-        base = self._cwd_base
         project = worktree_project(base) or os.path.basename(base.rstrip(os.sep))
         return [
             s
@@ -2265,7 +2459,7 @@ class SessionBrowser(App):
 
     def _update_meta_count(self) -> None:
         """Refresh only the header count, leaving the status bar alone."""
-        scope = "this project" if self._here_only else "all projects"
+        scope = self._scope_label()
         count = f"{len(self._filtered):,}"
         if len(self._filtered) != len(self._all_sessions):
             count = f"{count} of {len(self._all_sessions):,}"
@@ -2280,12 +2474,40 @@ class SessionBrowser(App):
         self._update_meta_count()
         self._update_context_bar()
 
+    def _scope_label(self) -> str:
+        if self._scope is None:
+            return "all projects"
+        if self._scope == self._cwd_base:
+            return "this project"
+        return f"project {_escape_markup(_project_name(self._scope, 28))}"
+
     def action_toggle_here(self) -> None:
-        self._here_only = not self._here_only
+        """Scope to the launch directory, or clear whatever scope is set --
+        a picked project included, so `p` is always one key back to all."""
+        self._set_scope(None if self._scope is not None else self._cwd_base)
+
+    def action_pick_project(self) -> None:
+        choices = project_choices(self._all_sessions)
+        if not choices:
+            self._flash_status("No session records a working directory", ok=False)
+            return
+        self.push_screen(ProjectPicker(choices, self._scope), self._project_picked)
+
+    def _project_picked(self, path: str | None) -> None:
+        if path is None:
+            return
+        self._set_scope(path or None)
+
+    def _set_scope(self, path: str | None) -> None:
+        self._scope = path
         search = self.query_one("#global-search", SearchInput)
-        search.placeholder = (
-            "Search sessions… (this project)" if self._here_only else "Search sessions…"
-        )
+        if path is None:
+            search.placeholder = "Search sessions…"
+        elif path == self._cwd_base:
+            search.placeholder = "Search sessions… (this project)"
+        else:
+            name = _project_name(path, 28)
+            search.placeholder = f"Search sessions… ({name})"
         if self._filter_query:
             self._rebuild_filtered(self._filter_query)
         else:
@@ -2293,9 +2515,9 @@ class SessionBrowser(App):
             self._rebuild_table()
         self._update_status_count()
         self._flash_status(
-            f"Scope: this project ({self._cwd_base})"
-            if self._here_only
-            else "Scope: all projects"
+            "Scope: all projects"
+            if path is None
+            else f"Scope: {self._scope_label()} ({_escape_markup(_tilde(path))})"
         )
 
     def action_toggle_ignored(self) -> None:
